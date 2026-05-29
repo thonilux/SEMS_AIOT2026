@@ -20,7 +20,6 @@ Ready:
 Needs attention before first ESP32 flashing:
 
 - GitHub CLI is not installed
-- `npm` has a permission/runtime issue from this shell
 
 New hardware status:
 
@@ -28,6 +27,7 @@ New hardware status:
 - USB serial is detected as CH340 on `COM3`
 - User PowerShell can run `pio device list` without the previous cache traceback
 - Project-local PlatformIO core is active and avoids the obsolete global-core warning
+- npm/npx now work from this shell using the bundled Node.js npm
 
 ## 🧪 Tool Check Results
 
@@ -39,7 +39,8 @@ New hardware status:
 | PlatformIO Core | Ready | `PlatformIO Core, version 6.1.18` | Project uses local `firmware/pio-core` |
 | VS Code CLI | Ready | `1.108.2` | Works, but printed a Crashpad access warning |
 | Node.js | Ready | `v22.12.0` | Works |
-| npm | Fix needed | EPERM on `C:\Users\Hisbull` | Likely Windows permission/path issue |
+| npm | Ready | `10.9.0` | Fixed by removing stale user-global npm 8.7.0 shim |
+| npx | Ready | `10.9.0` | Uses bundled Node.js npx |
 | GitHub CLI | Missing | `gh` not recognized | Optional, but useful |
 | Serial / USB | Ready | `USB-SERIAL CH340 (COM3)` | ESP32-WROOM board detected |
 | Git remote | Ready | `https://github.com/thonilux/pm1611-rs485-reader.git` | Push already works |
@@ -180,7 +181,7 @@ pio system info
 
 If other old PlatformIO projects need missing global packages later, PlatformIO will download them again.
 
-## ⚠️ npm Issue
+## ✅ npm Issue
 
 Node.js works:
 
@@ -188,21 +189,56 @@ Node.js works:
 v22.12.0
 ```
 
-But `npm --version` failed with:
+Initial failure:
 
 ```text
 Error: EPERM: operation not permitted, lstat 'C:\Users\Hisbull'
 ```
 
-This project does not need npm yet. It may become useful later if the web UI grows and uses a frontend build step.
+Root cause:
 
-Recommended later fix:
+```text
+C:\Users\Hisbull\AppData\Roaming\npm
+```
 
-- Run the same command from a normal VS Code terminal.
-- Check folder ownership/permission for `C:\Users\Hisbull`.
-- Reinstall Node.js if npm remains broken.
+contained an old user-global npm `8.7.0`. The Node.js installer `npm.cmd` checks the user npm prefix first, so it selected that stale user-global npm instead of the bundled npm.
 
-For the current firmware baseline, this is not blocking.
+Fix applied:
+
+```text
+Moved old npm/npx shims and npm package to:
+C:\Users\Hisbull\AppData\Roaming\npm\_backup_old_npm_8_7_0
+```
+
+Moved files:
+
+```text
+npm
+npm.cmd
+npm.ps1
+npx
+npx.cmd
+npx.ps1
+node_modules\npm
+```
+
+Other global tools in `C:\Users\Hisbull\AppData\Roaming\npm` were left untouched.
+
+Retest result:
+
+```text
+npm --version -> 10.9.0
+npx --version -> 10.9.0
+```
+
+Active paths:
+
+```text
+C:\Program Files\nodejs\npm.cmd
+C:\Program Files\nodejs\npx.cmd
+```
+
+npm is now ready for future web UI tooling if needed.
 
 ## 🔌 Serial / USB Readiness
 

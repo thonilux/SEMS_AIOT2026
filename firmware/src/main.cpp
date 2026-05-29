@@ -1,0 +1,65 @@
+#include <Arduino.h>
+#include "Version.h"
+
+namespace {
+constexpr uint32_t kSerialBaud = 115200;
+constexpr uint32_t kHeartbeatIntervalMs = 1000;
+
+uint32_t lastHeartbeatMs = 0;
+uint32_t heartbeatCount = 0;
+
+void printBootBanner() {
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println(FW_NAME);
+  Serial.print("Firmware: ");
+  Serial.println(FW_VERSION);
+  Serial.println("Target: ESP32-WROOM / esp32dev");
+  Serial.println("Project: PM1611 RS485 Reader");
+  Serial.println("Status: boot baseline online");
+  Serial.println("========================================");
+  Serial.println();
+}
+
+void printChipInfo() {
+  Serial.print("Chip revision: ");
+  Serial.println(ESP.getChipRevision());
+
+  Serial.print("CPU frequency: ");
+  Serial.print(ESP.getCpuFreqMHz());
+  Serial.println(" MHz");
+
+  Serial.print("Flash size: ");
+  Serial.print(ESP.getFlashChipSize() / (1024 * 1024));
+  Serial.println(" MB");
+
+  Serial.print("Free heap: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+}
+}  // namespace
+
+void setup() {
+  Serial.begin(kSerialBaud);
+  delay(500);
+
+  printBootBanner();
+  printChipInfo();
+}
+
+void loop() {
+  const uint32_t nowMs = millis();
+
+  if (nowMs - lastHeartbeatMs >= kHeartbeatIntervalMs) {
+    lastHeartbeatMs = nowMs;
+    heartbeatCount++;
+
+    Serial.print("heartbeat=");
+    Serial.print(heartbeatCount);
+    Serial.print(" uptime_ms=");
+    Serial.print(nowMs);
+    Serial.print(" free_heap=");
+    Serial.println(ESP.getFreeHeap());
+  }
+}
+

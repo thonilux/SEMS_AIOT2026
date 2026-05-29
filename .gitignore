@@ -1,0 +1,16 @@
+# PlatformIO generated files
+.pio/
+.platformio/
+firmware/.pio/
+firmware/.platformio/
+firmware/pio-core/
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+
+# Editor and OS noise
+.vscode/
+Thumbs.db
+Desktop.ini

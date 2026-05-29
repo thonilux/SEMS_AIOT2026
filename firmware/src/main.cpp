@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include "AppMode.h"
 #include "PinMap.h"
 #include "Version.h"
@@ -7,12 +8,15 @@ namespace {
 constexpr uint32_t kSerialBaud = 115200;
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
 constexpr uint32_t kRuntimeConfigHoldMs = 5000;
+constexpr char kConfigApSsidPrefix[] = "PM1611-SETUP";
+constexpr char kConfigApPassword[] = "PM123456";
 
 uint32_t lastHeartbeatMs = 0;
 uint32_t heartbeatCount = 0;
 uint32_t configButtonPressedSinceMs = 0;
 uint32_t lastConfigButtonProgressSecond = 0;
 AppMode currentMode = AppMode::Normal;
+bool configApStarted = false;
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
@@ -71,8 +75,51 @@ void printModeInfo() {
   Serial.println(appModeToString(currentMode));
 }
 
+String getMacSuffix() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  char suffix[7] = {};
+  snprintf(suffix, sizeof(suffix), "%06X", static_cast<uint32_t>(chipId & 0xFFFFFF));
+  return String(suffix);
+}
+
+String getConfigApSsid() {
+  return String(kConfigApSsidPrefix) + "-" + getMacSuffix();
+}
+
+void startConfigAccessPoint() {
+  if (configApStarted) {
+    return;
+  }
+
+  const String ssid = getConfigApSsid();
+  const IPAddress apIp(192, 168, 4, 1);
+  const IPAddress gateway(192, 168, 4, 1);
+  const IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIp, gateway, subnet);
+
+  const bool started = WiFi.softAP(ssid.c_str(), kConfigApPassword);
+  if (!started) {
+    Serial.println("Config AP start failed");
+    return;
+  }
+
+  configApStarted = true;
+  Serial.println("Config AP started");
+  Serial.print("AP SSID: ");
+  Serial.println(ssid);
+  Serial.print("AP password: ");
+  Serial.println(kConfigApPassword);
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+}
+
 void enterConfigMode() {
   if (currentMode == AppMode::Config) {
+    startConfigAccessPoint();
     return;
   }
 
@@ -80,11 +127,13 @@ void enterConfigMode() {
   setBuiltinLed(true);
   Serial.println("Config button hold confirmed -> CONFIG_MODE");
   printModeInfo();
+  startConfigAccessPoint();
 }
 
 void handleConfigButton(uint32_t nowMs) {
   if (currentMode == AppMode::Config) {
     setBuiltinLed(true);
+    startConfigAccessPoint();
     return;
   }
 

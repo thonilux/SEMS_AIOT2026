@@ -63,22 +63,22 @@ Current status:
 | Config Mode API draft | Done | `docs/api/config-mode-api.md` |
 | Modbus Config API draft | Done | `docs/api/modbus-config-api.md` |
 | Config button firmware | Done | Runtime GPIO32 hold selects `CONFIG_MODE` and turns builtin LED ON |
-| WiFi AP Config Mode | Next | Start AP after button mode decision works |
-| Web UI setup portal | Not started | Add after AP is working |
+| WiFi AP Config Mode | Done | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}` |
+| Web UI setup portal | Next | Add minimal setup/status page after AP is working |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:
 
 ```text
-Implement WiFi AP Config Mode.
+Implement minimal Web UI setup portal.
 
 Input:
-- Runtime mode selected by GPIO32 long hold
+- Active Config Mode AP
 
 Output:
-- If CONFIG_MODE, start AP `PM1611-SETUP-{last6mac}`
-- Print AP SSID and IP
-- Keep NORMAL_MODE unchanged for now
+- Serve setup/status page on `192.168.4.1`
+- Show firmware, mode, MAC suffix, heap, and AP SSID
+- No config writes yet
 ```
 
 ```text

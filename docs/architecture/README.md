@@ -7,3 +7,4 @@ The root `README.md` currently acts as the main architecture and roadmap documen
 Current documents:
 
 - [One-Man Army Development Roadmap](one-man-roadmap.md)
+- [Configurable Modbus Engine Architecture](configurable-modbus-engine.md)

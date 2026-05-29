@@ -7,3 +7,7 @@ This folder is reserved for external interfaces:
 - Web API endpoints
 - Configuration import/export format
 - OTA update behavior
+
+Current documents:
+
+- [Modbus Configuration API Draft](modbus-config-api.md)

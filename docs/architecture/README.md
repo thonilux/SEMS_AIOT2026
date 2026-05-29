@@ -9,3 +9,4 @@ Current documents:
 - [One-Man Army Development Roadmap](one-man-roadmap.md)
 - [Configurable Modbus Engine Architecture](configurable-modbus-engine.md)
 - [PM1611 Feature Adaptation Notes](pm1611-feature-adaptation.md)
+- [Config Mode Architecture](config-mode.md)

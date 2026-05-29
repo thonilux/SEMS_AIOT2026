@@ -11,3 +11,4 @@ This folder is reserved for external interfaces:
 Current documents:
 
 - [Modbus Configuration API Draft](modbus-config-api.md)
+- [Config Mode API Draft](config-mode-api.md)

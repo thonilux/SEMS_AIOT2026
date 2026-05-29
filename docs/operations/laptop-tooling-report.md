@@ -166,6 +166,33 @@ firmware\.pio
 
 The firmware was rebuilt after cleanup and still passed.
 
+Additional storage hygiene check:
+
+```text
+Project total after cleanup:        about 1,510 MB
+Required project PlatformIO core:   about 1,510 MB
+Global PlatformIO home:             about 76 MB
+Old npm 8.7 backup:                 removed
+Regenerated PlatformIO build folder: removed after verification build
+Windows user temp:                  about 189 MB
+```
+
+Safe cleanup performed:
+
+```text
+Deleted firmware\.pio
+Deleted C:\Users\Hisbull\AppData\Roaming\npm\_backup_old_npm_8_7_0
+Verified npm/npx still report 10.9.0
+Verified firmware still builds successfully
+Deleted regenerated firmware\.pio again after build check
+```
+
+Notes:
+
+- Keep `firmware\pio-core`; it contains the project-local ESP32 platform, Arduino framework, and toolchain.
+- `firmware\.pio` is generated build output and can be deleted anytime.
+- Windows temp still has about 189 MB, mostly VS Code installer residue. This is optional system cleanup and not project-critical.
+
 ### Recommended Cleanup
 
 No urgent cleanup remains for this project.

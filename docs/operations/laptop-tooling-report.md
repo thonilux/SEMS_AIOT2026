@@ -19,7 +19,6 @@ Ready:
 
 Needs attention before first ESP32 flashing:
 
-- PlatformIO cache permission issue
 - Multiple/obsolete PlatformIO Core warning
 - GitHub CLI is not installed
 - `npm` has a permission/runtime issue from this shell
@@ -28,6 +27,7 @@ New hardware status:
 
 - ESP32-WROOM board is connected
 - USB serial is detected as CH340 on `COM3`
+- User PowerShell can run `pio device list` without the previous cache traceback
 
 ## 🧪 Tool Check Results
 
@@ -36,7 +36,7 @@ New hardware status:
 | Git | Ready | `git version 2.30.1.windows.1` | Works |
 | Python | Ready | `Python 3.10.1` | Works through `python` |
 | Python launcher | Ready | `Python 3.10.1` | Works through `py` |
-| PlatformIO Core | Fix needed | `PlatformIO Core, version 6.1.18` | Installed, but cache permissions need repair |
+| PlatformIO Core | Usable, warning remains | `PlatformIO Core, version 6.1.18` | User terminal works; obsolete/multiple-core warning remains |
 | VS Code CLI | Ready | `1.108.2` | Works, but printed a Crashpad access warning |
 | Node.js | Ready | `v22.12.0` | Works |
 | npm | Fix needed | EPERM on `C:\Users\Hisbull` | Likely Windows permission/path issue |
@@ -97,48 +97,61 @@ gh auth login
 
 ## ⚠️ PlatformIO Issue
 
-PlatformIO is installed, but running `pio device list` reported:
+PlatformIO is installed and can detect the ESP32 board on `COM3`.
+
+After deleting:
+
+```text
+C:\Users\Hisbull\.platformio\.cache
+```
+
+the user's normal PowerShell no longer showed the previous cache traceback.
+
+Remaining warning:
 
 ```text
 Obsolete PIO Core v6.1.18 is used (previous was 6.1.19)
 Please remove multiple PIO Cores from a system
 ```
 
-It also reported:
+Current PlatformIO system info from user terminal:
 
 ```text
-The directory C:\Users\Hisbull\.platformio\.cache or its parent directory
-is not owned by the current user and PlatformIO can not store configuration data.
+PlatformIO Core             6.1.18
+Python                      3.10.1-final.0
+System Type                 windows_amd64
+Platform                    Windows-10
+PlatformIO Core Directory   C:\Users\Hisbull\.platformio
+PlatformIO Core Executable  C:\Python310\Scripts\platformio.exe
+Python Executable           C:\Python310\python.exe
+Development Platforms       3
+Tools & Toolchains          22
 ```
 
-This should be fixed before the first ESP32 build/upload session.
+Tool path:
 
-### Recommended Fix
-
-Close VS Code first.
-
-Then in PowerShell, try:
-
-```powershell
-Remove-Item -Recurse -Force C:\Users\Hisbull\.platformio\.cache
+```text
+C:\Python310\Scripts\pio.exe
 ```
 
-Then reopen VS Code and run:
+Codex sandbox note:
+
+The Codex shell may still show the cache ownership traceback because it runs in a different execution context. The user's normal PowerShell result is more relevant for VS Code flashing.
+
+### Recommended Cleanup
+
+This is not blocking the first firmware baseline anymore, but later it is worth cleaning the duplicate/obsolete PlatformIO Core warning.
+
+Recommended checks:
 
 ```powershell
 pio --version
 pio device list
-```
-
-If the issue remains, reinstall PlatformIO from the VS Code extension and avoid mixing multiple PlatformIO installs.
-
-Recommended checks after repair:
-
-```powershell
 where.exe pio
 pio system info
-pio device list
 ```
+
+If builds become unstable, reinstall PlatformIO from the VS Code extension and avoid mixing multiple PlatformIO installs.
 
 ## ⚠️ npm Issue
 
@@ -214,27 +227,27 @@ Expected USB serial drivers depend on the ESP32 board:
 
 ## ✅ Ready For Next Step?
 
-Almost.
+Yes, with one warning.
 
 The ESP32-WROOM board is now detected on `COM3`, so USB serial readiness is good.
 
-Before creating and flashing the firmware baseline, fix PlatformIO cache permissions first. PlatformIO can list the device, but the cache ownership issue can still cause build/upload instability.
+The previous cache issue was fixed in the user's normal PowerShell. The remaining PlatformIO issue is the obsolete/multiple-core warning.
 
 Minimum required for Step 1:
 
 ```text
 Git:        ready
 Python:     ready
-PlatformIO: installed, fix cache first
+PlatformIO: usable, duplicate-core warning remains
 VS Code:    ready
 USB serial: ready, COM3 CH340
 ```
 
 ## 👉 Recommended Next Actions
 
-1. Fix PlatformIO cache permission.
-2. Confirm the exact ESP32-WROOM dev board model if known.
-3. Create `firmware/platformio.ini`.
-4. Create `firmware/src/main.cpp`.
-5. Build and flash the first boot banner to `COM3`.
-6. Open serial monitor at `115200`.
+1. Confirm the exact ESP32-WROOM dev board model if known.
+2. Create `firmware/platformio.ini`.
+3. Create `firmware/src/main.cpp`.
+4. Build and flash the first boot banner to `COM3`.
+5. Open serial monitor at `115200`.
+6. Clean up duplicate PlatformIO Core later if the warning becomes annoying or causes instability.

@@ -193,6 +193,54 @@ Notes:
 - `firmware\.pio` is generated build output and can be deleted anytime.
 - Windows temp still has about 189 MB, mostly VS Code installer residue. This is optional system cleanup and not project-critical.
 
+C drive cleanup update:
+
+```text
+C: free space after cleanup: about 19.77 GB
+D: free space after cleanup: about 75.76 GB
+```
+
+Safe C drive cleanup performed:
+
+```text
+Deleted pip cache:
+C:\Users\Hisbull\AppData\Local\pip\Cache
+
+Deleted npm cache:
+C:\Users\Hisbull\AppData\Local\npm-cache\_cacache
+C:\Users\Hisbull\AppData\Local\npm-cache\_npx
+C:\Users\Hisbull\AppData\Local\npm-cache\_logs
+
+Deleted Arduino temporary cache/staging/logs:
+C:\Users\Hisbull\AppData\Local\Arduino15\staging
+C:\Users\Hisbull\AppData\Local\Arduino15\cache
+C:\Users\Hisbull\AppData\Local\Arduino15\logs
+```
+
+Post-cleanup sizes:
+
+```text
+pip cache:       0 MB
+npm cache:       about 10 MB
+Arduino15:       about 2,967 MB
+Windows temp:    about 189 MB
+Roaming npm:     about 421 MB
+```
+
+Validation after cleanup:
+
+```text
+npm --version -> 10.9.0
+npx --version -> 10.9.0
+PlatformIO project core still active at firmware\pio-core
+```
+
+Remaining optional cleanup:
+
+- `C:\Users\Hisbull\AppData\Local\Arduino15\packages` is about 2.9 GB. Remove only if Arduino IDE board packages are not needed.
+- `C:\Users\Hisbull\AppData\Roaming\npm\node_modules\next-app-test` is about 1.7 GB. Remove only if that old global package is not needed.
+- Windows temp is about 189 MB and can be cleaned later with Windows Disk Cleanup or Storage Sense.
+
 ### Recommended Cleanup
 
 No urgent cleanup remains for this project.

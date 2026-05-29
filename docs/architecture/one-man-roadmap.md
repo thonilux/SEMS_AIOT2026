@@ -43,20 +43,58 @@ Countermeasures:
 
 ## 🗺️ Roadmap Overview
 
+Current status:
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Repository structure | Done | Professional folder clustering is in place |
+| GitHub remote | Done | Repo pushed to `thonilux/pm1611-rs485-reader` |
+| Laptop tooling | Done | Git, Python, PlatformIO, npm/npx, VS Code checked |
+| Storage cleanup | Done | C drive and dev caches cleaned |
+| ESP32 board detection | Done | ESP32-D0WD-V3 on COM3 CH340 |
+| Firmware boot baseline | Done | Built, flashed, serial heartbeat verified |
+| ESP32 hardware analysis | Done | `docs/hardware/esp32.md` |
+| LCD hardware analysis | Done | `docs/hardware/lcd.md` |
+| Prototype schematic review | Done | `docs/hardware/prototype-schematic.md` |
+| Prototype pin map | Done | `docs/hardware/pin-map.md` |
+| PM1611 manual feature map | Done | `docs/architecture/pm1611-feature-adaptation.md` |
+| Configurable Modbus design | Done | `docs/architecture/configurable-modbus-engine.md` |
+| Config Mode design | Done | `docs/architecture/config-mode.md` |
+| Config Mode API draft | Done | `docs/api/config-mode-api.md` |
+| Modbus Config API draft | Done | `docs/api/modbus-config-api.md` |
+| Config button firmware | Next | Read GPIO32 and select `CONFIG_MODE` / `NORMAL_MODE` |
+| WiFi AP Config Mode | Not started | Start AP after button mode decision works |
+| Web UI setup portal | Not started | Add after AP is working |
+| RS485 Modbus proof | Not started | Use configurable static map first |
+
+Current next milestone:
+
 ```text
-Phase 0: Repository and hardware decisions
-Phase 1: PlatformIO firmware baseline
-Phase 2: Serial diagnostics and config foundation
-Phase 3: RS485 Modbus proof
-Phase 4: Meter data model
-Phase 5: Relay and protection
-Phase 6: WiFi and setup mode
-Phase 7: MQTT compatibility
-Phase 8: Time and energy history
-Phase 9: LCD and LEDs
-Phase 10: Web UI
-Phase 11: OTA and administration
-Phase 12: Hardening and release
+Implement config button boot mode decision.
+
+Input:
+- GPIO32 active low
+
+Output:
+- CONFIG_MODE if held during boot
+- NORMAL_MODE otherwise
+- Serial log selected mode
+```
+
+```text
+Phase 0: Repository and hardware decisions       [mostly done]
+Phase 1: PlatformIO firmware baseline           [done]
+Phase 2: Serial diagnostics and config foundation [in progress]
+Phase 3: RS485 Modbus proof                     [not started]
+Phase 4: Meter data model                       [not started]
+Phase 5: Relay and protection                   [not started]
+Phase 6: WiFi and setup mode                    [designed, not implemented]
+Phase 7: MQTT compatibility                     [designed, not implemented]
+Phase 8: Time and energy history                [not started]
+Phase 9: LCD and LEDs                           [hardware analyzed, not implemented]
+Phase 10: Web UI                                [API drafted, not implemented]
+Phase 11: OTA and administration                [not started]
+Phase 12: Hardening and release                 [not started]
 ```
 
 ## ✅ Phase 0: Repository And Hardware Decisions
@@ -79,7 +117,11 @@ Deliverables:
 - `README.md`
 - `docs/hardware/esp32.md`
 - `docs/hardware/lcd.md`
-- Future `docs/hardware/pin-map.md`
+- `docs/hardware/pin-map.md`
+- `docs/hardware/prototype-schematic.md`
+- `docs/architecture/pm1611-feature-adaptation.md`
+- `docs/architecture/configurable-modbus-engine.md`
+- `docs/architecture/config-mode.md`
 - Future `docs/hardware/modbus-meter.md`
 
 Exit criteria:

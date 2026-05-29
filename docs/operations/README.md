@@ -9,3 +9,7 @@ This folder is reserved for operational procedures:
 - Factory reset
 - Recovery from failed configuration
 - Production test checklist
+
+Current documents:
+
+- [Laptop Tooling Readiness Report](laptop-tooling-report.md)

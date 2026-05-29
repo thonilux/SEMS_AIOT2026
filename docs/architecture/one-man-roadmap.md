@@ -62,23 +62,23 @@ Current status:
 | Config Mode design | Done | `docs/architecture/config-mode.md` |
 | Config Mode API draft | Done | `docs/api/config-mode-api.md` |
 | Modbus Config API draft | Done | `docs/api/modbus-config-api.md` |
-| Config button firmware | Next | Read GPIO32 and select `CONFIG_MODE` / `NORMAL_MODE` |
-| WiFi AP Config Mode | Not started | Start AP after button mode decision works |
+| Config button firmware | Done | GPIO32 active-low boot hold selects `CONFIG_MODE` / `NORMAL_MODE` |
+| WiFi AP Config Mode | Next | Start AP after button mode decision works |
 | Web UI setup portal | Not started | Add after AP is working |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:
 
 ```text
-Implement config button boot mode decision.
+Implement WiFi AP Config Mode.
 
 Input:
-- GPIO32 active low
+- Selected mode from boot decision
 
 Output:
-- CONFIG_MODE if held during boot
-- NORMAL_MODE otherwise
-- Serial log selected mode
+- If CONFIG_MODE, start AP `PM1611-SETUP-{last6mac}`
+- Print AP SSID and IP
+- Keep NORMAL_MODE unchanged for now
 ```
 
 ```text

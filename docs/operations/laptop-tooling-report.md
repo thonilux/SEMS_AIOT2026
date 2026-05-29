@@ -23,7 +23,11 @@ Needs attention before first ESP32 flashing:
 - Multiple/obsolete PlatformIO Core warning
 - GitHub CLI is not installed
 - `npm` has a permission/runtime issue from this shell
-- Serial port query was blocked by Windows permissions
+
+New hardware status:
+
+- ESP32-WROOM board is connected
+- USB serial is detected as CH340 on `COM3`
 
 ## 🧪 Tool Check Results
 
@@ -37,7 +41,7 @@ Needs attention before first ESP32 flashing:
 | Node.js | Ready | `v22.12.0` | Works |
 | npm | Fix needed | EPERM on `C:\Users\Hisbull` | Likely Windows permission/path issue |
 | GitHub CLI | Missing | `gh` not recognized | Optional, but useful |
-| Serial port query | Blocked | `Get-CimInstance Win32_SerialPort` access denied | Try from normal/admin terminal or use PlatformIO device list after fixing PIO |
+| Serial / USB | Ready | `USB-SERIAL CH340 (COM3)` | ESP32-WROOM board detected |
 | Git remote | Ready | `https://github.com/thonilux/pm1611-rs485-reader.git` | Push already works |
 
 ## 📍 Tool Paths
@@ -162,13 +166,31 @@ For the current firmware baseline, this is not blocking.
 
 ## 🔌 Serial / USB Readiness
 
-Windows serial port query failed:
+Update after connecting the ESP32-WROOM board:
+
+```text
+Port:        COM3
+Description: USB-SERIAL CH340 (COM3)
+Hardware ID: USB VID:PID=1A86:7523
+```
+
+PlatformIO can see the board through `pio device list`.
+
+PowerShell serial port API also reports:
+
+```text
+COM3
+```
+
+This means the CH340 USB serial driver path is working.
+
+Earlier WMI serial query failed:
 
 ```text
 Get-CimInstance Win32_SerialPort: Access denied
 ```
 
-This does not prove serial upload is broken. It only means that this shell could not query WMI serial devices.
+That WMI permission issue is no longer a practical blocker because PlatformIO can detect the board.
 
 After connecting the ESP32 board, use:
 
@@ -187,14 +209,16 @@ Expected USB serial drivers depend on the ESP32 board:
 | USB Chip | Driver |
 | --- | --- |
 | CP210x | Silicon Labs CP210x driver |
-| CH340 / CH341 | WCH CH340 driver |
+| CH340 / CH341 | WCH CH340 driver, currently detected on COM3 |
 | Native USB ESP32-S3 | Usually no extra driver |
 
 ## ✅ Ready For Next Step?
 
 Almost.
 
-Before creating and flashing the firmware baseline, fix PlatformIO cache permissions first.
+The ESP32-WROOM board is now detected on `COM3`, so USB serial readiness is good.
+
+Before creating and flashing the firmware baseline, fix PlatformIO cache permissions first. PlatformIO can list the device, but the cache ownership issue can still cause build/upload instability.
 
 Minimum required for Step 1:
 
@@ -203,16 +227,14 @@ Git:        ready
 Python:     ready
 PlatformIO: installed, fix cache first
 VS Code:    ready
-USB serial: verify after board is connected
+USB serial: ready, COM3 CH340
 ```
 
 ## 👉 Recommended Next Actions
 
 1. Fix PlatformIO cache permission.
-2. Connect ESP32 board by USB.
-3. Run `pio device list`.
-4. Confirm ESP32 board model.
-5. Create `firmware/platformio.ini`.
-6. Create `firmware/src/main.cpp`.
-7. Build and flash the first boot banner.
-
+2. Confirm the exact ESP32-WROOM dev board model if known.
+3. Create `firmware/platformio.ini`.
+4. Create `firmware/src/main.cpp`.
+5. Build and flash the first boot banner to `COM3`.
+6. Open serial monitor at `115200`.

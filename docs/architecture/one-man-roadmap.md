@@ -64,21 +64,23 @@ Current status:
 | Modbus Config API draft | Done | `docs/api/modbus-config-api.md` |
 | Config button firmware | Done | Runtime GPIO32 hold selects `CONFIG_MODE` and turns builtin LED ON |
 | WiFi AP Config Mode | Done | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}` |
-| Web UI setup portal | Next | Add minimal setup/status page after AP is working |
+| Web UI setup portal | Done | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1` |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:
 
 ```text
-Implement minimal Web UI setup portal.
+Implement WiFi credential form mock.
 
 Input:
-- Active Config Mode AP
+- Active setup page and WiFi scan results
 
 Output:
-- Serve setup/status page on `192.168.4.1`
-- Show firmware, mode, MAC suffix, heap, and AP SSID
-- No config writes yet
+- Select SSID from scan result
+- Enter WiFi password
+- Validate form locally
+- Print submitted config to serial only
+- No NVS writes yet
 ```
 
 ```text

@@ -6,16 +6,22 @@
 namespace {
 constexpr uint32_t kSerialBaud = 115200;
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
-constexpr uint32_t kBootConfigHoldMs = 5000;
-constexpr uint32_t kBootButtonSampleMs = 25;
+constexpr uint32_t kRuntimeConfigHoldMs = 5000;
 
 uint32_t lastHeartbeatMs = 0;
 uint32_t heartbeatCount = 0;
+uint32_t configButtonPressedSinceMs = 0;
+uint32_t lastConfigButtonProgressSecond = 0;
 AppMode currentMode = AppMode::Normal;
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
   return PinMap::kConfigButtonActiveLow ? rawState == LOW : rawState == HIGH;
+}
+
+void setBuiltinLed(bool on) {
+  const bool outputHigh = PinMap::kBuiltinLedActiveHigh ? on : !on;
+  digitalWrite(PinMap::kBuiltinLed, outputHigh ? HIGH : LOW);
 }
 
 void printBootBanner() {
@@ -31,36 +37,16 @@ void printBootBanner() {
   Serial.println();
 }
 
-AppMode decideBootMode() {
+void printButtonInfo() {
   Serial.print("Config button: GPIO");
   Serial.print(PinMap::kConfigButton);
   Serial.println(" active-low");
-  Serial.print("Hold window: ");
-  Serial.print(kBootConfigHoldMs);
+  Serial.print("Runtime hold window: ");
+  Serial.print(kRuntimeConfigHoldMs);
   Serial.println(" ms");
-
-  const uint32_t startMs = millis();
-  uint32_t nextProgressMs = startMs + 1000;
-
-  while (millis() - startMs < kBootConfigHoldMs) {
-    if (!isConfigButtonPressed()) {
-      Serial.println("Config button not held -> NORMAL_MODE");
-      return AppMode::Normal;
-    }
-
-    const uint32_t nowMs = millis();
-    if (nowMs >= nextProgressMs) {
-      Serial.print("Config button held for ");
-      Serial.print(nowMs - startMs);
-      Serial.println(" ms");
-      nextProgressMs += 1000;
-    }
-
-    delay(kBootButtonSampleMs);
-  }
-
-  Serial.println("Config button hold confirmed -> CONFIG_MODE");
-  return AppMode::Config;
+  Serial.print("Builtin LED: GPIO");
+  Serial.print(PinMap::kBuiltinLed);
+  Serial.println(" active-high");
 }
 
 void printChipInfo() {
@@ -84,6 +70,50 @@ void printModeInfo() {
   Serial.print("Selected mode: ");
   Serial.println(appModeToString(currentMode));
 }
+
+void enterConfigMode() {
+  if (currentMode == AppMode::Config) {
+    return;
+  }
+
+  currentMode = AppMode::Config;
+  setBuiltinLed(true);
+  Serial.println("Config button hold confirmed -> CONFIG_MODE");
+  printModeInfo();
+}
+
+void handleConfigButton(uint32_t nowMs) {
+  if (currentMode == AppMode::Config) {
+    setBuiltinLed(true);
+    return;
+  }
+
+  if (!isConfigButtonPressed()) {
+    configButtonPressedSinceMs = 0;
+    lastConfigButtonProgressSecond = 0;
+    setBuiltinLed(false);
+    return;
+  }
+
+  if (configButtonPressedSinceMs == 0) {
+    configButtonPressedSinceMs = nowMs;
+    lastConfigButtonProgressSecond = 0;
+    Serial.println("Config button pressed");
+  }
+
+  const uint32_t heldMs = nowMs - configButtonPressedSinceMs;
+  const uint32_t heldSecond = heldMs / 1000;
+  if (heldSecond > lastConfigButtonProgressSecond) {
+    lastConfigButtonProgressSecond = heldSecond;
+    Serial.print("Config button held for ");
+    Serial.print(heldMs);
+    Serial.println(" ms");
+  }
+
+  if (heldMs >= kRuntimeConfigHoldMs) {
+    enterConfigMode();
+  }
+}
 }  // namespace
 
 void setup() {
@@ -91,15 +121,19 @@ void setup() {
   delay(500);
 
   pinMode(PinMap::kConfigButton, INPUT_PULLUP);
+  pinMode(PinMap::kBuiltinLed, OUTPUT);
+  setBuiltinLed(false);
 
   printBootBanner();
   printChipInfo();
-  currentMode = decideBootMode();
+  printButtonInfo();
   printModeInfo();
 }
 
 void loop() {
   const uint32_t nowMs = millis();
+
+  handleConfigButton(nowMs);
 
   if (nowMs - lastHeartbeatMs >= kHeartbeatIntervalMs) {
     lastHeartbeatMs = nowMs;

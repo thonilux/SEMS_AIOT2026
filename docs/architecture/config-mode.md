@@ -75,21 +75,20 @@ Button actions:
 
 | Action | Duration | Behavior |
 | --- | --- | --- |
-| Hold during boot | 5 seconds | Force Config Mode |
-| Long press during Normal Mode | 3 seconds | Request Config Mode reboot |
+| Long press during Normal Mode | 5 seconds | Enter Config Mode without reset and turn builtin LED ON |
 | Hold during boot | 10 seconds | Factory reset, future feature |
 | Short press | < 1 second | Reserved, no action initially |
 
 Implementation note:
 
-During boot, do not block forever waiting for the button. Sample for a bounded window.
+The first firmware MVP should not require reboot/reset to enter Config Mode. Sample the button continuously in the main loop and detect a continuous hold.
 
-Recommended boot sampling:
+Recommended runtime sampling:
 
 ```text
-sample button for 5 seconds
-if held continuously -> force config mode
-else continue boot
+if GPIO32 is held continuously for 5 seconds:
+    enter CONFIG_MODE
+    turn builtin LED ON
 ```
 
 ## 🚦 Boot Decision Tree
@@ -98,7 +97,7 @@ else continue boot
 BOOT
   -> init serial
   -> init pin map
-  -> sample config button
+  -> initialize config button
   -> load config
   -> validate config
   -> decide mode
@@ -107,9 +106,7 @@ BOOT
 Mode decision:
 
 ```text
-if config_button_held:
-    CONFIG_MODE
-else if force_config_flag:
+if force_config_flag:
     CONFIG_MODE
 else if wifi_config_missing:
     CONFIG_MODE
@@ -239,7 +236,7 @@ Do not display stored WiFi or MQTT passwords.
 User flow:
 
 ```text
-1. User holds config button during boot.
+1. User holds config button for 5 seconds while device is powered.
 2. Device starts AP.
 3. User connects to AP.
 4. User opens 192.168.4.1.
@@ -477,8 +474,9 @@ If Modbus config is invalid -> allow Web UI correction
 ```text
 Add PinMap.h
 Read GPIO32 button
-Hold during boot -> print CONFIG_MODE
-No hold -> print NORMAL_MODE
+Runtime 5 second hold -> print CONFIG_MODE
+Builtin LED ON in CONFIG_MODE
+No hold -> stay NORMAL_MODE
 ```
 
 No WiFi yet.
@@ -531,8 +529,7 @@ connect to WiFi STA
 ```text
 CONFIG_BUTTON_PIN = 32
 CONFIG_BUTTON_ACTIVE_LOW = true
-BOOT_CONFIG_HOLD_MS = 5000
-NORMAL_CONFIG_HOLD_MS = 3000
+RUNTIME_CONFIG_HOLD_MS = 5000
 FACTORY_RESET_HOLD_MS = 10000
 CONFIG_AP_IP = 192.168.4.1
 CONFIG_AP_SSID_PREFIX = PM1611-SETUP
@@ -548,9 +545,8 @@ Implement Milestone 1 only:
 ```text
 PinMap.h
 Config button read
-Boot mode decision
+Runtime mode decision
 Serial output
 ```
 
 This keeps the next firmware change small, testable, and reversible.
-

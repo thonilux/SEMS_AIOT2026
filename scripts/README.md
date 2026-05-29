@@ -1,4 +1,4 @@
-# Scripts
+# 🧰 Scripts
 
 This folder is reserved for repeatable project scripts:
 
@@ -8,4 +8,3 @@ This folder is reserved for repeatable project scripts:
 - CI helper scripts
 
 Scripts should be deterministic and safe to run from the repository root.
-

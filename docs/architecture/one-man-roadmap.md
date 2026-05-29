@@ -1,10 +1,10 @@
-# One-Man Army Development Roadmap
+# 🚀 One-Man Army Development Roadmap
 
-This roadmap is designed for a solo developer building the PM1611 RS485 Reader firmware step by step.
+This roadmap is designed for a solo developer building the PM1611 RS485 Reader firmware step by step, without burning out halfway through the boss fight.
 
 The goal is not to build every feature at once. The goal is to create small, testable increments that can be committed, pushed, and physically verified on hardware.
 
-## Development Principles
+## 🧠 Development Principles
 
 Use these rules throughout the project:
 
@@ -18,7 +18,7 @@ Use these rules throughout the project:
 - Do not add OTA until basic boot, config, and network behavior are predictable.
 - Keep each feature small enough to debug from serial logs.
 
-## Solo Developer Constraints
+## 🧍 Solo Developer Constraints
 
 A one-person project must control scope aggressively.
 
@@ -41,7 +41,7 @@ Countermeasures:
 - Make relay protection local and testable early.
 - Use GitHub commits as recovery points.
 
-## Roadmap Overview
+## 🗺️ Roadmap Overview
 
 ```text
 Phase 0: Repository and hardware decisions
@@ -59,7 +59,7 @@ Phase 11: OTA and administration
 Phase 12: Hardening and release
 ```
 
-## Phase 0: Repository And Hardware Decisions
+## ✅ Phase 0: Repository And Hardware Decisions
 
 Goal: Make the project ready for disciplined development.
 
@@ -94,7 +94,7 @@ Recommended commit:
 Document hardware baseline
 ```
 
-## Phase 1: PlatformIO Firmware Baseline
+## 🧱 Phase 1: PlatformIO Firmware Baseline
 
 Goal: Make the ESP32 compile, flash, boot, and print logs.
 
@@ -129,7 +129,7 @@ Recommended commit:
 Add PlatformIO firmware baseline
 ```
 
-## Phase 2: Diagnostics And Config Foundation
+## 🔎 Phase 2: Diagnostics And Config Foundation
 
 Goal: Add a small foundation without external hardware complexity.
 
@@ -156,7 +156,7 @@ Recommended commit:
 Add diagnostics and config foundation
 ```
 
-## Phase 3: RS485 Modbus Proof
+## 🔌 Phase 3: RS485 Modbus Proof
 
 Goal: Prove the ESP32 can communicate with the external meter.
 
@@ -189,7 +189,7 @@ Recommended commit:
 Add RS485 Modbus read proof
 ```
 
-## Phase 4: Meter Data Model
+## 📊 Phase 4: Meter Data Model
 
 Goal: Convert raw Modbus data into normalized engineering values.
 
@@ -218,7 +218,7 @@ Recommended commit:
 Add normalized Modbus meter data
 ```
 
-## Phase 5: Relay And Protection
+## 🛡️ Phase 5: Relay And Protection
 
 Goal: Make relay safety work locally before network control exists.
 
@@ -248,7 +248,7 @@ Recommended commit:
 Add local relay protection
 ```
 
-## Phase 6: WiFi And Setup Mode
+## 📡 Phase 6: WiFi And Setup Mode
 
 Goal: Add network connectivity after local metering and protection are stable.
 
@@ -273,7 +273,7 @@ Recommended commit:
 Add WiFi manager
 ```
 
-## Phase 7: MQTT Compatibility
+## 📨 Phase 7: MQTT Compatibility
 
 Goal: Publish PM1611-compatible payloads and receive relay commands.
 
@@ -302,7 +302,7 @@ Recommended commit:
 Add PM1611-compatible MQTT
 ```
 
-## Phase 8: Time And Energy History
+## ⏱️ Phase 8: Time And Energy History
 
 Goal: Add correct timestamps and 7-day energy history.
 
@@ -328,7 +328,7 @@ Recommended commit:
 Add time sync and energy history
 ```
 
-## Phase 9: LCD And LEDs
+## 🖥️ Phase 9: LCD And LEDs
 
 Goal: Add local status display after core data is stable.
 
@@ -354,7 +354,7 @@ Recommended commit:
 Add LCD and LED status UI
 ```
 
-## Phase 10: Web UI
+## 🌐 Phase 10: Web UI
 
 Goal: Add browser dashboard and configuration after device behavior is stable.
 
@@ -383,7 +383,7 @@ Recommended commit:
 Add web dashboard and config API
 ```
 
-## Phase 11: Login, OTA, And Administration
+## 🔐 Phase 11: Login, OTA, And Administration
 
 Goal: Add appliance features after the core and web UI work.
 
@@ -410,7 +410,7 @@ Recommended commit:
 Add admin login and OTA update
 ```
 
-## Phase 12: Hardening And Release
+## 🧪 Phase 12: Hardening And Release
 
 Goal: Make the firmware reliable enough for real deployment.
 
@@ -446,7 +446,7 @@ Recommended tag:
 v0.1.0
 ```
 
-## Weekly Solo Workflow
+## 📆 Weekly Solo Workflow
 
 Use this rhythm:
 
@@ -469,7 +469,7 @@ For short sessions:
 6. Commit only working checkpoints
 ```
 
-## Commit Style
+## ✍️ Commit Style
 
 Good solo commits:
 
@@ -492,7 +492,7 @@ misc
 final
 ```
 
-## Definition Of Done
+## 🎯 Definition Of Done
 
 Each milestone is done only when:
 
@@ -503,7 +503,7 @@ Each milestone is done only when:
 - Git status is clean.
 - Changes are pushed to GitHub.
 
-## Scope Control
+## 🧊 Scope Control
 
 Save these for later unless absolutely needed:
 
@@ -523,4 +523,3 @@ RS485 meter -> ESP32 -> local protection -> MQTT payload -> basic web config
 ```
 
 Everything else should build on that.
-

@@ -1,4 +1,4 @@
-# Documentation
+# 📚 Documentation
 
 Project documentation is grouped by engineering domain.
 
@@ -11,4 +11,3 @@ docs/
 ```
 
 Keep design documents here instead of mixing them with firmware source files.
-

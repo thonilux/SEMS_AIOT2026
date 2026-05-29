@@ -1,4 +1,4 @@
-# Tools
+# 🧪 Tools
 
 This folder is reserved for developer tools used by the project:
 
@@ -6,4 +6,3 @@ This folder is reserved for developer tools used by the project:
 - Payload validators
 - Test-data generators
 - Local diagnostic utilities
-

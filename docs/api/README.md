@@ -1,4 +1,4 @@
-# API Documentation
+# 📨 API Documentation
 
 This folder is reserved for external interfaces:
 
@@ -7,4 +7,3 @@ This folder is reserved for external interfaces:
 - Web API endpoints
 - Configuration import/export format
 - OTA update behavior
-

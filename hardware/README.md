@@ -1,4 +1,4 @@
-# Hardware
+# 🛠️ Hardware
 
 This folder is reserved for hardware design files:
 
@@ -10,4 +10,3 @@ This folder is reserved for hardware design files:
 - Vendor datasheets that are allowed to be redistributed
 
 Engineering notes and analysis belong in `docs/hardware/`.
-

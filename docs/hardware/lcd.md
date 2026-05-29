@@ -1,4 +1,4 @@
-# LCD Hardware Analysis
+# 🖥️ LCD Hardware Analysis
 
 This project will use a small monochrome graphic LCD similar to the display shown in the reference images.
 
@@ -14,7 +14,7 @@ Connector:    12-pin FPC
 Logic voltage: 3.3 V class
 ```
 
-## Identification From Provided Images
+## 🔍 Identification From Provided Images
 
 The second image contains these important details:
 
@@ -51,7 +51,7 @@ Active area height: about 25 mm
 
 The exact physical dimensions should be verified against the purchased part because seller photos and drawings sometimes mix similar 12864 modules.
 
-## Public Reference Findings
+## 🌐 Public Reference Findings
 
 Public references confirm that `LX-12864B11` is a 128x64 STN black/white LCD using an ST7567 controller, commonly supplied as a 12-pin SPI module.
 
@@ -73,15 +73,15 @@ Useful references:
 - https://datasheet4u.com/datasheet-pdf/Sitronix%20Technology/ST7567/pdf.php?id=694908
 - https://esphome.io/components/display/st7567/
 
-## Important Electrical Notes
+## ⚡ Important Electrical Notes
 
-### Logic Voltage
+### ✅ Logic Voltage
 
 Use 3.3 V logic.
 
 Do not drive this LCD with 5 V GPIO from an Arduino Uno-style board unless level shifting is used. ESP32 GPIO is already 3.3 V and is suitable for the logic interface.
 
-### LCD Bias Voltage
+### ⚠️ LCD Bias Voltage
 
 The drawing mentions an operating voltage around 8.7 V. This usually refers to the LCD drive voltage generated internally by the controller/charge pump or required by the LCD segment drive, not the MCU GPIO logic voltage.
 
@@ -89,13 +89,13 @@ Do not directly feed 8.7 V into normal logic pins.
 
 The actual FPC pinout must be confirmed before powering the LCD.
 
-### Backlight
+### 💡 Backlight
 
 The reference image looks like a reflective/transmissive monochrome LCD. Some LX-12864B11 listings mention an external backlight module, while the shown FPC glass may not include a simple two-pin LED backlight.
 
 Do not assume backlight pins are present unless the exact FPC pinout confirms them.
 
-## Likely Pinout
+## 🧷 Likely Pinout
 
 A similar 12-pin ST7567 12864 SPI LCD datasheet lists this style of pinout:
 
@@ -116,7 +116,7 @@ A similar 12-pin ST7567 12864 SPI LCD datasheet lists this style of pinout:
 
 This pinout is from a similar ST7567 12864 module family, not yet confirmed for the exact purchased LCD. The actual LX-12864B11 pinout should be checked with the seller datasheet before wiring.
 
-## Recommended ESP32 Wiring
+## 🔌 Recommended ESP32 Wiring
 
 For firmware development, use SPI.
 
@@ -141,7 +141,7 @@ Avoid sharing these pins with:
 - Boot strapping pins where possible
 - Flash/PSRAM pins
 
-## Firmware Library Direction
+## 📚 Firmware Library Direction
 
 The best Arduino/PlatformIO library direction is:
 
@@ -166,7 +166,7 @@ U8G2_ST7565_ERC12864_ALT_F_4W_HW_SPI
 
 The exact constructor may need testing because ST7567 modules often differ in memory offset, contrast, mirroring, and scan direction.
 
-## Firmware Abstraction Recommendation
+## 🧱 Firmware Abstraction Recommendation
 
 The application should not call U8g2 directly everywhere.
 
@@ -180,7 +180,7 @@ DisplayManager
 
 This keeps the firmware independent from the exact LCD library and makes it easier to replace the display later.
 
-## Suggested Display Pages
+## 🪟 Suggested Display Pages
 
 The LCD is 128x64, so pages must be compact.
 
@@ -204,7 +204,7 @@ E 15.23kWh
 Relay ON   MQTT OK
 ```
 
-## Risk Checklist
+## 🧯 Risk Checklist
 
 Before final PCB wiring:
 
@@ -217,7 +217,7 @@ Before final PCB wiring:
 - Confirm whether the display is mirrored or vertically flipped after initialization.
 - Confirm contrast value in firmware.
 
-## Practical Recommendation
+## 🎯 Practical Recommendation
 
 This LCD is usable with ESP32, but it is less plug-and-play than common OLED modules.
 
@@ -238,4 +238,3 @@ Library:      U8g2
 Interface:    4-wire SPI
 Status:       Supported, pending exact pinout verification
 ```
-

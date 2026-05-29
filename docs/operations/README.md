@@ -1,4 +1,4 @@
-# Operations
+# 🧭 Operations
 
 This folder is reserved for operational procedures:
 
@@ -9,4 +9,3 @@ This folder is reserved for operational procedures:
 - Factory reset
 - Recovery from failed configuration
 - Production test checklist
-

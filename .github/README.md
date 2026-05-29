@@ -1,4 +1,4 @@
-# GitHub Metadata
+# 🐙 GitHub Metadata
 
 This folder contains GitHub-specific project metadata:
 
@@ -6,4 +6,3 @@ This folder contains GitHub-specific project metadata:
 - Issue templates
 - Pull request templates
 - Repository automation
-

@@ -1,10 +1,10 @@
-# PM1611 RS485 Reader
+# ⚡ PM1611 RS485 Reader
 
 ESP32-based RS485 Modbus energy monitoring gateway inspired by the PM1611Q-WD smart energy meter.
 
 This firmware is intended to reproduce the main user experience of the PM1611Q-WD while using an external Modbus RTU energy meter as the measurement source.
 
-## Project Goal
+## 🎯 Project Goal
 
 Build a modular ESP32 firmware using PlatformIO and the Arduino framework.
 
@@ -27,7 +27,7 @@ The device should provide:
 
 The final firmware must not depend on ESPHome. PlatformIO is used because this project needs full control over tasks, Modbus polling, relay safety, web authentication, OTA, MQTT compatibility, and long-term firmware structure.
 
-## Target Platform
+## 🧰 Target Platform
 
 ```text
 MCU:        ESP32
@@ -48,7 +48,7 @@ TX_ENABLE: GPIO0
 
 Important hardware note: GPIO0 is an ESP32 boot strapping pin. It can be used for RS485 TX enable during development, but a different GPIO is safer for production hardware if the RS485 circuit can affect boot mode.
 
-## PM1611 Feature Map
+## 🧩 PM1611 Feature Map
 
 The original PM1611Q-WD behavior can be interpreted as these subsystems:
 
@@ -63,7 +63,7 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 | Storage | Device config, credentials, history, relay/protection state |
 | Time | RTC/NTP timestamp used in MQTT payloads and history |
 
-## High-Level Architecture
+## 🏗️ High-Level Architecture
 
 ```text
 +------------------------------------------------------+
@@ -102,7 +102,7 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 +------------------------------------------------------+
 ```
 
-## Main Firmware Modules
+## 📦 Main Firmware Modules
 
 | Module | Responsibility |
 | --- | --- |
@@ -125,7 +125,7 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 | `LedManager` | LED status patterns |
 | `DeviceIdentity` | UID, hostname, MQTT identity |
 
-## Module Dependency Diagram
+## 🔗 Module Dependency Diagram
 
 ```text
                  +----------------+
@@ -179,7 +179,7 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 +-----------------+
 ```
 
-## Runtime Task Plan
+## ⏱️ Runtime Task Plan
 
 | Task | Period | Responsibility |
 | --- | --- | --- |
@@ -192,7 +192,7 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 | UI | 500ms-2s | LCD page rotation and LED state |
 | NTP | Startup, then 6h-24h | Maintain wall-clock time |
 
-## State Machines
+## 🔄 State Machines
 
 ### Boot
 
@@ -261,7 +261,7 @@ Error path:
 WAIT_RESPONSE -> TIMEOUT -> RETRY -> METER_OFFLINE
 ```
 
-## Data Flow
+## 🌊 Data Flow
 
 ```text
 External Modbus Meter
@@ -297,7 +297,7 @@ Normalized MeterData
         +---------> LED Status
 ```
 
-## Normalized Meter Data Model
+## 📊 Normalized Meter Data Model
 
 The rest of the firmware should not depend on raw Modbus registers.
 
@@ -335,7 +335,7 @@ MeterPhaseData
 
 The PM1611-compatible payload can publish total or selected values.
 
-## MQTT Payload Compatibility
+## 📨 MQTT Payload Compatibility
 
 Publish PM1611-compatible telemetry to:
 
@@ -413,7 +413,7 @@ Command validation rules:
 - Reject relay ON if protection lockout is active.
 - Publish a command result event.
 
-## Configuration Model
+## ⚙️ Configuration Model
 
 ```text
 DeviceConfig
@@ -491,7 +491,7 @@ HistoryConfig
 - flash_flush_interval_sec
 ```
 
-## Storage Strategy
+## 💾 Storage Strategy
 
 Use ESP32 storage in layers:
 
@@ -509,7 +509,7 @@ Flash write rules:
 - Buffer history and flush periodically.
 - Prefer daily history writes for long flash life.
 
-## Security Plan
+## 🔐 Security Plan
 
 Minimum security architecture:
 
@@ -525,7 +525,7 @@ Minimum security architecture:
 - AP setup mode must use WPA2 password.
 - First boot should force unique/default credential change.
 
-## Relay Protection Plan
+## 🛡️ Relay Protection Plan
 
 Protection inputs:
 
@@ -564,7 +564,7 @@ Recommended default:
 - Trip on stale meter data enabled.
 - Relay stays OFF after reboot if previous state was trip/lockout.
 
-## Repository Structure
+## 🗂️ Repository Structure
 
 ```text
 pm1611-rs485-reader/
@@ -615,7 +615,7 @@ Development planning:
 
 - [One-Man Army Development Roadmap](docs/architecture/one-man-roadmap.md)
 
-## Step-by-Step Roadmap
+## 🛣️ Step-by-Step Roadmap
 
 ### Step 0: Project Baseline
 
@@ -932,7 +932,7 @@ Exit criteria:
 - Stable release candidate.
 - Known limitations documented.
 
-## Immediate Next Step
+## 👉 Immediate Next Step
 
 The next practical step is to confirm the hardware and PlatformIO baseline:
 

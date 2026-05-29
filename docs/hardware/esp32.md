@@ -1,10 +1,10 @@
-# ESP32 Hardware Capability Analysis
+# 🧠 ESP32 Hardware Capability Analysis
 
 This document analyzes which ESP32 series is appropriate for the PM1611 RS485 Reader firmware.
 
 The project is not just a simple Modbus reader. It is an appliance-style gateway with RS485 polling, relay protection, WiFi, MQTT, web UI, login/session handling, OTA updates, LCD output, LED states, configuration storage, and energy history. The selected ESP32 must have enough memory, flash, UART capability, and long-term availability for this workload.
 
-## Firmware Workload Summary
+## ⚙️ Firmware Workload Summary
 
 Expected runtime features:
 
@@ -27,7 +27,7 @@ Expected runtime features:
 
 This means the board should be selected for margin, not just minimum boot success.
 
-## Minimum Hardware Requirements
+## ✅ Minimum Hardware Requirements
 
 | Resource | Minimum | Recommended |
 | --- | --- | --- |
@@ -42,9 +42,9 @@ This means the board should be selected for margin, not just minimum boot succes
 | OTA | Required | Partition layout must support OTA |
 | Filesystem | Required | LittleFS recommended |
 
-## ESP32 Series Comparison
+## 🆚 ESP32 Series Comparison
 
-### Classic ESP32
+### 🧱 Classic ESP32
 
 Examples:
 
@@ -81,7 +81,7 @@ ESP32-WROOM-32E with 8 MB or 16 MB flash
 ESP32-WROVER-E if PSRAM is desired
 ```
 
-### ESP32-WROVER
+### 🧩 ESP32-WROVER
 
 Strengths:
 
@@ -98,7 +98,7 @@ Verdict:
 
 Recommended if the firmware will use a larger web UI, TLS MQTT, bigger JSON payloads, or more advanced local dashboards.
 
-### ESP32-S2
+### 🔹 ESP32-S2
 
 Strengths:
 
@@ -116,7 +116,7 @@ Verdict:
 
 Not the first choice for this project. It can work, but the classic dual-core ESP32 or ESP32-S3 gives more comfortable task separation.
 
-### ESP32-S3
+### 🚀 ESP32-S3
 
 Strengths:
 
@@ -145,7 +145,7 @@ ESP32-S3-WROOM-1-N8R8 for 8 MB flash + 8 MB PSRAM
 ESP32-S3-WROOM-1-N16R8 for 16 MB flash + 8 MB PSRAM
 ```
 
-### ESP32-C3
+### 🪙 ESP32-C3
 
 Strengths:
 
@@ -165,7 +165,7 @@ Verdict:
 
 Not recommended for this gateway unless the feature set is reduced significantly.
 
-### ESP32-C6
+### 📡 ESP32-C6
 
 Strengths:
 
@@ -183,7 +183,7 @@ Verdict:
 
 Interesting for future products, but not the best practical choice for this firmware today.
 
-### ESP32-H2
+### 🧵 ESP32-H2
 
 Strengths:
 
@@ -198,9 +198,9 @@ Verdict:
 
 Not suitable.
 
-## Recommended ESP32 Choice
+## 🏆 Recommended ESP32 Choice
 
-### Best Practical Choice
+### ✅ Best Practical Choice
 
 ```text
 ESP32-WROOM-32E, 8 MB or 16 MB flash
@@ -218,7 +218,7 @@ Why:
 
 Avoid 4 MB flash if possible because OTA plus LittleFS plus a web UI can become tight.
 
-### Best High-Margin Choice
+### 🚀 Best High-Margin Choice
 
 ```text
 ESP32-S3-WROOM-1-N16R8
@@ -234,7 +234,7 @@ Why:
 
 This is the best choice if the hardware is still flexible and cost difference is acceptable.
 
-### Best Development Board Choice
+### 🧪 Best Development Board Choice
 
 For early firmware development:
 
@@ -262,9 +262,9 @@ Development board selection should expose enough safe GPIOs for:
 - Fault LED
 - Optional button input
 
-## Flash Size Recommendation
+## 💾 Flash Size Recommendation
 
-### 4 MB Flash
+### ⚠️ 4 MB Flash
 
 Possible, but constrained.
 
@@ -277,7 +277,7 @@ Risks:
 
 Use only for early tests or reduced firmware.
 
-### 8 MB Flash
+### ✅ 8 MB Flash
 
 Recommended minimum.
 
@@ -288,7 +288,7 @@ Allows:
 - History storage
 - Reasonable firmware growth
 
-### 16 MB Flash
+### 🏆 16 MB Flash
 
 Best for product-style firmware.
 
@@ -299,7 +299,7 @@ Allows:
 - More logs/history
 - Easier future expansion
 
-## PSRAM Recommendation
+## 🧠 PSRAM Recommendation
 
 PSRAM is not mandatory for the first version, but it is useful.
 
@@ -315,7 +315,7 @@ Helpful when using:
 
 Recommended if choosing ESP32-S3 or ESP32-WROVER.
 
-## UART and RS485 Considerations
+## 🔌 UART And RS485 Considerations
 
 The firmware should use a hardware UART for RS485.
 
@@ -341,7 +341,7 @@ GPIO0 risk:
 - If pulled low during reset, ESP32 may enter bootloader mode.
 - RS485 transceiver circuits can accidentally influence the pin.
 
-## GPIO Planning
+## 🧷 GPIO Planning
 
 Avoid using strapping pins for critical outputs when possible.
 
@@ -383,7 +383,7 @@ Typical safe planning:
 
 Final GPIO selection must match the real board schematic.
 
-## Memory Risk Areas
+## 🧯 Memory Risk Areas
 
 The most memory-sensitive features are:
 
@@ -404,7 +404,7 @@ Memory control rules:
 - Keep MQTT payload generation centralized.
 - Disable Bluetooth if unused.
 
-## OTA Partition Considerations
+## 🔄 OTA Partition Considerations
 
 OTA requires enough flash for at least two app partitions.
 
@@ -420,7 +420,7 @@ littlefs
 
 For 4 MB flash, OTA plus filesystem may force compromises.
 
-## PlatformIO Board Direction
+## 🧰 PlatformIO Board Direction
 
 Initial development can start with a common board definition such as:
 
@@ -444,7 +444,7 @@ monitor_speed = 115200
 
 The exact `board` value should be selected after confirming the physical module or development board.
 
-## Final Recommendation
+## 🎯 Final Recommendation
 
 Use one of these:
 
@@ -465,4 +465,3 @@ The fallback practical target is:
 ```text
 ESP32-WROOM-32E with at least 8 MB flash
 ```
-

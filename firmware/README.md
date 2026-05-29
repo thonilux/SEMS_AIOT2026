@@ -1,4 +1,4 @@
-# Firmware
+# 🧠 Firmware
 
 PlatformIO firmware will live here.
 
@@ -15,4 +15,3 @@ firmware/
 ```
 
 The active firmware target is ESP32 using the Arduino framework.
-

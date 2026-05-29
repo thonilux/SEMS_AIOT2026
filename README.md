@@ -611,6 +611,10 @@ Current hardware notes:
 - [ESP32 Hardware Capability Analysis](docs/hardware/esp32.md)
 - [LCD Hardware Analysis](docs/hardware/lcd.md)
 
+Development planning:
+
+- [One-Man Army Development Roadmap](docs/architecture/one-man-roadmap.md)
+
 ## Step-by-Step Roadmap
 
 ### Step 0: Project Baseline

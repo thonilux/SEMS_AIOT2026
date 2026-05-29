@@ -564,43 +564,52 @@ Recommended default:
 - Trip on stale meter data enabled.
 - Relay stays OFF after reboot if previous state was trip/lockout.
 
-## Proposed Folder Structure
+## Repository Structure
 
 ```text
 pm1611-rs485-reader/
-├── platformio.ini
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   └── workflows/
 ├── README.md
-├── include/
-│   ├── App.h
-│   ├── BuildConfig.h
-│   └── Version.h
-├── src/
-│   ├── main.cpp
-│   ├── app/
-│   ├── config/
-│   ├── network/
-│   ├── web/
-│   ├── meter/
-│   │   └── profiles/
-│   ├── modbus/
-│   ├── relay/
-│   ├── history/
-│   ├── time/
-│   ├── ui/
-│   └── util/
-├── data/
-│   ├── index.html
-│   ├── app.js
-│   └── style.css
-├── test/
-│   ├── test_config/
-│   ├── test_meter_decode/
-│   └── test_history/
-└── docs/
-    ├── architecture.md
-    ├── modbus-registers.md
-    └── mqtt-api.md
+├── docs/
+│   ├── architecture/
+│   ├── hardware/
+│   │   ├── esp32.md
+│   │   └── lcd.md
+│   ├── api/
+│   └── operations/
+├── firmware/
+│   ├── platformio.ini
+│   ├── include/
+│   ├── src/
+│   ├── lib/
+│   ├── data/
+│   └── test/
+├── hardware/
+├── scripts/
+└── tools/
 ```
+
+Folder purpose:
+
+| Folder | Purpose |
+| --- | --- |
+| `.github/` | GitHub workflows, issue templates, and repository automation |
+| `docs/architecture/` | Firmware architecture, state machines, roadmap, and design decisions |
+| `docs/hardware/` | Hardware selection and integration notes |
+| `docs/api/` | MQTT, web API, payload, and configuration contracts |
+| `docs/operations/` | Flashing, deployment, recovery, and production procedures |
+| `firmware/` | PlatformIO ESP32 firmware project |
+| `firmware/data/` | LittleFS web UI assets |
+| `hardware/` | Schematics, PCB files, enclosure drawings, and wiring diagrams |
+| `scripts/` | Repeatable build, flash, release, and maintenance scripts |
+| `tools/` | Developer utilities, validators, and generators |
+
+Current hardware notes:
+
+- [ESP32 Hardware Capability Analysis](docs/hardware/esp32.md)
+- [LCD Hardware Analysis](docs/hardware/lcd.md)
 
 ## Step-by-Step Roadmap
 
@@ -930,4 +939,3 @@ The next practical step is to confirm the hardware and PlatformIO baseline:
 5. Confirm LCD type, if already selected.
 
 After that, create the PlatformIO baseline and implement Step 0 and Step 1.
-

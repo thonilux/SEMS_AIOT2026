@@ -46,8 +46,6 @@ Current implemented endpoints:
 | ------ | ---------------------- | ------------------------------------- | -------- |
 | `GET`  | `/`                    | Home/status page                      | none yet |
 | `GET`  | `/network`             | Network scan and WiFi credential page | none yet |
-| `GET`  | `/app.css`             | Static UI stylesheet                  | none yet |
-| `GET`  | `/app.js`              | Static UI script                      | none yet |
 | `GET`  | `/device`              | Device config page                    | none yet |
 | `GET`  | `/mqtt`                | MQTT config page                      | none yet |
 | `GET`  | `/modbus`              | Modbus config page                    | none yet |
@@ -72,7 +70,6 @@ Current status:
 - Routes are available in Config Mode through `http://192.168.4.1/`.
 - The same routes are available in Normal Mode through `http://<STA_IP>/` after WiFi connects.
 - If STA connection fails or drops later, firmware can recover by retrying STA and/or starting a fallback AP.
-- The Home and Network screens are served from LittleFS static assets; dynamic data still comes from JSON APIs.
 - The firmware now exposes full config pages and save APIs for Device, MQTT, Modbus, Protection, Display, History, and System settings.
 - Authentication is not implemented yet.
 - Static IP configuration is not implemented yet.

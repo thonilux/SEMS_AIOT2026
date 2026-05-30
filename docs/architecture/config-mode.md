@@ -66,7 +66,6 @@ Additional WiFi recovery behavior in the current firmware:
 - If no WiFi credentials are saved, the device enters `CONFIG_MODE` at boot.
 - If STA connection times out, the firmware can start a fallback AP without a reset.
 - If STA disconnects after a successful connection, the firmware attempts automatic reconnect.
-- The setup Web UI Home and Network pages are served from LittleFS assets, with dynamic data coming from JSON endpoints.
 - The setup Web UI is available from both the AP IP and the STA IP once the server is running.
 
 The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing. Home includes measured progress bars for RAM usage, firmware slot usage, and WiFi signal quality.

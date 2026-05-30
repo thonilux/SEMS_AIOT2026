@@ -64,7 +64,7 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | WiFi save           | Web UI saves SSID/password to NVS using `Preferences`                       |
 | WiFi client         | On reboot, firmware reads NVS, connects as STA, and auto-reconnects         |
 | WiFi recovery       | If STA fails or drops, firmware can fall back to a setup AP again           |
-| Normal Mode Web UI  | Home/Network pages are served from LittleFS at `http://<STA_IP>/` after WiFi connects |
+| Normal Mode Web UI  | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects     |
 | RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
 | Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
 
@@ -82,8 +82,6 @@ Current HTTP endpoints:
 | ------ | ---------------- | ------------------------------------ |
 | `GET`  | `/`              | Home/status UI                       |
 | `GET`  | `/network`       | Network scan and WiFi credential UI  |
-| `GET`  | `/app.css`       | Static UI stylesheet                 |
-| `GET`  | `/app.js`        | Static UI behavior script            |
 | `GET`  | `/api/status`    | Firmware, mode, AP, STA, heap status |
 | `GET`  | `/api/wifi/scan` | Scan nearby WiFi networks            |
 | `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS    |

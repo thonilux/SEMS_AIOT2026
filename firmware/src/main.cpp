@@ -2,6 +2,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <cmath>
 #include <time.h>
 #include "AppMode.h"
 #include "PinMap.h"
@@ -42,6 +43,27 @@ bool ntpSyncStarted = false;
 bool fallbackApActive = false;
 bool timeSynced = false;
 time_t lastNtpSyncEpoch = 0;
+ModbusConfig currentModbusConfig;
+bool currentModbusConfigLoaded = false;
+bool modbusPortReady = false;
+uint32_t lastModbusPollMs = 0;
+
+struct MeterSnapshot {
+  bool online = false;
+  bool valid = false;
+  uint32_t lastPollMs = 0;
+  uint32_t lastSuccessMs = 0;
+  uint32_t lastErrorMs = 0;
+  uint16_t lastErrorCode = 0;
+  float voltage = NAN;
+  float current = NAN;
+  float power = NAN;
+  float frequency = NAN;
+  float pf = NAN;
+  float energy = NAN;
+};
+
+MeterSnapshot meterSnapshot;
 WebServer configServer(80);
 
 void startConfigWebServer();
@@ -244,6 +266,262 @@ String getRtcString() {
   }
 
   return formatDateTime(time(nullptr));
+}
+
+String formatFloatValue(float value, uint8_t decimals, const char* unit = nullptr) {
+  if (isnan(value)) {
+    return String("N/A");
+  }
+
+  char buffer[32] = {};
+  if (unit != nullptr && unit[0] != '\0') {
+    snprintf(buffer, sizeof(buffer), "%.*f %s", decimals, value, unit);
+  } else {
+    snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
+  }
+  return String(buffer);
+}
+
+void resetMeterSnapshot() {
+  meterSnapshot.online = false;
+  meterSnapshot.valid = false;
+  meterSnapshot.voltage = NAN;
+  meterSnapshot.current = NAN;
+  meterSnapshot.power = NAN;
+  meterSnapshot.frequency = NAN;
+  meterSnapshot.pf = NAN;
+  meterSnapshot.energy = NAN;
+}
+
+uint16_t modbusCrc16(const uint8_t* data, size_t length) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if (crc & 0x0001) {
+        crc = (crc >> 1) ^ 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+uint32_t serialConfigFromModbus(const ModbusConfig& cfg) {
+  if (cfg.parity == 0 && cfg.stop_bits == 1) return SERIAL_8E1;
+  if (cfg.parity == 0 && cfg.stop_bits == 2) return SERIAL_8E2;
+  if (cfg.parity == 1 && cfg.stop_bits == 1) return SERIAL_8O1;
+  if (cfg.parity == 1 && cfg.stop_bits == 2) return SERIAL_8O2;
+  if (cfg.parity == 2 && cfg.stop_bits == 2) return SERIAL_8N2;
+  return SERIAL_8N1;
+}
+
+void applyModbusPortConfig(const ModbusConfig& cfg) {
+  const bool needsInit = !modbusPortReady ||
+                         currentModbusConfig.baudrate != cfg.baudrate ||
+                         currentModbusConfig.parity != cfg.parity ||
+                         currentModbusConfig.stop_bits != cfg.stop_bits;
+  if (!needsInit) {
+    Serial2.setTimeout(cfg.timeout_ms);
+    currentModbusConfig = cfg;
+    return;
+  }
+
+  Serial2.end();
+  delay(20);
+  Serial2.begin(cfg.baudrate, serialConfigFromModbus(cfg), PinMap::kRs485Rx, PinMap::kRs485Tx);
+  currentModbusConfig = cfg;
+  currentModbusConfigLoaded = true;
+  modbusPortReady = true;
+
+  Serial.print("Modbus UART2 ready: baud=");
+  Serial.print(cfg.baudrate);
+  Serial.print(" slave=");
+  Serial.print(cfg.slave_id);
+  Serial.print(" parity=");
+  Serial.print(cfg.parity);
+  Serial.print(" stop_bits=");
+  Serial.println(cfg.stop_bits);
+  Serial2.setTimeout(cfg.timeout_ms);
+  currentModbusConfig = cfg;
+}
+
+bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
+  exceptionCode = 0;
+  if (quantity == 0 || quantity > 64 || response == nullptr || responseLen < quantity * 2) {
+    return false;
+  }
+
+  uint8_t request[8];
+  request[0] = slaveId;
+  request[1] = 0x03;
+  request[2] = static_cast<uint8_t>(startRegister >> 8);
+  request[3] = static_cast<uint8_t>(startRegister & 0xFF);
+  request[4] = static_cast<uint8_t>(quantity >> 8);
+  request[5] = static_cast<uint8_t>(quantity & 0xFF);
+  const uint16_t crc = modbusCrc16(request, 6);
+  request[6] = static_cast<uint8_t>(crc & 0xFF);
+  request[7] = static_cast<uint8_t>(crc >> 8);
+
+  while (Serial2.available() > 0) {
+    Serial2.read();
+  }
+
+  Serial2.write(request, sizeof(request));
+  Serial2.flush();
+
+  const uint32_t deadline = millis() + timeoutMs;
+  while (Serial2.available() < 3 && millis() < deadline) {
+    delay(1);
+  }
+  if (Serial2.available() < 3) {
+    return false;
+  }
+
+  uint8_t header[3];
+  if (Serial2.readBytes(header, sizeof(header)) != sizeof(header)) {
+    return false;
+  }
+
+  if (header[0] != slaveId) {
+    return false;
+  }
+
+  if (header[1] & 0x80) {
+    while (Serial2.available() < 2 && millis() < deadline) {
+      delay(1);
+    }
+    if (Serial2.available() < 2) {
+      return false;
+    }
+    uint8_t exceptionCrc[2];
+    if (Serial2.readBytes(exceptionCrc, sizeof(exceptionCrc)) != sizeof(exceptionCrc)) {
+      return false;
+    }
+    exceptionCode = header[2];
+    return false;
+  }
+
+  const uint8_t byteCount = header[2];
+  if (byteCount != quantity * 2 || byteCount > responseLen) {
+    return false;
+  }
+
+  while (Serial2.available() < byteCount + 2 && millis() < deadline) {
+    delay(1);
+  }
+  if (Serial2.available() < byteCount + 2) {
+    return false;
+  }
+
+  if (Serial2.readBytes(response, byteCount) != byteCount) {
+    return false;
+  }
+
+  uint8_t crcBytes[2];
+  if (Serial2.readBytes(crcBytes, sizeof(crcBytes)) != sizeof(crcBytes)) {
+    return false;
+  }
+
+  uint8_t frame[3 + 64];
+  frame[0] = header[0];
+  frame[1] = header[1];
+  frame[2] = header[2];
+  memcpy(frame + 3, response, byteCount);
+  const uint16_t expectedCrc = modbusCrc16(frame, 3 + byteCount);
+  const uint16_t receivedCrc = static_cast<uint16_t>(crcBytes[0]) | (static_cast<uint16_t>(crcBytes[1]) << 8);
+  return expectedCrc == receivedCrc;
+}
+
+float decodeFloat32BigEndian(const uint8_t* data) {
+  const uint32_t bits = (static_cast<uint32_t>(data[0]) << 24) |
+                        (static_cast<uint32_t>(data[1]) << 16) |
+                        (static_cast<uint32_t>(data[2]) << 8) |
+                        static_cast<uint32_t>(data[3]);
+  float value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+bool readSchneiderFloat(uint8_t slaveId, uint16_t startRegister, float& value, uint32_t timeoutMs) {
+  uint8_t buffer[4];
+  uint16_t exceptionCode = 0;
+  if (!modbusReadHoldingRegisters(slaveId, startRegister, 2, buffer, sizeof(buffer), exceptionCode, timeoutMs)) {
+    return false;
+  }
+
+  value = decodeFloat32BigEndian(buffer);
+  return true;
+}
+
+void pollModbusMeter(uint32_t nowMs) {
+  const ModbusConfig cfg = currentModbusConfigLoaded ? currentModbusConfig : ConfigManager::loadModbusConfig();
+  currentModbusConfig = cfg;
+  currentModbusConfigLoaded = true;
+
+  if (currentMode != AppMode::Normal || WiFi.status() != WL_CONNECTED) {
+    resetMeterSnapshot();
+    return;
+  }
+
+  applyModbusPortConfig(cfg);
+
+  if (nowMs - lastModbusPollMs < cfg.poll_interval_ms) {
+    return;
+  }
+  lastModbusPollMs = nowMs;
+
+  meterSnapshot.lastPollMs = nowMs;
+  meterSnapshot.online = false;
+  meterSnapshot.valid = false;
+
+  const uint8_t slaveId = cfg.slave_id == 0 ? 1 : cfg.slave_id;
+  const uint16_t voltageReg = 3027;
+  const uint16_t currentReg = 2999;
+  const uint16_t powerReg = 3053;
+  const uint16_t frequencyReg = 3109;
+  const uint16_t energyReg = 2675;
+
+  float voltage = NAN;
+  float current = NAN;
+  float power = NAN;
+  float frequency = NAN;
+  float energy = NAN;
+
+  bool ok = true;
+  ok = ok && readSchneiderFloat(slaveId, voltageReg, voltage, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, currentReg, current, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, powerReg, power, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, frequencyReg, frequency, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, energyReg, energy, cfg.timeout_ms);
+
+  if (ok) {
+    meterSnapshot.online = true;
+    meterSnapshot.valid = true;
+    meterSnapshot.lastSuccessMs = nowMs;
+    meterSnapshot.voltage = voltage;
+    meterSnapshot.current = current;
+    meterSnapshot.power = power;
+    meterSnapshot.frequency = frequency;
+    meterSnapshot.energy = energy;
+    Serial.print("Modbus meter ok: V=");
+    Serial.print(voltage, 2);
+    Serial.print(" I=");
+    Serial.print(current, 2);
+    Serial.print(" P=");
+    Serial.print(power, 2);
+    Serial.print(" F=");
+    Serial.print(frequency, 2);
+    Serial.print(" E=");
+    Serial.println(energy, 3);
+  } else {
+    meterSnapshot.lastErrorMs = nowMs;
+    meterSnapshot.lastErrorCode = 1;
+    meterSnapshot.online = false;
+    meterSnapshot.valid = false;
+    Serial.println("Modbus meter read failed");
+  }
 }
 
 void startNtpSync() {
@@ -578,9 +856,9 @@ String buildModbusConfigPage() {
   page += String(cfg.retry_count);
   page += F("\"><label for=\"modbus_profile\">Meter Profile</label><select id=\"modbus_profile\"><option value=\"0\"");
   page += cfg.meter_profile == 0 ? F(" selected") : F("");
-  page += F(">PM2230</option><option value=\"1\"");
+  page += F(">Schneider EM6400 / PM2xxx</option><option value=\"1\"");
   page += cfg.meter_profile == 1 ? F(" selected") : F("");
-  page += F(">PM1611</option></select>");
+  page += F(">Generic float32</option></select>");
   page += F("<div class=\"actions\"><button onclick=\"saveModbusConfig()\">Save Modbus Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
   page += F("<script>async function saveModbusConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id:document.getElementById('modbus_slave_id').value,");
@@ -845,6 +1123,11 @@ void handleModbusConfigSaveApi() {
   cfg.meter_profile = configServer.hasArg("modbus_profile") ? configServer.arg("modbus_profile").toInt() : 0;
 
   bool ok = ConfigManager::saveModbusConfig(cfg);
+  if (ok) {
+    currentModbusConfig = cfg;
+    currentModbusConfigLoaded = true;
+    modbusPortReady = false;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1004,6 +1287,60 @@ void handleStatusApi() {
   body += F(",\"uptime_text\":\"");
   body += formatUptime(millis());
   body += F("\"");
+  body += F(",\"meter_online\":");
+  body += meterSnapshot.online ? F("true") : F("false");
+  body += F(",\"meter_valid\":");
+  body += meterSnapshot.valid ? F("true") : F("false");
+  body += F(",\"meter_voltage\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
+  body += F("\",\"meter_current\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
+  body += F("\",\"meter_power\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
+  body += F("\",\"meter_frequency\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
+  body += F("\",\"meter_pf\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
+  body += F("\",\"meter_energy\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
+  body += F("\",\"meter_last_poll_ms\":");
+  body += String(meterSnapshot.lastPollMs);
+  body += F(",\"meter_last_success_ms\":");
+  body += String(meterSnapshot.lastSuccessMs);
+  body += F("}");
+
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", body);
+}
+
+void handleMeterPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildMeterPage());
+}
+
+void handleMeterStatusApi() {
+  String body;
+  body.reserve(256);
+  body += F("{\"online\":");
+  body += meterSnapshot.online ? F("true") : F("false");
+  body += F(",\"valid\":");
+  body += meterSnapshot.valid ? F("true") : F("false");
+  body += F(",\"voltage\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
+  body += F("\",\"current\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
+  body += F("\",\"power\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
+  body += F("\",\"frequency\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
+  body += F("\",\"pf\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
+  body += F("\",\"energy\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
+  body += F("\",\"last_poll_ms\":");
+  body += String(meterSnapshot.lastPollMs);
+  body += F(",\"last_success_ms\":");
+  body += String(meterSnapshot.lastSuccessMs);
   body += F("}");
 
   sendNoCacheHeader();
@@ -1096,6 +1433,7 @@ void startConfigWebServer() {
   }
 
   configServer.on("/", HTTP_GET, handleSetupRoot);
+  configServer.on("/meter", HTTP_GET, handleMeterPage);
   configServer.on("/network", HTTP_GET, handleNetworkPage);
   configServer.on("/device", HTTP_GET, handleDeviceConfigPage);
   configServer.on("/mqtt", HTTP_GET, handleMqttConfigPage);
@@ -1105,6 +1443,7 @@ void startConfigWebServer() {
   configServer.on("/history", HTTP_GET, handleHistoryConfigPage);
   configServer.on("/system", HTTP_GET, handleSystemConfigPage);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
+  configServer.on("/api/meter/status", HTTP_GET, handleMeterStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
   configServer.on("/api/device/save", HTTP_POST, handleDeviceConfigSaveApi);
@@ -1218,6 +1557,9 @@ void setup() {
   printChipInfo();
   printButtonInfo();
   loadWifiConfig();
+  currentModbusConfig = ConfigManager::loadModbusConfig();
+  currentModbusConfigLoaded = true;
+  resetMeterSnapshot();
   if (hasSavedWifi) {
     wifiConnecting = true;
     wifiConnectStartedMs = millis();
@@ -1234,6 +1576,7 @@ void loop() {
   updateStatusLed(nowMs);
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
+  pollModbusMeter(nowMs);
   if (configWebStarted) {
     configServer.handleClient();
   }

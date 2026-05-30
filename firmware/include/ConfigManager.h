@@ -36,7 +36,7 @@ struct ModbusConfig {
   uint16_t poll_interval_ms;
   uint16_t timeout_ms;
   uint8_t retry_count;
-  uint8_t meter_profile;    // 0=PM2230, 1=PM1611
+  uint8_t meter_profile;    // 0=Schneider EM6400 / PM2xxx, 1=Generic float32
 };
 
 struct ProtectionConfig {

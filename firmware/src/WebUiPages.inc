@@ -22,7 +22,7 @@ String buildPageHeader(const String& title) {
   page += htmlEscape(title);
   page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div>");
   page += F("<button class=\"menuBtn\" onclick=\"toggleMenu()\">â˜°</button>");
-  page += F("<nav id=\"mainNav\"><a href=\"/\">ðŸ  Home</a>");
+  page += F("<nav id=\"mainNav\"><a href=\"/\">ðŸ  Home</a><a href=\"/meter\">Meter</a>");
 
   if (currentMode == AppMode::Config || configApStarted) {
       page += F("<a href=\"/network\">ðŸ“¶ Network</a>");
@@ -81,6 +81,41 @@ String buildHomePage() {
   page += F("<div class=\"metric\"><div class=\"metricTop\"><span>WiFi Signal</span><span>");
   page += String(getWifiQualityPercent()); page += F("%</span></div><div class=\"track\"><div class=\"fill\" style=\"width:"); page += String(getWifiQualityPercent()); page += F("%\"></div></div><div class=\"muted\">"); page += wifiConnected ? String(WiFi.RSSI()) + String(" dBm") : String("no link"); page += F("</div></div>");
   page += F("</section>");
+  page += F("<section class=\"panel\"><div class=\"muted\">RS485 meter</div>");
+  page += F("<div class=\"grid\">");
+  page += F("<div>Status</div><div>"); page += meterSnapshot.online ? F("online") : F("offline"); page += F("</div>");
+  page += F("<div>Voltage</div><div>"); page += formatFloatValue(meterSnapshot.voltage, 2, "V"); page += F("</div>");
+  page += F("<div>Current</div><div>"); page += formatFloatValue(meterSnapshot.current, 2, "A"); page += F("</div>");
+  page += F("<div>Power</div><div>"); page += formatFloatValue(meterSnapshot.power, 2, "kW"); page += F("</div>");
+  page += F("<div>Frequency</div><div>"); page += formatFloatValue(meterSnapshot.frequency, 2, "Hz"); page += F("</div>");
+  page += F("<div>Energy</div><div>"); page += formatFloatValue(meterSnapshot.energy, 3, "kWh"); page += F("</div>");
+  page += F("<div>Last poll</div><div>"); page += meterSnapshot.lastPollMs > 0 ? formatUptime(meterSnapshot.lastPollMs) : String("pending"); page += F("</div>");
+  page += F("</div></section>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildMeterPage() {
+  String page = buildPageHeader(F("Meter"));
+  page += F("<section class=\"panel\"><div class=\"muted\">Schneider EM6400 / PM2xxx bootstrap</div>");
+  page += F("<div class=\"grid\">");
+  page += F("<div>Status</div><div>"); page += meterSnapshot.online ? F("online") : F("offline"); page += F("</div>");
+  page += F("<div>Valid</div><div>"); page += meterSnapshot.valid ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Voltage A-N</div><div>"); page += formatFloatValue(meterSnapshot.voltage, 2, "V"); page += F("</div>");
+  page += F("<div>Current A</div><div>"); page += formatFloatValue(meterSnapshot.current, 2, "A"); page += F("</div>");
+  page += F("<div>Active Power A</div><div>"); page += formatFloatValue(meterSnapshot.power, 2, "kW"); page += F("</div>");
+  page += F("<div>Frequency</div><div>"); page += formatFloatValue(meterSnapshot.frequency, 2, "Hz"); page += F("</div>");
+  page += F("<div>Power factor</div><div>"); page += formatFloatValue(meterSnapshot.pf, 2, ""); page += F("</div>");
+  page += F("<div>Energy</div><div>"); page += formatFloatValue(meterSnapshot.energy, 3, "kWh"); page += F("</div>");
+  page += F("<div>Last success</div><div>"); page += meterSnapshot.lastSuccessMs > 0 ? formatUptime(meterSnapshot.lastSuccessMs) : String("pending"); page += F("</div>");
+  page += F("</div></section>");
+  page += F("<section class=\"panel\"><div class=\"metric\"><div class=\"metricTop\"><span>Meter online</span><span>");
+  page += meterSnapshot.online ? F("yes") : F("no");
+  page += F("</span></div><div class=\"track\"><div class=\"fill\" style=\"width:");
+  page += meterSnapshot.online ? F("100") : F("0");
+  page += F("%\"></div></div><div class=\"muted\">");
+  page += meterSnapshot.online ? F("RS485 responds to bootstrap profile.") : F("Waiting for a valid Modbus reply.");
+  page += F("</div></div></section>");
   page += buildPageFooter();
   return page;
 }

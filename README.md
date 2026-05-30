@@ -663,7 +663,7 @@ Folder purpose:
 | `docs/api/`          | MQTT, web API, payload, and configuration contracts                  |
 | `docs/operations/`   | Flashing, deployment, recovery, and production procedures            |
 | `firmware/`          | PlatformIO ESP32 firmware project                                    |
-| `firmware/data/`     | LittleFS web UI assets                                               |
+| `firmware/data/`     | Reserved for optional LittleFS assets and future static files       |
 | `hardware/`          | Schematics, PCB files, enclosure drawings, and wiring diagrams       |
 | `scripts/`           | Repeatable build, flash, release, and maintenance scripts            |
 | `tools/`             | Developer utilities, validators, and generators                      |

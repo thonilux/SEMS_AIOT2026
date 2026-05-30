@@ -69,6 +69,7 @@ Current status:
 
 - Routes are available in Config Mode through `http://192.168.4.1/`.
 - The same routes are available in Normal Mode through `http://<STA_IP>/` after WiFi connects.
+- If STA connection fails or drops later, firmware can recover by retrying STA and/or starting a fallback AP.
 - The firmware now exposes full config pages and save APIs for Device, MQTT, Modbus, Protection, Display, History, and System settings.
 - Authentication is not implemented yet.
 - Static IP configuration is not implemented yet.

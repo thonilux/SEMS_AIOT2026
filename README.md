@@ -62,7 +62,8 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | Setup Web UI        | Available at `http://192.168.4.1/` in Config Mode                           |
 | WiFi scan           | Web UI can scan nearby WiFi networks                                        |
 | WiFi save           | Web UI saves SSID/password to NVS using `Preferences`                       |
-| WiFi client         | On reboot, firmware reads NVS and connects as STA                           |
+| WiFi client         | On reboot, firmware reads NVS, connects as STA, and auto-reconnects         |
+| WiFi recovery       | If STA fails or drops, firmware can fall back to a setup AP again           |
 | Normal Mode Web UI  | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects     |
 | RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
 | Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
@@ -91,6 +92,7 @@ Current limitations:
 - No login/session protection yet.
 - No static IP configuration yet.
 - No explicit WiFi test-before-save endpoint yet.
+- No dedicated WiFi verify endpoint yet; current validation happens through connect + timeout + fallback AP behavior.
 - No RS485/Modbus polling yet.
 - No hardware RTC backup across power loss yet; time is restored through NTP after WiFi connects.
 - No MQTT, relay protection, LCD, OTA, or production auth yet.

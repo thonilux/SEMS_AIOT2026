@@ -122,6 +122,8 @@ Normal Mode
   -> connects to saved WiFi as STA when credentials exist
   -> syncs RTC from NTP after WiFi connects
   -> starts lightweight Web UI at http://<STA_IP>/ after STA connects
+  -> auto-reconnects if STA drops later
+  -> can start a fallback AP if STA times out
 
 Runtime config entry
   -> hold GPIO32 to GND for 5 seconds
@@ -486,7 +488,7 @@ Recommended order:
 
 1. Config mode AP. Done.
 2. Minimal Web UI and WiFi scan. Done.
-3. WiFi setup, NVS persistence, reboot flow, and STA Web UI. Done.
+3. WiFi setup, NVS persistence, reboot flow, STA Web UI, and WiFi recovery logic. Done.
 4. Login shell and admin/user protection. Next security hardening item.
 5. Status page with richer device info.
 6. Configurable Modbus engine.

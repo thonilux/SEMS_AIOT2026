@@ -61,6 +61,13 @@ Current firmware implementation:
 | `NORMAL_MODE` | Loads WiFi credentials from NVS, connects as STA, starts the lightweight Web UI on the STA IP if connected |
 | `CONFIG_MODE` | Entered by holding `GPIO32` to `GND` for 5 seconds, turns builtin LED ON, starts setup AP and Web UI       |
 
+Additional WiFi recovery behavior in the current firmware:
+
+- If no WiFi credentials are saved, the device enters `CONFIG_MODE` at boot.
+- If STA connection times out, the firmware can start a fallback AP without a reset.
+- If STA disconnects after a successful connection, the firmware attempts automatic reconnect.
+- The setup Web UI is available from both the AP IP and the STA IP once the server is running.
+
 The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing. Home includes measured progress bars for RAM usage, firmware slot usage, and WiFi signal quality.
 
 Current RTC baseline:
@@ -510,7 +517,8 @@ Rules:
 
 ```text
 If WiFi credentials are missing -> Config Mode
-If WiFi fails repeatedly -> Config Mode fallback
+If WiFi fails to connect -> fallback AP recovery path
+If WiFi disconnects later -> automatic reconnect
 If config file is corrupt -> Config Mode with defaults
 If admin password is lost -> factory reset path later
 If Modbus config is invalid -> allow Web UI correction
@@ -614,7 +622,7 @@ Implement the WiFi verification and recovery layer:
 ```text
 show saved SSID and STA IP clearly
 add explicit test/connect endpoint if needed
-add fallback AP behavior after repeated STA failure
+add fallback AP behavior after STA timeout
 add clear/reconfigure WiFi endpoint
 ```
 

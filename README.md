@@ -67,6 +67,8 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | Normal Mode Web UI  | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects     |
 | RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
 | Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
+| Web UI structure    | Lightweight string-render UI, with page helpers split into `WebUiPages.inc` |
+| LittleFS trial      | Tried for static UI, then rolled back because string render felt lighter     |
 
 Current verified board identity:
 
@@ -96,6 +98,7 @@ Current limitations:
 - No RS485/Modbus polling yet.
 - No hardware RTC backup across power loss yet; time is restored through NTP after WiFi connects.
 - No MQTT, relay protection, LCD, OTA, or production auth yet.
+- LittleFS UI is not the active path; the current UI stays string-rendered and split into a helper file for readability.
 
 ## 🧰 Target Platform
 

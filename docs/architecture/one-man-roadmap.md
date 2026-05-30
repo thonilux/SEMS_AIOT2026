@@ -70,6 +70,8 @@ Current status:
 | WiFi recovery flow         | Done        | STA timeout can spawn a fallback AP again, and STA reconnect is automatic after link loss                       |
 | Normal Mode Web UI         | Done        | Same lightweight UI starts on the STA IP after WiFi connects                                                     |
 | RTC / NTP baseline         | Done        | NTP sync after WiFi connect, RTC string exposed in serial/Web UI/API                                             |
+| Web UI code split          | Done        | String-render helpers live in `firmware/src/WebUiPages.inc` for cleaner maintenance                             |
+| LittleFS UI experiment     | Done        | Tried and rolled back; current UI stays string-rendered because it felt lighter on this board                   |
 | RS485 Modbus proof         | Not started | Use configurable static map first                                                                                |
 
 Current next milestone:

@@ -66,7 +66,7 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | WiFi recovery       | If STA fails or drops, firmware can fall back to a setup AP again           |
 | Normal Mode Web UI  | Home/Network pages are served from LittleFS at `http://<STA_IP>/` after WiFi connects |
 | RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
-| Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
+| Home dashboard      | Shows status plus RAM, firmware slot, LittleFS, and WiFi signal progress bars |
 
 Current verified board identity:
 

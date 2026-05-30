@@ -141,6 +141,12 @@ Future expanded response:
   "firmware": "0.1.0-dev",
   "chip": "ESP32-D0WD-V3",
   "flash_mb": 4,
+  "littlefs_ready": true,
+  "littlefs_total": 65536,
+  "littlefs_total_human": "64.0 KB",
+  "littlefs_used": 8192,
+  "littlefs_used_human": "8.0 KB",
+  "littlefs_used_percent": 12,
   "free_heap": 350968,
   "uptime_ms": 12000,
   "ap": {

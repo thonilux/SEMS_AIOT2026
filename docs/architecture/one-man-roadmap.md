@@ -45,30 +45,31 @@ Countermeasures:
 
 Current status:
 
-| Area | Status | Notes |
-| --- | --- | --- |
-| Repository structure | Done | Professional folder clustering is in place |
-| GitHub remote | Done | Repo pushed to `thonilux/pm1611-rs485-reader` |
-| Laptop tooling | Done | Git, Python, PlatformIO, npm/npx, VS Code checked |
-| Storage cleanup | Done | C drive and dev caches cleaned |
-| ESP32 board detection | Done | ESP32-D0WD-V3 on COM3 CH340 |
-| Firmware boot baseline | Done | Built, flashed, serial heartbeat verified |
-| ESP32 hardware analysis | Done | `docs/hardware/esp32.md` |
-| LCD hardware analysis | Done | `docs/hardware/lcd.md` |
-| Prototype schematic review | Done | `docs/hardware/prototype-schematic.md` |
-| Prototype pin map | Done | `docs/hardware/pin-map.md` |
-| PM1611 manual feature map | Done | `docs/architecture/pm1611-feature-adaptation.md` |
-| Configurable Modbus design | Done | `docs/architecture/configurable-modbus-engine.md` |
-| Config Mode design | Done | `docs/architecture/config-mode.md` |
-| Config Mode API draft | Done | `docs/api/config-mode-api.md` |
-| Modbus Config API draft | Done | `docs/api/modbus-config-api.md` |
-| Config button firmware | Done | Runtime GPIO32 hold selects `CONFIG_MODE` and turns builtin LED ON |
-| WiFi AP Config Mode | Done | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}` |
-| Web UI setup portal | Done | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1` |
-| WiFi NVS persistence | Done | Setup UI saves SSID/password to NVS and boot attempts STA connection |
-| Normal Mode Web UI | Done | Same lightweight UI starts on the STA IP after WiFi connects |
-| RTC / NTP baseline | Done | NTP sync after WiFi connect, RTC string exposed in serial/Web UI/API |
-| RS485 Modbus proof | Not started | Use configurable static map first |
+| Area                       | Status      | Notes                                                                                                            |
+| -------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| Repository structure       | Done        | Professional folder clustering is in place                                                                       |
+| GitHub remote              | Done        | Repo pushed to `thonilux/pm1611-rs485-reader`                                                                    |
+| Laptop tooling             | Done        | Git, Python, PlatformIO, npm/npx, VS Code checked                                                                |
+| Storage cleanup            | Done        | C drive and dev caches cleaned                                                                                   |
+| ESP32 board detection      | Done        | ESP32-D0WD-V3 on COM3 CH340                                                                                      |
+| Firmware boot baseline     | Done        | Built, flashed, serial heartbeat verified                                                                        |
+| ESP32 hardware analysis    | Done        | `docs/hardware/esp32.md`                                                                                         |
+| LCD hardware analysis      | Done        | `docs/hardware/lcd.md`                                                                                           |
+| Prototype schematic review | Done        | `docs/hardware/prototype-schematic.md`                                                                           |
+| Prototype pin map          | Done        | `docs/hardware/pin-map.md`                                                                                       |
+| PM1611 manual feature map  | Done        | `docs/architecture/pm1611-feature-adaptation.md`                                                                 |
+| Configurable Modbus design | Done        | `docs/architecture/configurable-modbus-engine.md`                                                                |
+| Config Mode design         | Done        | `docs/architecture/config-mode.md`                                                                               |
+| Config Mode API draft      | Done        | `docs/api/config-mode-api.md`                                                                                    |
+| Modbus Config API draft    | Done        | `docs/api/modbus-config-api.md`                                                                                  |
+| Config button firmware     | Done        | Runtime GPIO32 hold selects `CONFIG_MODE` and turns builtin LED ON                                               |
+| WiFi AP Config Mode        | Done        | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}`                                                        |
+| Web UI setup portal        | Done        | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1`                                       |
+| Web UI config pages        | Done        | Device, MQTT, Modbus, Protection, Display, History, and System settings pages are implemented and persist to NVS |
+| WiFi NVS persistence       | Done        | Setup UI saves SSID/password to NVS and boot attempts STA connection                                             |
+| Normal Mode Web UI         | Done        | Same lightweight UI starts on the STA IP after WiFi connects                                                     |
+| RTC / NTP baseline         | Done        | NTP sync after WiFi connect, RTC string exposed in serial/Web UI/API                                             |
+| RS485 Modbus proof         | Not started | Use configurable static map first                                                                                |
 
 Current next milestone:
 

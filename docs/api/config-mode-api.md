@@ -42,38 +42,53 @@ first boot password change
 
 Current implemented endpoints:
 
-| Method | Path | Purpose | Auth |
-| --- | --- | --- | --- |
-| `GET` | `/` | Home/status page | none yet |
-| `GET` | `/network` | Network scan and WiFi credential page | none yet |
-| `GET` | `/api/status` | Firmware, mode, AP, STA, heap status | none yet |
-| `GET` | `/api/wifi/scan` | Scan nearby WiFi networks | none yet |
-| `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS | none yet |
-| `POST` | `/api/reboot` | Reboot after config save | none yet |
+| Method | Path                   | Purpose                               | Auth     |
+| ------ | ---------------------- | ------------------------------------- | -------- |
+| `GET`  | `/`                    | Home/status page                      | none yet |
+| `GET`  | `/network`             | Network scan and WiFi credential page | none yet |
+| `GET`  | `/device`              | Device config page                    | none yet |
+| `GET`  | `/mqtt`                | MQTT config page                      | none yet |
+| `GET`  | `/modbus`              | Modbus config page                    | none yet |
+| `GET`  | `/protection`          | Protection config page                | none yet |
+| `GET`  | `/display`             | Display config page                   | none yet |
+| `GET`  | `/history`             | History config page                   | none yet |
+| `GET`  | `/system`              | System config page                    | none yet |
+| `GET`  | `/api/status`          | Firmware, mode, AP, STA, heap status  | none yet |
+| `GET`  | `/api/wifi/scan`       | Scan nearby WiFi networks             | none yet |
+| `POST` | `/api/wifi/save`       | Save `ssid` and `password` to NVS     | none yet |
+| `POST` | `/api/device/save`     | Save device metadata                  | none yet |
+| `POST` | `/api/mqtt/save`       | Save MQTT config                      | none yet |
+| `POST` | `/api/modbus/save`     | Save Modbus config                    | none yet |
+| `POST` | `/api/protection/save` | Save protection config                | none yet |
+| `POST` | `/api/display/save`    | Save display config                   | none yet |
+| `POST` | `/api/history/save`    | Save history config                   | none yet |
+| `POST` | `/api/system/save`     | Save system/NTP config                | none yet |
+| `POST` | `/api/reboot`          | Reboot after config save              | none yet |
 
 Current status:
 
 - Routes are available in Config Mode through `http://192.168.4.1/`.
 - The same routes are available in Normal Mode through `http://<STA_IP>/` after WiFi connects.
+- The firmware now exposes full config pages and save APIs for Device, MQTT, Modbus, Protection, Display, History, and System settings.
 - Authentication is not implemented yet.
 - Static IP configuration is not implemented yet.
 
 Future target endpoint overview:
 
-| Method | Path | Purpose | Role |
-| --- | --- | --- | --- |
-| `GET` | `/api/setup/status` | Read setup/system status | user |
-| `GET` | `/api/setup/scan-wifi` | Scan WiFi networks | admin |
-| `GET` | `/api/setup/config` | Read sanitized config | admin |
-| `PUT` | `/api/setup/config` | Replace full setup config | admin |
-| `PUT` | `/api/setup/wifi` | Save WiFi config | admin |
-| `PUT` | `/api/setup/device` | Save device info | admin |
-| `PUT` | `/api/setup/mqtt` | Save MQTT config | admin |
-| `PUT` | `/api/setup/time` | Save NTP/time config | admin |
-| `PUT` | `/api/setup/protection` | Save protection config | admin |
-| `POST` | `/api/setup/validate` | Validate pending config | admin |
-| `POST` | `/api/setup/reboot` | Save/flush and reboot | admin |
-| `POST` | `/api/setup/factory-reset` | Factory reset, future | admin |
+| Method | Path                       | Purpose                   | Role  |
+| ------ | -------------------------- | ------------------------- | ----- |
+| `GET`  | `/api/setup/status`        | Read setup/system status  | user  |
+| `GET`  | `/api/setup/scan-wifi`     | Scan WiFi networks        | admin |
+| `GET`  | `/api/setup/config`        | Read sanitized config     | admin |
+| `PUT`  | `/api/setup/config`        | Replace full setup config | admin |
+| `PUT`  | `/api/setup/wifi`          | Save WiFi config          | admin |
+| `PUT`  | `/api/setup/device`        | Save device info          | admin |
+| `PUT`  | `/api/setup/mqtt`          | Save MQTT config          | admin |
+| `PUT`  | `/api/setup/time`          | Save NTP/time config      | admin |
+| `PUT`  | `/api/setup/protection`    | Save protection config    | admin |
+| `POST` | `/api/setup/validate`      | Validate pending config   | admin |
+| `POST` | `/api/setup/reboot`        | Save/flush and reboot     | admin |
+| `POST` | `/api/setup/factory-reset` | Factory reset, future     | admin |
 
 Modbus-specific endpoints are defined in:
 

@@ -56,10 +56,10 @@ NORMAL_MODE
 
 Current firmware implementation:
 
-| Mode | Current behavior |
-| --- | --- |
+| Mode          | Current behavior                                                                                           |
+| ------------- | ---------------------------------------------------------------------------------------------------------- |
 | `NORMAL_MODE` | Loads WiFi credentials from NVS, connects as STA, starts the lightweight Web UI on the STA IP if connected |
-| `CONFIG_MODE` | Entered by holding `GPIO32` to `GND` for 5 seconds, turns builtin LED ON, starts setup AP and Web UI |
+| `CONFIG_MODE` | Entered by holding `GPIO32` to `GND` for 5 seconds, turns builtin LED ON, starts setup AP and Web UI       |
 
 The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing. Home includes measured progress bars for RAM usage, firmware slot usage, and WiFi signal quality.
 
@@ -91,11 +91,11 @@ Why GPIO32:
 
 Button actions:
 
-| Action | Duration | Behavior |
-| --- | --- | --- |
-| Long press during Normal Mode | 5 seconds | Enter Config Mode without reset and turn builtin LED ON |
-| Hold during boot | 10 seconds | Factory reset, future feature |
-| Short press | < 1 second | Reserved, no action initially |
+| Action                        | Duration   | Behavior                                                |
+| ----------------------------- | ---------- | ------------------------------------------------------- |
+| Long press during Normal Mode | 5 seconds  | Enter Config Mode without reset and turn builtin LED ON |
+| Hold during boot              | 10 seconds | Factory reset, future feature                           |
+| Short press                   | < 1 second | Reserved, no action initially                           |
 
 Implementation note:
 
@@ -202,6 +202,20 @@ Minimum Config Mode pages:
 /setup/reboot
 ```
 
+Current implemented pages:
+
+```text
+/
+/network
+/device
+/mqtt
+/modbus
+/protection
+/display
+/history
+/system
+```
+
 Initial MVP pages:
 
 ```text
@@ -218,6 +232,8 @@ Then add:
 /setup/mqtt
 /setup/protection
 ```
+
+The current firmware already includes the additional config pages above, backed by `ConfigManager` persistence.
 
 ## 🧾 Setup Dashboard Information
 
@@ -331,9 +347,9 @@ Initial MVP can store everything in NVS or a static struct while building the mo
 
 Current MVP NVS keys:
 
-| Namespace | Key | Value |
-| --- | --- | --- |
-| `network` | `wifi_ssid` | Saved WiFi SSID |
+| Namespace | Key         | Value               |
+| --------- | ----------- | ------------------- |
+| `network` | `wifi_ssid` | Saved WiFi SSID     |
 | `network` | `wifi_pass` | Saved WiFi password |
 
 Final design:
@@ -374,15 +390,15 @@ CSRF token for state-changing requests
 
 Access model:
 
-| Page/API | Admin | User |
-| --- | --- | --- |
-| View setup dashboard | yes | yes |
-| Change WiFi | yes | no |
-| Change Modbus config | yes | no |
-| Change MQTT config | yes | no |
-| Change relay/protection | yes | no |
-| Reboot | yes | no |
-| OTA | yes | no |
+| Page/API                | Admin | User |
+| ----------------------- | ----- | ---- |
+| View setup dashboard    | yes   | yes  |
+| Change WiFi             | yes   | no   |
+| Change Modbus config    | yes   | no   |
+| Change MQTT config      | yes   | no   |
+| Change relay/protection | yes   | no   |
+| Reboot                  | yes   | no   |
+| OTA                     | yes   | no   |
 
 ## 🛜 Captive Portal Behavior
 
@@ -403,18 +419,18 @@ http://192.168.4.1
 
 In Config Mode:
 
-| Service | Behavior |
-| --- | --- |
-| WiFi AP | ON |
-| WiFi STA | OFF initially |
-| Web UI | ON |
-| DNS captive portal | Optional |
-| MQTT | OFF |
-| Modbus polling | Optional, read-only |
-| Relay remote control | OFF |
-| Relay protection | ON if relay hardware active |
-| LCD | Show setup info |
-| LEDs | Config pattern |
+| Service              | Behavior                    |
+| -------------------- | --------------------------- |
+| WiFi AP              | ON                          |
+| WiFi STA             | OFF initially               |
+| Web UI               | ON                          |
+| DNS captive portal   | Optional                    |
+| MQTT                 | OFF                         |
+| Modbus polling       | Optional, read-only         |
+| Relay remote control | OFF                         |
+| Relay protection     | ON if relay hardware active |
+| LCD                  | Show setup info             |
+| LEDs                 | Config pattern              |
 
 Recommended MVP:
 
@@ -428,13 +444,13 @@ Relay unchanged/off
 
 In current Normal Mode:
 
-| Service | Behavior |
-| --- | --- |
-| WiFi STA | ON if credentials are saved |
-| Web UI | ON after STA connects |
-| WiFi AP | OFF unless user enters Config Mode |
-| MQTT | OFF, not implemented yet |
-| Modbus polling | OFF, not implemented yet |
+| Service        | Behavior                           |
+| -------------- | ---------------------------------- |
+| WiFi STA       | ON if credentials are saved        |
+| Web UI         | ON after STA connects              |
+| WiFi AP        | OFF unless user enters Config Mode |
+| MQTT           | OFF, not implemented yet           |
+| Modbus polling | OFF, not implemented yet           |
 
 ## 🧲 Relay Safety In Config Mode
 
@@ -477,14 +493,14 @@ MQTT configured?
 
 Suggested patterns:
 
-| State | Pattern |
-| --- | --- |
-| Boot | Fast blink activity LED |
-| Config AP active | Slow blink network LED |
-| Client connected to AP | Network LED double blink |
-| Config saved | Activity LED solid 2 seconds |
-| Rebooting | All LEDs blink twice |
-| Fault | Alarm LED blink |
+| State                  | Pattern                      |
+| ---------------------- | ---------------------------- |
+| Boot                   | Fast blink activity LED      |
+| Config AP active       | Slow blink network LED       |
+| Client connected to AP | Network LED double blink     |
+| Config saved           | Activity LED solid 2 seconds |
+| Rebooting              | All LEDs blink twice         |
+| Fault                  | Alarm LED blink              |
 
 ## 🧯 Recovery Rules
 

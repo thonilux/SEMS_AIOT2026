@@ -44,7 +44,8 @@ Current implemented endpoints:
 
 | Method | Path | Purpose | Auth |
 | --- | --- | --- | --- |
-| `GET` | `/` | Lightweight setup/status page | none yet |
+| `GET` | `/` | Home/status page | none yet |
+| `GET` | `/network` | Network scan and WiFi credential page | none yet |
 | `GET` | `/api/status` | Firmware, mode, AP, STA, heap status | none yet |
 | `GET` | `/api/wifi/scan` | Scan nearby WiFi networks | none yet |
 | `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS | none yet |

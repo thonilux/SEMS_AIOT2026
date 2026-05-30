@@ -322,25 +322,40 @@ void printWebUiAddresses() {
   }
 }
 
-String buildSetupPage() {
-  const String apSsid = getConfigApSsid();
+String buildPageHeader(const String& title) {
   String page;
-  page.reserve(7800);
+  page.reserve(2300);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-  page += F("<title>PM1611 Setup</title><style>");
+  page += F("<title>");
+  page += htmlEscape(title);
+  page += F("</title><style>");
   page += F(":root{font-family:Inter,Segoe UI,Arial,sans-serif;color:#17202a;background:#f4f7f9}");
-  page += F("body{margin:0}.bar{background:#111827;color:white;padding:14px 18px}");
+  page += F("body{margin:0}.bar{background:#111827;color:white;padding:14px 18px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}");
+  page += F("nav{display:flex;gap:8px}nav a{color:#d1fae5;text-decoration:none;font-weight:700;padding:7px 9px;border-radius:6px}nav a:hover{background:#1f2937}");
   page += F(".wrap{max-width:760px;margin:0 auto;padding:18px}.panel{background:white;border:1px solid #d9e1e8;border-radius:8px;padding:16px;margin:14px 0}");
   page += F("h1{font-size:21px;margin:0}.muted{color:#667085}.grid{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}");
   page += F("label{font-weight:700;display:block;margin:12px 0 6px}input{box-sizing:border-box;width:100%;border:1px solid #cbd5e1;border-radius:6px;padding:10px;font-size:15px}");
   page += F(".actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}button{background:#0f766e;color:white;border:0;border-radius:6px;padding:10px 13px;font-weight:700}");
   page += F("button:disabled{background:#94a3b8}.net{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #e5e7eb;padding:10px 0}");
   page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}.use{background:#334155;padding:7px 10px}");
-  page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}}");
-  page += F("</style></head><body>");
-  page += F("<div class=\"bar\"><h1>PM1611 RS485 Setup</h1><div class=\"muted\">Config Mode</div></div>");
-  page += F("<main class=\"wrap\"><section class=\"panel\"><h2>Device</h2><div class=\"grid\">");
+  page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}nav{margin-top:10px}}");
+  page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
+  page += htmlEscape(title);
+  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a><a href=\"/network\">Network</a></nav></div></div>");
+  page += F("<main class=\"wrap\">");
+  return page;
+}
+
+String buildPageFooter() {
+  return String(F("</main></body></html>"));
+}
+
+String buildHomePage() {
+  const String apSsid = getConfigApSsid();
+  String page = buildPageHeader("Home");
+  page.reserve(5200);
+  page += F("<section class=\"panel\"><h2>Status</h2><div class=\"grid\">");
   page += F("<div>Firmware</div><div>");
   page += FW_VERSION;
   page += F("</div><div>Mode</div><div>");
@@ -364,6 +379,17 @@ String buildSetupPage() {
   page += F("</div><div>Free heap</div><div id=\"heap\">");
   page += String(ESP.getFreeHeap());
   page += F(" bytes</div></div></section>");
+  page += F("<section class=\"panel\"><h2>Quick Actions</h2><div class=\"actions\"><a href=\"/network\"><button>Network Settings</button></a><button onclick=\"rebootDevice()\">Reboot</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
+  page += F("<script>");
+  page += F("async function rebootDevice(){document.getElementById('saveState').textContent='Rebooting...';await fetch('/api/reboot',{method:'POST'}).catch(()=>{});}");
+  page += F("</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildNetworkPage() {
+  String page = buildPageHeader("Network");
+  page.reserve(5600);
   page += F("<section class=\"panel\"><h2>WiFi Nearby</h2>");
   page += F("<button id=\"scanBtn\" onclick=\"scanWifi()\">Scan WiFi</button>");
   page += F("<p id=\"scanState\" class=\"muted\">Ready.</p><div id=\"networks\"></div></section>");
@@ -385,13 +411,19 @@ String buildSetupPage() {
   page += F("async function rebootDevice(){document.getElementById('saveState').textContent='Rebooting...';await fetch('/api/reboot',{method:'POST'}).catch(()=>{});}");
   page += F("function esc(v){return String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]))}");
   page += F("function escAttr(v){return String(v).replace(/[\\\\']/g,m=>'\\\\'+m).replace(/[\\r\\n]/g,'')}");
-  page += F("</script></body></html>");
+  page += F("</script>");
+  page += buildPageFooter();
   return page;
 }
 
 void handleSetupRoot() {
   sendNoCacheHeader();
-  configServer.send(200, "text/html", buildSetupPage());
+  configServer.send(200, "text/html", buildHomePage());
+}
+
+void handleNetworkPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildNetworkPage());
 }
 
 void handleStatusApi() {
@@ -513,6 +545,7 @@ void startConfigWebServer() {
   }
 
   configServer.on("/", HTTP_GET, handleSetupRoot);
+  configServer.on("/network", HTTP_GET, handleNetworkPage);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);

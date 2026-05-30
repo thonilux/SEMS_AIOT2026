@@ -57,7 +57,8 @@ Current HTTP endpoints:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/` | Lightweight setup/status UI |
+| `GET` | `/` | Home/status UI |
+| `GET` | `/network` | Network scan and WiFi credential UI |
 | `GET` | `/api/status` | Firmware, mode, AP, STA, heap status |
 | `GET` | `/api/wifi/scan` | Scan nearby WiFi networks |
 | `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS |

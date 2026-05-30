@@ -93,6 +93,9 @@ Current implemented `GET /api/status` response:
   "saved_wifi_ssid": "OfficeWiFi",
   "sta_status": "connected",
   "sta_ip": "192.168.43.120",
+  "rtc": "30/05/2026 14:10:00",
+  "time_synced": true,
+  "last_ntp_sync": "30/05/2026 14:09:55",
   "mac_suffix": "83D1B4",
   "free_heap": 256120
 }

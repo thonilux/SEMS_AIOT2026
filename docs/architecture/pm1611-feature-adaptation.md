@@ -120,6 +120,7 @@ Current implemented behavior:
 Normal Mode
   -> loads WiFi credentials from NVS
   -> connects to saved WiFi as STA when credentials exist
+  -> syncs RTC from NTP after WiFi connects
   -> starts lightweight Web UI at http://<STA_IP>/ after STA connects
 
 Runtime config entry
@@ -467,6 +468,16 @@ time offset config
 last_ntp_sync
 formatted rtc string
 fallback uptime mode
+```
+
+Current implemented baseline:
+
+```text
+Timezone: WIB / UTC+7
+NTP: pool.ntp.org, time.google.com
+RTC format: DD/MM/YYYY HH:MM:SS
+Source: ESP32 software clock after NTP sync
+Exposed in serial heartbeat, Web UI, and /api/status
 ```
 
 ## ✅ Implementation Priority From Manual

@@ -63,6 +63,15 @@ Current firmware implementation:
 
 The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP.
 
+Current RTC baseline:
+
+```text
+After STA WiFi connects:
+  sync NTP from pool.ntp.org / time.google.com
+  set ESP32 software RTC using WIB / UTC+7
+  expose rtc as DD/MM/YYYY HH:MM:SS
+```
+
 ## 🔘 Config Button Behavior
 
 Recommended button:

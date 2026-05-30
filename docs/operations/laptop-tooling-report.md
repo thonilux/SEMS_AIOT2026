@@ -387,8 +387,8 @@ CPU:          240 MHz
 Current firmware memory usage:
 
 ```text
-RAM:   13.8% (45208 bytes used from 327680 bytes)
-Flash: 60.4% (about 792 KB used from 1310720 bytes)
+RAM:   14.2% (46512 bytes used from 327680 bytes)
+Flash: 62.2% (about 815 KB used from 1310720 bytes)
 ```
 
 Implemented and verified firmware behavior:
@@ -403,6 +403,8 @@ Setup UI saves WiFi credentials to NVS
 Firmware reconnects as WiFi STA after reboot
 Normal Mode Web UI starts at the STA IP
 Verified STA UI example: http://10.161.93.131/
+NTP sync works after WiFi connects
+RTC serial example: 30/05/2026 22:52:19
 ```
 
 Minimum required for Step 1:

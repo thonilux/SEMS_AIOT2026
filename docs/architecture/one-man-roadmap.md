@@ -67,6 +67,7 @@ Current status:
 | Web UI setup portal | Done | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1` |
 | WiFi NVS persistence | Done | Setup UI saves SSID/password to NVS and boot attempts STA connection |
 | Normal Mode Web UI | Done | Same lightweight UI starts on the STA IP after WiFi connects |
+| RTC / NTP baseline | Done | NTP sync after WiFi connect, RTC string exposed in serial/Web UI/API |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:
@@ -93,7 +94,7 @@ Phase 4: Meter data model                       [not started]
 Phase 5: Relay and protection                   [not started]
 Phase 6: WiFi and setup mode                    [MVP implemented]
 Phase 7: MQTT compatibility                     [designed, not implemented]
-Phase 8: Time and energy history                [not started]
+Phase 8: Time and energy history                [NTP baseline implemented, history not started]
 Phase 9: LCD and LEDs                           [hardware analyzed, not implemented]
 Phase 10: Web UI                                [setup MVP implemented]
 Phase 11: OTA and administration                [not started]

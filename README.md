@@ -43,6 +43,7 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | WiFi save | Web UI saves SSID/password to NVS using `Preferences` |
 | WiFi client | On reboot, firmware reads NVS and connects as STA |
 | Normal Mode Web UI | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects |
+| RTC / NTP | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
 
 Current verified board identity:
 
@@ -68,6 +69,7 @@ Current limitations:
 - No static IP configuration yet.
 - No explicit WiFi test-before-save endpoint yet.
 - No RS485/Modbus polling yet.
+- No hardware RTC backup across power loss yet; time is restored through NTP after WiFi connects.
 - No MQTT, relay protection, LCD, OTA, or production auth yet.
 
 ## 🧰 Target Platform

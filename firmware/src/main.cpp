@@ -2,6 +2,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <time.h>
 #include "AppMode.h"
 #include "PinMap.h"
 #include "Version.h"
@@ -11,11 +12,15 @@ constexpr uint32_t kSerialBaud = 115200;
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
 constexpr uint32_t kRuntimeConfigHoldMs = 5000;
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kNtpSyncTimeoutMs = 10000;
 constexpr char kConfigApSsidPrefix[] = "PM1611-SETUP";
 constexpr char kConfigApPassword[] = "PM123456";
 constexpr char kNetworkPrefsNamespace[] = "network";
 constexpr char kWifiSsidKey[] = "wifi_ssid";
 constexpr char kWifiPassKey[] = "wifi_pass";
+constexpr char kNtpServer1[] = "pool.ntp.org";
+constexpr char kNtpServer2[] = "time.google.com";
+constexpr char kNtpTimezone[] = "WIB-7";
 
 uint32_t lastHeartbeatMs = 0;
 uint32_t heartbeatCount = 0;
@@ -29,6 +34,8 @@ uint32_t rebootAtMs = 0;
 String savedWifiSsid;
 String savedWifiPassword;
 bool hasSavedWifi = false;
+bool timeSynced = false;
+time_t lastNtpSyncEpoch = 0;
 WebServer configServer(80);
 
 bool isConfigButtonPressed() {
@@ -86,6 +93,62 @@ void printChipInfo() {
 void printModeInfo() {
   Serial.print("Selected mode: ");
   Serial.println(appModeToString(currentMode));
+}
+
+String formatDateTime(time_t epoch) {
+  if (epoch <= 0) {
+    return String("not_synced");
+  }
+
+  struct tm timeInfo {};
+  if (!localtime_r(&epoch, &timeInfo)) {
+    return String("not_synced");
+  }
+
+  char buffer[20] = {};
+  strftime(buffer, sizeof(buffer), "%d/%m/%Y %H:%M:%S", &timeInfo);
+  return String(buffer);
+}
+
+String getRtcString() {
+  if (!timeSynced) {
+    return String("not_synced");
+  }
+
+  return formatDateTime(time(nullptr));
+}
+
+void syncTimeFromNtp() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("NTP skipped: WiFi is not connected");
+    return;
+  }
+
+  Serial.print("NTP sync: ");
+  Serial.print(kNtpServer1);
+  Serial.print(", ");
+  Serial.println(kNtpServer2);
+
+  configTzTime(kNtpTimezone, kNtpServer1, kNtpServer2);
+
+  struct tm timeInfo {};
+  const uint32_t startMs = millis();
+  while (!getLocalTime(&timeInfo, 250) && millis() - startMs < kNtpSyncTimeoutMs) {
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (!getLocalTime(&timeInfo, 1)) {
+    timeSynced = false;
+    Serial.println("NTP sync failed");
+    return;
+  }
+
+  lastNtpSyncEpoch = time(nullptr);
+  timeSynced = true;
+
+  Serial.print("RTC synced: ");
+  Serial.println(getRtcString());
 }
 
 const char* wifiStatusToString(wl_status_t status) {
@@ -292,6 +355,10 @@ String buildSetupPage() {
   page += wifiStatusToString(WiFi.status());
   page += F("</div><div>STA IP</div><div>");
   page += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : F("-");
+  page += F("</div><div>RTC</div><div>");
+  page += htmlEscape(getRtcString());
+  page += F("</div><div>Last NTP Sync</div><div>");
+  page += timeSynced ? htmlEscape(formatDateTime(lastNtpSyncEpoch)) : F("-");
   page += F("</div><div>MAC suffix</div><div>");
   page += getMacSuffix();
   page += F("</div><div>Free heap</div><div id=\"heap\">");
@@ -344,6 +411,12 @@ void handleStatusApi() {
   body += wifiStatusToString(WiFi.status());
   body += F("\",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  body += F("\",\"rtc\":\"");
+  body += jsonEscape(getRtcString());
+  body += F("\",\"time_synced\":");
+  body += timeSynced ? F("true") : F("false");
+  body += F(",\"last_ntp_sync\":\"");
+  body += timeSynced ? jsonEscape(formatDateTime(lastNtpSyncEpoch)) : "";
   body += F("\",\"mac_suffix\":\"");
   body += getMacSuffix();
   body += F("\",\"free_heap\":");
@@ -547,6 +620,9 @@ void setup() {
   loadWifiConfig();
   connectToSavedWifi();
   if (WiFi.status() == WL_CONNECTED) {
+    syncTimeFromNtp();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
     startConfigWebServer();
   }
   printModeInfo();
@@ -578,6 +654,8 @@ void loop() {
     Serial.print(" mode=");
     Serial.print(appModeToString(currentMode));
     Serial.print(" wifi=");
-    Serial.println(wifiStatusToString(WiFi.status()));
+    Serial.print(wifiStatusToString(WiFi.status()));
+    Serial.print(" rtc=");
+    Serial.println(getRtcString());
   }
 }

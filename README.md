@@ -27,24 +27,45 @@ The device should provide:
 
 The final firmware must not depend on ESPHome. PlatformIO is used because this project needs full control over tasks, Modbus polling, relay safety, web authentication, OTA, MQTT compatibility, and long-term firmware structure.
 
+## 🔧 Configuration Pages
+
+As of 2026-05-30 (implemented by Claude, AI Assistant):
+
+Web UI now supports configuring all major device settings through intuitive configuration pages:
+
+| Page       | Settings                                      | Stored In                  | Status  |
+| ---------- | --------------------------------------------- | -------------------------- | ------- |
+| Device     | Name, Hostname, Timezone, CO2 Factor          | NVS namespace `device`     | ✅ Live |
+| Network    | WiFi SSID, Password                           | NVS namespace `network`    | ✅ Live |
+| MQTT       | Broker, Credentials, Topics, Publish Interval | NVS namespace `mqtt`       | ✅ Live |
+| Modbus     | Baudrate, Slave ID, Register Profile          | NVS namespace `modbus`     | ✅ Live |
+| Protection | Current Limit, Trip Delay, Reset Mode         | NVS namespace `protection` | ✅ Live |
+| Display    | LCD Brightness, Rotation Interval             | NVS namespace `display`    | ✅ Live |
+| History    | Retention Days, Flush Interval                | NVS namespace `history`    | ✅ Live |
+| System     | NTP Servers, Debug Level                      | NVS namespace `system`     | ✅ Live |
+
+Each configuration page provides form-based input with validation and automatic NVS persistence. Changes take effect after page save, with reboot required only for critical settings (WiFi, MQTT, Modbus).
+
+**ConfigManager Architecture**: New `ConfigManager` class provides unified NVS access across all config categories with sensible defaults on first boot. See `firmware/include/ConfigManager.h` and `docs/architecture/config-model.md` for details.
+
 ## Current Firmware Status
 
 Working firmware checkpoints already implemented and tested on the ESP32-WROOM board:
 
-| Area | Status |
-| --- | --- |
-| PlatformIO baseline | Builds and uploads on `esp32dev` |
-| Serial diagnostics | Boot banner, chip info, heartbeat, free heap, WiFi state |
-| Config button | Hold `GPIO32` to `GND` for 5 seconds to enter `CONFIG_MODE` |
-| Builtin LED | `GPIO2` turns ON in `CONFIG_MODE` |
-| Config AP | Broadcasts `PM1611-SETUP-{last6mac}` with password `PM123456` |
-| Setup Web UI | Available at `http://192.168.4.1/` in Config Mode |
-| WiFi scan | Web UI can scan nearby WiFi networks |
-| WiFi save | Web UI saves SSID/password to NVS using `Preferences` |
-| WiFi client | On reboot, firmware reads NVS and connects as STA |
-| Normal Mode Web UI | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects |
-| RTC / NTP | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
-| Home dashboard | Shows status plus RAM, firmware slot, and WiFi signal progress bars |
+| Area                | Status                                                                      |
+| ------------------- | --------------------------------------------------------------------------- |
+| PlatformIO baseline | Builds and uploads on `esp32dev`                                            |
+| Serial diagnostics  | Boot banner, chip info, heartbeat, free heap, WiFi state                    |
+| Config button       | Hold `GPIO32` to `GND` for 5 seconds to enter `CONFIG_MODE`                 |
+| Builtin LED         | `GPIO2` turns ON in `CONFIG_MODE`                                           |
+| Config AP           | Broadcasts `PM1611-SETUP-{last6mac}` with password `PM123456`               |
+| Setup Web UI        | Available at `http://192.168.4.1/` in Config Mode                           |
+| WiFi scan           | Web UI can scan nearby WiFi networks                                        |
+| WiFi save           | Web UI saves SSID/password to NVS using `Preferences`                       |
+| WiFi client         | On reboot, firmware reads NVS and connects as STA                           |
+| Normal Mode Web UI  | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects     |
+| RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
+| Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
 
 Current verified board identity:
 
@@ -56,14 +77,14 @@ AP:   PM1611-SETUP-83D1B4
 
 Current HTTP endpoints:
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/` | Home/status UI |
-| `GET` | `/network` | Network scan and WiFi credential UI |
-| `GET` | `/api/status` | Firmware, mode, AP, STA, heap status |
-| `GET` | `/api/wifi/scan` | Scan nearby WiFi networks |
-| `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS |
-| `POST` | `/api/reboot` | Reboot after config save |
+| Method | Path             | Purpose                              |
+| ------ | ---------------- | ------------------------------------ |
+| `GET`  | `/`              | Home/status UI                       |
+| `GET`  | `/network`       | Network scan and WiFi credential UI  |
+| `GET`  | `/api/status`    | Firmware, mode, AP, STA, heap status |
+| `GET`  | `/api/wifi/scan` | Scan nearby WiFi networks            |
+| `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS    |
+| `POST` | `/api/reboot`    | Reboot after config save             |
 
 Current limitations:
 
@@ -99,16 +120,16 @@ Important hardware note: GPIO0 is an ESP32 boot strapping pin. It can be used fo
 
 The original PM1611Q-WD behavior can be interpreted as these subsystems:
 
-| Area | Features |
-| --- | --- |
-| Metering | Voltage, current, power, frequency, PF, energy, CO2 |
-| Network | WiFi AP setup, WiFi client, NTP |
-| Cloud/IoT | MQTT publish, MQTT subscribe, command handling |
-| Control | Relay ON/OFF, current limit, protection trip |
-| Web UI | Login, metering, device config, network config, MQTT config, admin, OTA |
-| Local UI | LCD display, status LEDs |
-| Storage | Device config, credentials, history, relay/protection state |
-| Time | RTC/NTP timestamp used in MQTT payloads and history |
+| Area      | Features                                                                |
+| --------- | ----------------------------------------------------------------------- |
+| Metering  | Voltage, current, power, frequency, PF, energy, CO2                     |
+| Network   | WiFi AP setup, WiFi client, NTP                                         |
+| Cloud/IoT | MQTT publish, MQTT subscribe, command handling                          |
+| Control   | Relay ON/OFF, current limit, protection trip                            |
+| Web UI    | Login, metering, device config, network config, MQTT config, admin, OTA |
+| Local UI  | LCD display, status LEDs                                                |
+| Storage   | Device config, credentials, history, relay/protection state             |
+| Time      | RTC/NTP timestamp used in MQTT payloads and history                     |
 
 ## 🏗️ High-Level Architecture
 
@@ -151,26 +172,26 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 
 ## 📦 Main Firmware Modules
 
-| Module | Responsibility |
-| --- | --- |
-| `App` | Boot order, service startup, supervision |
-| `ConfigManager` | Persistent configuration, defaults, migration |
-| `NetworkManager` | WiFi AP/STA state machine |
-| `MqttManager` | MQTT connect, publish, subscribe, command routing |
-| `WebServerManager` | Web pages and JSON APIs |
-| `AuthManager` | Login, roles, sessions |
-| `OtaManager` | Web firmware update |
-| `MeterService` | Owns normalized meter data |
-| `ModbusManager` | Modbus RTU polling and error handling |
-| `Rs485Port` | UART2 and TX enable control |
-| `MeterProfile` | Register map decoding and scaling |
-| `RelayService` | Relay state machine and output driver |
-| `ProtectionService` | Current limit, trip, lockout, reset policy |
-| `HistoryService` | Daily energy history |
-| `TimeService` | NTP, RTC fallback, formatted time |
-| `DisplayManager` | LCD abstraction |
-| `LedManager` | LED status patterns |
-| `DeviceIdentity` | UID, hostname, MQTT identity |
+| Module              | Responsibility                                    |
+| ------------------- | ------------------------------------------------- |
+| `App`               | Boot order, service startup, supervision          |
+| `ConfigManager`     | Persistent configuration, defaults, migration     |
+| `NetworkManager`    | WiFi AP/STA state machine                         |
+| `MqttManager`       | MQTT connect, publish, subscribe, command routing |
+| `WebServerManager`  | Web pages and JSON APIs                           |
+| `AuthManager`       | Login, roles, sessions                            |
+| `OtaManager`        | Web firmware update                               |
+| `MeterService`      | Owns normalized meter data                        |
+| `ModbusManager`     | Modbus RTU polling and error handling             |
+| `Rs485Port`         | UART2 and TX enable control                       |
+| `MeterProfile`      | Register map decoding and scaling                 |
+| `RelayService`      | Relay state machine and output driver             |
+| `ProtectionService` | Current limit, trip, lockout, reset policy        |
+| `HistoryService`    | Daily energy history                              |
+| `TimeService`       | NTP, RTC fallback, formatted time                 |
+| `DisplayManager`    | LCD abstraction                                   |
+| `LedManager`        | LED status patterns                               |
+| `DeviceIdentity`    | UID, hostname, MQTT identity                      |
 
 ## 🔗 Module Dependency Diagram
 
@@ -228,16 +249,16 @@ The original PM1611Q-WD behavior can be interpreted as these subsystems:
 
 ## ⏱️ Runtime Task Plan
 
-| Task | Period | Responsibility |
-| --- | --- | --- |
-| App supervision | 1s | Feed watchdog, check service health |
-| Modbus poll | 1s default | Read external meter registers |
-| Protection | 250ms-1s | Evaluate current limit and stale meter safety |
-| MQTT | 5s-60s publish interval | Publish telemetry, receive commands |
-| Web server | Event driven | Dashboard, config, OTA, login |
-| History | 1min tick, daily rollover | Track daily energy buckets |
-| UI | 500ms-2s | LCD page rotation and LED state |
-| NTP | Startup, then 6h-24h | Maintain wall-clock time |
+| Task            | Period                    | Responsibility                                |
+| --------------- | ------------------------- | --------------------------------------------- |
+| App supervision | 1s                        | Feed watchdog, check service health           |
+| Modbus poll     | 1s default                | Read external meter registers                 |
+| Protection      | 250ms-1s                  | Evaluate current limit and stale meter safety |
+| MQTT            | 5s-60s publish interval   | Publish telemetry, receive commands           |
+| Web server      | Event driven              | Dashboard, config, OTA, login                 |
+| History         | 1min tick, daily rollover | Track daily energy buckets                    |
+| UI              | 500ms-2s                  | LCD page rotation and LED state               |
+| NTP             | Startup, then 6h-24h      | Maintain wall-clock time                      |
 
 ## 🔄 State Machines
 
@@ -423,15 +444,7 @@ Expected publish payload:
     "energy": ["15.23", "kWh"],
     "co2": ["10.36", "kg"]
   },
-  "energy_history": [
-    "1.2",
-    "1.4",
-    "0.9",
-    "2.0",
-    "1.8",
-    "1.1",
-    "0.7"
-  ]
+  "energy_history": ["1.2", "1.4", "0.9", "2.0", "1.8", "1.1", "0.7"]
 }
 ```
 
@@ -542,11 +555,11 @@ HistoryConfig
 
 Use ESP32 storage in layers:
 
-| Storage | Use |
-| --- | --- |
+| Storage           | Use                                                |
+| ----------------- | -------------------------------------------------- |
 | NVS / Preferences | Small config values, credentials, current settings |
-| LittleFS | Web assets, history files, config backup, logs |
-| RTC memory | Last relay state, boot counter, OTA marker |
+| LittleFS          | Web assets, history files, config backup, logs     |
+| RTC memory        | Last relay state, boot counter, OTA marker         |
 
 Flash write rules:
 
@@ -640,18 +653,18 @@ pm1611-rs485-reader/
 
 Folder purpose:
 
-| Folder | Purpose |
-| --- | --- |
-| `.github/` | GitHub workflows, issue templates, and repository automation |
+| Folder               | Purpose                                                              |
+| -------------------- | -------------------------------------------------------------------- |
+| `.github/`           | GitHub workflows, issue templates, and repository automation         |
 | `docs/architecture/` | Firmware architecture, state machines, roadmap, and design decisions |
-| `docs/hardware/` | Hardware selection and integration notes |
-| `docs/api/` | MQTT, web API, payload, and configuration contracts |
-| `docs/operations/` | Flashing, deployment, recovery, and production procedures |
-| `firmware/` | PlatformIO ESP32 firmware project |
-| `firmware/data/` | LittleFS web UI assets |
-| `hardware/` | Schematics, PCB files, enclosure drawings, and wiring diagrams |
-| `scripts/` | Repeatable build, flash, release, and maintenance scripts |
-| `tools/` | Developer utilities, validators, and generators |
+| `docs/hardware/`     | Hardware selection and integration notes                             |
+| `docs/api/`          | MQTT, web API, payload, and configuration contracts                  |
+| `docs/operations/`   | Flashing, deployment, recovery, and production procedures            |
+| `firmware/`          | PlatformIO ESP32 firmware project                                    |
+| `firmware/data/`     | LittleFS web UI assets                                               |
+| `hardware/`          | Schematics, PCB files, enclosure drawings, and wiring diagrams       |
+| `scripts/`           | Repeatable build, flash, release, and maintenance scripts            |
+| `tools/`             | Developer utilities, validators, and generators                      |
 
 Current hardware notes:
 

@@ -6,6 +6,7 @@
 #include "AppMode.h"
 #include "PinMap.h"
 #include "Version.h"
+#include "ConfigManager.h"
 
 namespace {
 constexpr uint32_t kSerialBaud = 115200;
@@ -444,7 +445,7 @@ String buildPageHeader(const String& title) {
   page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}nav{margin-top:10px}}");
   page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
   page += htmlEscape(title);
-  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a><a href=\"/network\">Network</a></nav></div></div>");
+  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a><a href=\"/network\">Network</a><a href=\"/device\">Device</a><a href=\"/mqtt\">MQTT</a><a href=\"/modbus\">Modbus</a><a href=\"/protection\">Protection</a><a href=\"/display\">Display</a><a href=\"/history\">History</a><a href=\"/system\">System</a></nav></div></div>");
   page += F("<main class=\"wrap\">");
   return page;
 }
@@ -562,6 +563,449 @@ String buildNetworkPage() {
   page += F("</script>");
   page += buildPageFooter();
   return page;
+}
+
+// ============================================================================
+// CONFIG PAGES - Device, MQTT, Modbus, Protection, Display, History, System
+// ============================================================================
+// Author: Claude (AI Assistant) @ 2026-05-30
+// Provides web UI pages for configuring all device settings
+// ============================================================================
+
+String buildDeviceConfigPage() {
+  DeviceConfig cfg = ConfigManager::loadDeviceConfig();
+  String page = buildPageHeader("Device Configuration");
+  page.reserve(4000);
+  page += F("<section class=\"panel\"><h2>Device Settings</h2>");
+  page += F("<label for=\"device_name\">Device Name</label><input id=\"device_name\" maxlength=\"64\" placeholder=\"Device name\" value=\"");
+  page += htmlEscape(String(cfg.device_name));
+  page += F("\"><label for=\"hostname\">Hostname</label><input id=\"hostname\" maxlength=\"64\" placeholder=\"Hostname\" value=\"");
+  page += htmlEscape(String(cfg.hostname));
+  page += F("\"><label for=\"timezone\">Timezone</label><input id=\"timezone\" maxlength=\"32\" placeholder=\"e.g., WIB-7\" value=\"");
+  page += htmlEscape(String(cfg.timezone));
+  page += F("\"><label for=\"co2_factor\">CO2 Factor (kg/kWh)</label><input id=\"co2_factor\" type=\"number\" min=\"0\" max=\"255\" value=\"");
+  page += String(cfg.co2_factor_kg_per_kwh);
+  page += F("\"><div class=\"actions\"><button onclick=\"saveDeviceConfig()\">Save Device Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveDeviceConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("device_name:document.getElementById('device_name').value,");
+  page += F("hostname:document.getElementById('hostname').value,");
+  page += F("timezone:document.getElementById('timezone').value,");
+  page += F("co2_factor:document.getElementById('co2_factor').value");
+  page += F("});try{const r=await fetch('/api/device/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});");
+  page += F("const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildMqttConfigPage() {
+  MqttConfig cfg = ConfigManager::loadMqttConfig();
+  String page = buildPageHeader("MQTT Configuration");
+  page.reserve(5000);
+  page += F("<section class=\"panel\"><h2>MQTT Broker Settings</h2>");
+  page += F("<label><input type=\"checkbox\" id=\"mqtt_enabled\"");
+  page += cfg.enabled ? F(" checked") : F("");
+  page += F("> Enable MQTT</label>");
+  page += F("<label for=\"mqtt_host\">Broker Host</label><input id=\"mqtt_host\" maxlength=\"64\" placeholder=\"localhost\" value=\"");
+  page += htmlEscape(String(cfg.host));
+  page += F("\"><label for=\"mqtt_port\">Broker Port</label><input id=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" value=\"");
+  page += String(cfg.port);
+  page += F("\"><label for=\"mqtt_username\">Username</label><input id=\"mqtt_username\" maxlength=\"64\" placeholder=\"username\" value=\"");
+  page += htmlEscape(String(cfg.username));
+  page += F("\"><label for=\"mqtt_password\">Password</label><input id=\"mqtt_password\" type=\"password\" maxlength=\"64\" value=\"");
+  page += htmlEscape(String(cfg.password));
+  page += F("\"><label for=\"mqtt_client_id\">Client ID</label><input id=\"mqtt_client_id\" maxlength=\"64\" placeholder=\"pm1611\" value=\"");
+  page += htmlEscape(String(cfg.client_id));
+  page += F("\"><label for=\"mqtt_base_topic\">Base Topic</label><input id=\"mqtt_base_topic\" maxlength=\"64\" placeholder=\"pm1611\" value=\"");
+  page += htmlEscape(String(cfg.base_topic));
+  page += F("\"><label for=\"mqtt_publish_interval\">Publish Interval (sec)</label><input id=\"mqtt_publish_interval\" type=\"number\" min=\"1\" max=\"3600\" value=\"");
+  page += String(cfg.publish_interval_sec);
+  page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveMqttConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("mqtt_enabled:document.getElementById('mqtt_enabled').checked?'1':'0',");
+  page += F("mqtt_host:document.getElementById('mqtt_host').value,mqtt_port:document.getElementById('mqtt_port').value,");
+  page += F("mqtt_username:document.getElementById('mqtt_username').value,mqtt_password:document.getElementById('mqtt_password').value,");
+  page += F("mqtt_client_id:document.getElementById('mqtt_client_id').value,mqtt_base_topic:document.getElementById('mqtt_base_topic').value,");
+  page += F("mqtt_publish_interval:document.getElementById('mqtt_publish_interval').value});try{const r=await fetch('/api/mqtt/save',{method:'POST',");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildModbusConfigPage() {
+  ModbusConfig cfg = ConfigManager::loadModbusConfig();
+  String page = buildPageHeader("Modbus Configuration");
+  page.reserve(4500);
+  page += F("<section class=\"panel\"><h2>Modbus RTU Settings</h2>");
+  page += F("<label for=\"modbus_baudrate\">Baudrate</label><select id=\"modbus_baudrate\">");
+  page += F("<option value=\"9600\"");
+  page += cfg.baudrate == 9600 ? F(" selected") : F("");
+  page += F(">9600</option><option value=\"19200\"");
+  page += cfg.baudrate == 19200 ? F(" selected") : F("");
+  page += F(">19200</option><option value=\"38400\"");
+  page += cfg.baudrate == 38400 ? F(" selected") : F("");
+  page += F(">38400</option></select>");
+  page += F("<label for=\"modbus_slave_id\">Slave Device Address</label><input id=\"modbus_slave_id\" type=\"number\" min=\"1\" max=\"247\" value=\"");
+  page += String(cfg.slave_id);
+  page += F("\"><label for=\"modbus_parity\">Parity</label><select id=\"modbus_parity\">");
+  page += F("<option value=\"0\"");
+  page += cfg.parity == 0 ? F(" selected") : F("");
+  page += F(">Even</option><option value=\"1\"");
+  page += cfg.parity == 1 ? F(" selected") : F("");
+  page += F(">Odd</option><option value=\"2\"");
+  page += cfg.parity == 2 ? F(" selected") : F("");
+  page += F(">None</option></select>");
+  page += F("<label for=\"modbus_stop_bits\">Stop Bits</label><select id=\"modbus_stop_bits\">");
+  page += F("<option value=\"1\"");
+  page += cfg.stop_bits == 1 ? F(" selected") : F("");
+  page += F(">1</option><option value=\"2\"");
+  page += cfg.stop_bits == 2 ? F(" selected") : F("");
+  page += F(">2</option></select>");
+  page += F("<label for=\"modbus_poll_interval\">Poll Interval (ms)</label><input id=\"modbus_poll_interval\" type=\"number\" min=\"100\" max=\"10000\" value=\"");
+  page += String(cfg.poll_interval_ms);
+  page += F("\"><label for=\"modbus_timeout\">Timeout (ms)</label><input id=\"modbus_timeout\" type=\"number\" min=\"100\" max=\"5000\" value=\"");
+  page += String(cfg.timeout_ms);
+  page += F("\"><label for=\"modbus_retry_count\">Retry Count</label><input id=\"modbus_retry_count\" type=\"number\" min=\"0\" max=\"10\" value=\"");
+  page += String(cfg.retry_count);
+  page += F("\"><label for=\"modbus_profile\">Meter Profile</label><select id=\"modbus_profile\"><option value=\"0\"");
+  page += cfg.meter_profile == 0 ? F(" selected") : F("");
+  page += F(">PM2230</option><option value=\"1\"");
+  page += cfg.meter_profile == 1 ? F(" selected") : F("");
+  page += F(">PM1611</option></select>");
+  page += F("<div class=\"actions\"><button onclick=\"saveModbusConfig()\">Save Modbus Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveModbusConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id:document.getElementById('modbus_slave_id').value,");
+  page += F("modbus_parity:document.getElementById('modbus_parity').value,modbus_stop_bits:document.getElementById('modbus_stop_bits').value,");
+  page += F("modbus_poll_interval:document.getElementById('modbus_poll_interval').value,modbus_timeout:document.getElementById('modbus_timeout').value,");
+  page += F("modbus_retry_count:document.getElementById('modbus_retry_count').value,modbus_profile:document.getElementById('modbus_profile').value});");
+  page += F("try{const r=await fetch('/api/modbus/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});");
+  page += F("const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildProtectionConfigPage() {
+  ProtectionConfig cfg = ConfigManager::loadProtectionConfig();
+  String page = buildPageHeader("Protection Configuration");
+  page.reserve(4000);
+  page += F("<section class=\"panel\"><h2>Relay Protection Settings</h2>");
+  page += F("<label><input type=\"checkbox\" id=\"relay_enabled\"");
+  page += cfg.relay_enabled ? F(" checked") : F("");
+  page += F("> Enable Relay Output</label>");
+  page += F("<label for=\"current_limit\">Current Limit (A)</label><input id=\"current_limit\" type=\"number\" min=\"1\" max=\"63\" value=\"");
+  page += String(cfg.current_limit_a);
+  page += F("\"><label for=\"trip_delay\">Trip Delay (ms)</label><input id=\"trip_delay\" type=\"number\" min=\"100\" max=\"10000\" value=\"");
+  page += String(cfg.trip_delay_ms);
+  page += F("\"><label for=\"reset_mode\">Reset Mode</label><select id=\"reset_mode\"><option value=\"0\"");
+  page += cfg.reset_mode == 0 ? F(" selected") : F("");
+  page += F(">Manual</option><option value=\"1\"");
+  page += cfg.reset_mode == 1 ? F(" selected") : F("");
+  page += F(">Auto</option></select>");
+  page += F("<label><input type=\"checkbox\" id=\"auto_retry_enabled\"");
+  page += cfg.auto_retry_enabled ? F(" checked") : F("");
+  page += F("> Enable Auto-Retry</label>");
+  page += F("<label for=\"auto_retry_delay\">Auto-Retry Delay (sec)</label><input id=\"auto_retry_delay\" type=\"number\" min=\"10\" max=\"3600\" value=\"");
+  page += String(cfg.auto_retry_delay_sec);
+  page += F("\"><label><input type=\"checkbox\" id=\"trip_on_stale\"");
+  page += cfg.trip_on_meter_stale ? F(" checked") : F("");
+  page += F("> Trip on Meter Stale</label>");
+  page += F("<div class=\"actions\"><button onclick=\"saveProtectionConfig()\">Save Protection Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveProtectionConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("relay_enabled:document.getElementById('relay_enabled').checked?'1':'0',current_limit:document.getElementById('current_limit').value,");
+  page += F("trip_delay:document.getElementById('trip_delay').value,reset_mode:document.getElementById('reset_mode').value,");
+  page += F("auto_retry_enabled:document.getElementById('auto_retry_enabled').checked?'1':'0',auto_retry_delay:document.getElementById('auto_retry_delay').value,");
+  page += F("trip_on_stale:document.getElementById('trip_on_stale').checked?'1':'0'});try{const r=await fetch('/api/protection/save',{method:'POST',");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildDisplayConfigPage() {
+  DisplayConfig cfg = ConfigManager::loadDisplayConfig();
+  String page = buildPageHeader("Display Configuration");
+  page.reserve(3500);
+  page += F("<section class=\"panel\"><h2>LCD Display Settings</h2>");
+  page += F("<label><input type=\"checkbox\" id=\"display_enabled\"");
+  page += cfg.enabled ? F(" checked") : F("");
+  page += F("> Enable LCD Display</label>");
+  page += F("<label for=\"display_type\">Display Type</label><select id=\"display_type\"><option value=\"0\"");
+  page += cfg.type == 0 ? F(" selected") : F("");
+  page += F(">ST7567</option><option value=\"1\"");
+  page += cfg.type == 1 ? F(" selected") : F("");
+  page += F(">SSD1306</option></select>");
+  page += F("<label for=\"i2c_address\">I2C Address (hex)</label><input id=\"i2c_address\" maxlength=\"4\" placeholder=\"0x3C\" value=\"");
+  page += String(cfg.i2c_address, HEX);
+  page += F("\"><label for=\"rotation_interval\">Page Rotation (sec)</label><input id=\"rotation_interval\" type=\"number\" min=\"1\" max=\"60\" value=\"");
+  page += String(cfg.rotation_interval_sec);
+  page += F("\"><label for=\"brightness\">Brightness (0-255)</label><input id=\"brightness\" type=\"number\" min=\"0\" max=\"255\" value=\"");
+  page += String(cfg.brightness);
+  page += F("\"><div class=\"actions\"><button onclick=\"saveDisplayConfig()\">Save Display Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveDisplayConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("display_enabled:document.getElementById('display_enabled').checked?'1':'0',display_type:document.getElementById('display_type').value,");
+  page += F("i2c_address:document.getElementById('i2c_address').value,rotation_interval:document.getElementById('rotation_interval').value,");
+  page += F("brightness:document.getElementById('brightness').value});try{const r=await fetch('/api/display/save',{method:'POST',");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildHistoryConfigPage() {
+  HistoryConfig cfg = ConfigManager::loadHistoryConfig();
+  String page = buildPageHeader("History Configuration");
+  page.reserve(3000);
+  page += F("<section class=\"panel\"><h2>Energy History Settings</h2>");
+  page += F("<label><input type=\"checkbox\" id=\"history_enabled\"");
+  page += cfg.enabled ? F(" checked") : F("");
+  page += F("> Enable Energy History</label>");
+  page += F("<label for=\"days_retained\">Days Retained</label><input id=\"days_retained\" type=\"number\" min=\"1\" max=\"31\" value=\"");
+  page += String(cfg.days_retained);
+  page += F("\"><label for=\"flush_interval\">Flush Interval (sec)</label><input id=\"flush_interval\" type=\"number\" min=\"60\" max=\"86400\" value=\"");
+  page += String(cfg.flush_interval_sec);
+  page += F("\"><div class=\"actions\"><button onclick=\"saveHistoryConfig()\">Save History Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveHistoryConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("history_enabled:document.getElementById('history_enabled').checked?'1':'0',days_retained:document.getElementById('days_retained').value,");
+  page += F("flush_interval:document.getElementById('flush_interval').value});try{const r=await fetch('/api/history/save',{method:'POST',");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+String buildSystemConfigPage() {
+  SystemConfig cfg = ConfigManager::loadSystemConfig();
+  String page = buildPageHeader("System Configuration");
+  page.reserve(3500);
+  page += F("<section class=\"panel\"><h2>System Settings</h2>");
+  page += F("<label for=\"ntp_server1\">NTP Server 1</label><input id=\"ntp_server1\" maxlength=\"64\" placeholder=\"pool.ntp.org\" value=\"");
+  page += htmlEscape(String(cfg.ntp_server1));
+  page += F("\"><label for=\"ntp_server2\">NTP Server 2</label><input id=\"ntp_server2\" maxlength=\"64\" placeholder=\"time.google.com\" value=\"");
+  page += htmlEscape(String(cfg.ntp_server2));
+  page += F("\"><label><input type=\"checkbox\" id=\"debug_enabled\"");
+  page += cfg.debug_enabled ? F(" checked") : F("");
+  page += F("> Enable Debug Logging</label>");
+  page += F("<div class=\"actions\"><button onclick=\"saveSystemConfig()\">Save System Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<script>async function saveSystemConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("ntp_server1:document.getElementById('ntp_server1').value,ntp_server2:document.getElementById('ntp_server2').value,");
+  page += F("debug_enabled:document.getElementById('debug_enabled').checked?'1':'0'});try{const r=await fetch('/api/system/save',{method:'POST',");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+// ============================================================================
+// CONFIG PAGE HANDLERS
+// ============================================================================
+void handleDeviceConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildDeviceConfigPage());
+}
+
+void handleMqttConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildMqttConfigPage());
+}
+
+void handleModbusConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildModbusConfigPage());
+}
+
+void handleProtectionConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildProtectionConfigPage());
+}
+
+void handleDisplayConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildDisplayConfigPage());
+}
+
+void handleHistoryConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildHistoryConfigPage());
+}
+
+void handleSystemConfigPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildSystemConfigPage());
+}
+
+// ============================================================================
+// CONFIG API HANDLERS
+// ============================================================================
+void handleDeviceConfigSaveApi() {
+  DeviceConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  if (configServer.hasArg("device_name")) {
+    String name = configServer.arg("device_name");
+    strncpy(cfg.device_name, name.c_str(), sizeof(cfg.device_name) - 1);
+  }
+  if (configServer.hasArg("hostname")) {
+    String hostname = configServer.arg("hostname");
+    strncpy(cfg.hostname, hostname.c_str(), sizeof(cfg.hostname) - 1);
+  }
+  if (configServer.hasArg("timezone")) {
+    String tz = configServer.arg("timezone");
+    strncpy(cfg.timezone, tz.c_str(), sizeof(cfg.timezone) - 1);
+  }
+  if (configServer.hasArg("co2_factor")) {
+    cfg.co2_factor_kg_per_kwh = configServer.arg("co2_factor").toInt();
+  }
+
+  bool ok = ConfigManager::saveDeviceConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleMqttConfigSaveApi() {
+  MqttConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  if (configServer.hasArg("mqtt_host")) {
+    String host = configServer.arg("mqtt_host");
+    strncpy(cfg.host, host.c_str(), sizeof(cfg.host) - 1);
+  }
+  if (configServer.hasArg("mqtt_port")) {
+    cfg.port = configServer.arg("mqtt_port").toInt();
+  }
+  if (configServer.hasArg("mqtt_username")) {
+    String user = configServer.arg("mqtt_username");
+    strncpy(cfg.username, user.c_str(), sizeof(cfg.username) - 1);
+  }
+  if (configServer.hasArg("mqtt_password")) {
+    String pass = configServer.arg("mqtt_password");
+    strncpy(cfg.password, pass.c_str(), sizeof(cfg.password) - 1);
+  }
+  if (configServer.hasArg("mqtt_client_id")) {
+    String cid = configServer.arg("mqtt_client_id");
+    strncpy(cfg.client_id, cid.c_str(), sizeof(cfg.client_id) - 1);
+  }
+  if (configServer.hasArg("mqtt_base_topic")) {
+    String topic = configServer.arg("mqtt_base_topic");
+    strncpy(cfg.base_topic, topic.c_str(), sizeof(cfg.base_topic) - 1);
+  }
+  if (configServer.hasArg("mqtt_publish_interval")) {
+    cfg.publish_interval_sec = configServer.arg("mqtt_publish_interval").toInt();
+  }
+  cfg.enabled = configServer.hasArg("mqtt_enabled") && configServer.arg("mqtt_enabled") == "1";
+
+  bool ok = ConfigManager::saveMqttConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleModbusConfigSaveApi() {
+  ModbusConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  cfg.baudrate = configServer.hasArg("modbus_baudrate") ? configServer.arg("modbus_baudrate").toInt() : 19200;
+  cfg.slave_id = configServer.hasArg("modbus_slave_id") ? configServer.arg("modbus_slave_id").toInt() : 1;
+  cfg.parity = configServer.hasArg("modbus_parity") ? configServer.arg("modbus_parity").toInt() : 0;
+  cfg.stop_bits = configServer.hasArg("modbus_stop_bits") ? configServer.arg("modbus_stop_bits").toInt() : 1;
+  cfg.poll_interval_ms = configServer.hasArg("modbus_poll_interval") ? configServer.arg("modbus_poll_interval").toInt() : 1000;
+  cfg.timeout_ms = configServer.hasArg("modbus_timeout") ? configServer.arg("modbus_timeout").toInt() : 1000;
+  cfg.retry_count = configServer.hasArg("modbus_retry_count") ? configServer.arg("modbus_retry_count").toInt() : 3;
+  cfg.meter_profile = configServer.hasArg("modbus_profile") ? configServer.arg("modbus_profile").toInt() : 0;
+
+  bool ok = ConfigManager::saveModbusConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleProtectionConfigSaveApi() {
+  ProtectionConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  cfg.relay_enabled = configServer.hasArg("relay_enabled") && configServer.arg("relay_enabled") == "1";
+  cfg.current_limit_a = configServer.hasArg("current_limit") ? configServer.arg("current_limit").toInt() : 16;
+  cfg.trip_delay_ms = configServer.hasArg("trip_delay") ? configServer.arg("trip_delay").toInt() : 1000;
+  cfg.reset_mode = configServer.hasArg("reset_mode") ? configServer.arg("reset_mode").toInt() : 0;
+  cfg.auto_retry_enabled = configServer.hasArg("auto_retry_enabled") && configServer.arg("auto_retry_enabled") == "1";
+  cfg.auto_retry_delay_sec = configServer.hasArg("auto_retry_delay") ? configServer.arg("auto_retry_delay").toInt() : 300;
+  cfg.trip_on_meter_stale = configServer.hasArg("trip_on_stale") && configServer.arg("trip_on_stale") == "1";
+
+  bool ok = ConfigManager::saveProtectionConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleDisplayConfigSaveApi() {
+  DisplayConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  cfg.enabled = configServer.hasArg("display_enabled") && configServer.arg("display_enabled") == "1";
+  cfg.type = configServer.hasArg("display_type") ? configServer.arg("display_type").toInt() : 0;
+  cfg.i2c_address = configServer.hasArg("i2c_address") ? (uint8_t)strtol(configServer.arg("i2c_address").c_str(), nullptr, 16) : 0x3C;
+  cfg.rotation_interval_sec = configServer.hasArg("rotation_interval") ? configServer.arg("rotation_interval").toInt() : 5;
+  cfg.brightness = configServer.hasArg("brightness") ? configServer.arg("brightness").toInt() : 200;
+
+  bool ok = ConfigManager::saveDisplayConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleHistoryConfigSaveApi() {
+  HistoryConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  cfg.enabled = configServer.hasArg("history_enabled") && configServer.arg("history_enabled") == "1";
+  cfg.days_retained = configServer.hasArg("days_retained") ? configServer.arg("days_retained").toInt() : 7;
+  cfg.flush_interval_sec = configServer.hasArg("flush_interval") ? configServer.arg("flush_interval").toInt() : 3600;
+
+  bool ok = ConfigManager::saveHistoryConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+}
+
+void handleSystemConfigSaveApi() {
+  SystemConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+
+  if (configServer.hasArg("ntp_server1")) {
+    String ntp1 = configServer.arg("ntp_server1");
+    strncpy(cfg.ntp_server1, ntp1.c_str(), sizeof(cfg.ntp_server1) - 1);
+  }
+  if (configServer.hasArg("ntp_server2")) {
+    String ntp2 = configServer.arg("ntp_server2");
+    strncpy(cfg.ntp_server2, ntp2.c_str(), sizeof(cfg.ntp_server2) - 1);
+  }
+  cfg.debug_enabled = configServer.hasArg("debug_enabled") && configServer.arg("debug_enabled") == "1";
+
+  bool ok = ConfigManager::saveSystemConfig(cfg);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+  }
 }
 
 void handleSetupRoot() {
@@ -727,9 +1171,23 @@ void startConfigWebServer() {
 
   configServer.on("/", HTTP_GET, handleSetupRoot);
   configServer.on("/network", HTTP_GET, handleNetworkPage);
+  configServer.on("/device", HTTP_GET, handleDeviceConfigPage);
+  configServer.on("/mqtt", HTTP_GET, handleMqttConfigPage);
+  configServer.on("/modbus", HTTP_GET, handleModbusConfigPage);
+  configServer.on("/protection", HTTP_GET, handleProtectionConfigPage);
+  configServer.on("/display", HTTP_GET, handleDisplayConfigPage);
+  configServer.on("/history", HTTP_GET, handleHistoryConfigPage);
+  configServer.on("/system", HTTP_GET, handleSystemConfigPage);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
+  configServer.on("/api/device/save", HTTP_POST, handleDeviceConfigSaveApi);
+  configServer.on("/api/mqtt/save", HTTP_POST, handleMqttConfigSaveApi);
+  configServer.on("/api/modbus/save", HTTP_POST, handleModbusConfigSaveApi);
+  configServer.on("/api/protection/save", HTTP_POST, handleProtectionConfigSaveApi);
+  configServer.on("/api/display/save", HTTP_POST, handleDisplayConfigSaveApi);
+  configServer.on("/api/history/save", HTTP_POST, handleHistoryConfigSaveApi);
+  configServer.on("/api/system/save", HTTP_POST, handleSystemConfigSaveApi);
   configServer.on("/api/reboot", HTTP_POST, handleRebootApi);
   configServer.onNotFound(handleNotFound);
   configServer.begin();

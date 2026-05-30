@@ -112,6 +112,23 @@ uint8_t percentUsed(uint32_t used, uint32_t total) {
   return clampPercent(static_cast<int>((used * 100UL) / total));
 }
 
+String formatBytesHuman(uint64_t bytes) {
+  const char* unit = "B";
+  double value = static_cast<double>(bytes);
+
+  if (bytes >= 1024ULL * 1024ULL) {
+    unit = "MB";
+    value = value / (1024.0 * 1024.0);
+  } else if (bytes >= 1024ULL) {
+    unit = "KB";
+    value = value / 1024.0;
+  }
+
+  char buffer[24] = {};
+  snprintf(buffer, sizeof(buffer), "%.1f %s", value, unit);
+  return String(buffer);
+}
+
 uint32_t getHeapTotalBytes() {
   return ESP.getHeapSize();
 }
@@ -476,16 +493,18 @@ String buildHomePage() {
   page += F("</div><div>MAC suffix</div><div>");
   page += getMacSuffix();
   page += F("</div><div>Free heap</div><div id=\"heap\">");
+  page += formatBytesHuman(ESP.getFreeHeap());
+  page += F(" (");
   page += String(ESP.getFreeHeap());
-  page += F(" bytes</div></div></section>");
+  page += F(" bytes)</div></div></section>");
   page += F("<section class=\"panel\"><h2>Resources</h2>");
   page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>RAM Used</strong><span>");
   page += String(heapPercent);
   page += F("% · ");
-  page += String(getHeapUsedBytes());
+  page += formatBytesHuman(getHeapUsedBytes());
   page += F(" / ");
-  page += String(getHeapTotalBytes());
-  page += F(" bytes</span></div><div class=\"track\"><div class=\"fill ");
+  page += formatBytesHuman(getHeapTotalBytes());
+  page += F("</span></div><div class=\"track\"><div class=\"fill ");
   page += heapPercent >= 85 ? F("bad") : heapPercent >= 70 ? F("warn") : F("");
   page += F("\" style=\"width:");
   page += String(heapPercent);
@@ -493,10 +512,10 @@ String buildHomePage() {
   page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>Firmware Slot Used</strong><span>");
   page += String(sketchPercent);
   page += F("% · ");
-  page += String(ESP.getSketchSize());
+  page += formatBytesHuman(ESP.getSketchSize());
   page += F(" / ");
-  page += String(getSketchCapacityBytes());
-  page += F(" bytes</span></div><div class=\"track\"><div class=\"fill ");
+  page += formatBytesHuman(getSketchCapacityBytes());
+  page += F("</span></div><div class=\"track\"><div class=\"fill ");
   page += sketchPercent >= 85 ? F("bad") : sketchPercent >= 70 ? F("warn") : F("");
   page += F("\" style=\"width:");
   page += String(sketchPercent);
@@ -584,14 +603,26 @@ void handleStatusApi() {
   body += String(ESP.getFreeHeap());
   body += F(",\"heap_total\":");
   body += String(getHeapTotalBytes());
+  body += F(",\"heap_total_human\":\"");
+  body += jsonEscape(formatBytesHuman(getHeapTotalBytes()));
+  body += F("\"");
   body += F(",\"heap_used\":");
   body += String(getHeapUsedBytes());
+  body += F(",\"heap_used_human\":\"");
+  body += jsonEscape(formatBytesHuman(getHeapUsedBytes()));
+  body += F("\"");
   body += F(",\"heap_used_percent\":");
   body += String(getHeapUsedPercent());
   body += F(",\"sketch_size\":");
   body += String(ESP.getSketchSize());
+  body += F(",\"sketch_size_human\":\"");
+  body += jsonEscape(formatBytesHuman(ESP.getSketchSize()));
+  body += F("\"");
   body += F(",\"sketch_capacity\":");
   body += String(getSketchCapacityBytes());
+  body += F(",\"sketch_capacity_human\":\"");
+  body += jsonEscape(formatBytesHuman(getSketchCapacityBytes()));
+  body += F("\"");
   body += F(",\"sketch_used_percent\":");
   body += String(getSketchUsedPercent());
   body += F(",\"wifi_rssi\":");

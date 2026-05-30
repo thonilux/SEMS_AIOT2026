@@ -205,18 +205,6 @@ uint8_t getSketchUsedPercent() {
   return percentUsed(ESP.getSketchSize(), getSketchCapacityBytes());
 }
 
-uint32_t getLittleFsTotalBytes() {
-  return littleFsReady ? static_cast<uint32_t>(LittleFS.totalBytes()) : 0;
-}
-
-uint32_t getLittleFsUsedBytes() {
-  return littleFsReady ? static_cast<uint32_t>(LittleFS.usedBytes()) : 0;
-}
-
-uint8_t getLittleFsUsedPercent() {
-  return percentUsed(getLittleFsUsedBytes(), getLittleFsTotalBytes());
-}
-
 int getWifiRssi() {
   return WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127;
 }
@@ -1218,20 +1206,6 @@ void handleStatusApi() {
   body += String(ESP.getCpuFreqMHz());
   body += F(",\"flash_mb\":");
   body += String(ESP.getFlashChipSize() / (1024 * 1024));
-  body += F(",\"littlefs_ready\":");
-  body += littleFsReady ? F("true") : F("false");
-  body += F(",\"littlefs_total\":");
-  body += String(getLittleFsTotalBytes());
-  body += F(",\"littlefs_total_human\":\"");
-  body += jsonEscape(formatBytesHuman(getLittleFsTotalBytes()));
-  body += F("\"");
-  body += F(",\"littlefs_used\":");
-  body += String(getLittleFsUsedBytes());
-  body += F(",\"littlefs_used_human\":\"");
-  body += jsonEscape(formatBytesHuman(getLittleFsUsedBytes()));
-  body += F("\"");
-  body += F(",\"littlefs_used_percent\":");
-  body += String(getLittleFsUsedPercent());
   body += F(",\"heap_total\":");
   body += String(getHeapTotalBytes());
   body += F(",\"heap_total_human\":\"");

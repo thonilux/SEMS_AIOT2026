@@ -61,12 +61,10 @@
 
       const heapPct = Number(d.heap_used_percent || 0);
       const sketchPct = Number(d.sketch_used_percent || 0);
-      const fsPct = Number(d.littlefs_used_percent || 0);
       const wifiPct = Number(d.wifi_quality_percent || 0);
 
       setBar("heap_fill", "heap_pct", heapPct, `${heapPct}% · ${d.heap_used_human || "-"} / ${d.heap_total_human || "-"}`);
       setBar("sketch_fill", "sketch_pct", sketchPct, `${sketchPct}% · ${d.sketch_size_human || "-"} / ${d.sketch_capacity_human || "-"}`);
-      setBar("fs_fill", "fs_pct", fsPct, `${fsPct}% · ${d.littlefs_used_human || "-"} / ${d.littlefs_total_human || "-"}`);
       setBar("wifi_fill", "wifi_pct", wifiPct, `${wifiPct}% · ${humanWifi(d.wifi_rssi)}`);
 
       if ($("heap_fill")) {
@@ -78,11 +76,6 @@
         $("sketch_fill").classList.remove("warn", "bad");
         if (d.sketch_used_percent >= 85) $("sketch_fill").classList.add("bad");
         else if (d.sketch_used_percent >= 70) $("sketch_fill").classList.add("warn");
-      }
-      if ($("fs_fill")) {
-        $("fs_fill").classList.remove("warn", "bad");
-        if (d.littlefs_used_percent >= 85) $("fs_fill").classList.add("bad");
-        else if (d.littlefs_used_percent >= 70) $("fs_fill").classList.add("warn");
       }
       if ($("wifi_fill")) {
         $("wifi_fill").classList.remove("warn", "bad");

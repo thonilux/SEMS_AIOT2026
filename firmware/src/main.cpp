@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <U8g2lib.h>
 #include <cmath>
 #include <time.h>
 #include "AppMode.h"
@@ -53,6 +55,33 @@ SystemConfig currentSystemConfig;
 bool currentModbusConfigLoaded = false;
 bool modbusPortReady = false;
 uint32_t lastModbusPollMs = 0;
+bool mqttConnected = false;
+bool mqttClientConfigured = false;
+uint32_t mqttLastReconnectAttemptMs = 0;
+uint32_t mqttLastPublishMs = 0;
+WiFiClient mqttTransport;
+PubSubClient mqttClient(mqttTransport);
+bool relayRequestedState = false;
+bool relayActualState = false;
+bool relayLockedOut = false;
+uint32_t relayTripUntilMs = 0;
+uint32_t relayOvercurrentSinceMs = 0;
+bool displayReady = false;
+uint32_t displayLastUpdateMs = 0;
+uint8_t displayPage = 0;
+U8G2_ST7567_ENH_DG128064_F_4W_HW_SPI displaySt7567(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI displaySsd1306(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+
+struct HistoryRuntime {
+  bool loaded = false;
+  bool dirty = false;
+  uint32_t dayKey = 0;
+  float baselineEnergy = NAN;
+  float daily[7] = {0, 0, 0, 0, 0, 0, 0};
+  uint32_t lastPersistMs = 0;
+};
+
+HistoryRuntime historyRuntime;
 
 struct MeterSnapshot {
   bool online = false;
@@ -286,6 +315,541 @@ String formatFloatValue(float value, uint8_t decimals, const char* unit = nullpt
     snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
   }
   return String(buffer);
+}
+
+String getDeviceUid() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  char suffix[7] = {};
+  snprintf(suffix, sizeof(suffix), "%06X", static_cast<uint32_t>(chipId & 0xFFFFFFULL));
+  return String("ESP32-RS485-") + suffix;
+}
+
+String getMqttBaseTopic() {
+  if (currentMqttConfig.base_topic[0] == '\0') {
+    return String("pm1611");
+  }
+  return String(currentMqttConfig.base_topic);
+}
+
+String getMqttClientId() {
+  if (currentMqttConfig.client_id[0] == '\0') {
+    return getDeviceUid();
+  }
+  return String(currentMqttConfig.client_id);
+}
+
+uint32_t currentDayKeyFromEpoch(time_t epoch) {
+  if (epoch <= 0) {
+    return 0;
+  }
+
+  struct tm timeInfo {};
+  if (!localtime_r(&epoch, &timeInfo)) {
+    return 0;
+  }
+
+  return static_cast<uint32_t>((timeInfo.tm_year + 1900) * 10000UL +
+                               (timeInfo.tm_mon + 1) * 100UL +
+                               timeInfo.tm_mday);
+}
+
+String formatDayKey(uint32_t dayKey) {
+  if (dayKey == 0) {
+    return String("unknown");
+  }
+
+  const uint16_t year = dayKey / 10000UL;
+  const uint8_t month = (dayKey / 100UL) % 100;
+  const uint8_t day = dayKey % 100;
+
+  char buffer[16] = {};
+  snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u", year, month, day);
+  return String(buffer);
+}
+
+float currentMeterEnergyDelta() {
+  if (isnan(meterSnapshot.energy)) {
+    return NAN;
+  }
+
+  return meterSnapshot.energy;
+}
+
+void setRelayOutput(bool on) {
+  const bool outputHigh = PinMap::kRelayOutputActiveHigh ? on : !on;
+  digitalWrite(PinMap::kRelayOutput, outputHigh ? HIGH : LOW);
+  relayActualState = on;
+}
+
+void loadHistoryRuntime() {
+  Preferences prefs;
+  if (!prefs.begin("history_rt", true)) {
+    return;
+  }
+
+  historyRuntime.dayKey = prefs.getUInt("day_key", 0);
+  historyRuntime.baselineEnergy = prefs.getFloat("baseline", NAN);
+  for (size_t i = 0; i < 7; i++) {
+    char key[8] = {};
+    snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
+    historyRuntime.daily[i] = prefs.getFloat(key, 0.0f);
+  }
+  prefs.end();
+  historyRuntime.loaded = true;
+}
+
+void saveHistoryRuntime() {
+  Preferences prefs;
+  if (!prefs.begin("history_rt", false)) {
+    return;
+  }
+
+  prefs.putUInt("day_key", historyRuntime.dayKey);
+  prefs.putFloat("baseline", historyRuntime.baselineEnergy);
+  for (size_t i = 0; i < 7; i++) {
+    char key[8] = {};
+    snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
+    prefs.putFloat(key, historyRuntime.daily[i]);
+  }
+  prefs.end();
+  historyRuntime.dirty = false;
+  historyRuntime.lastPersistMs = millis();
+}
+
+String buildEnergyHistoryJson() {
+  String body;
+  body.reserve(128);
+  body += F("[");
+  for (size_t i = 0; i < 7; i++) {
+    if (i > 0) {
+      body += F(",");
+    }
+    body += F("\"");
+    body += String(historyRuntime.daily[i], 3);
+    body += F("\"");
+  }
+  body += F("]");
+  return body;
+}
+
+void updateHistoryRuntime(uint32_t nowMs) {
+  if (!currentHistoryConfig.enabled) {
+    return;
+  }
+
+  if (!historyRuntime.loaded) {
+    loadHistoryRuntime();
+  }
+
+  const float energy = currentMeterEnergyDelta();
+  if (isnan(energy)) {
+    return;
+  }
+
+  const uint32_t dayKey = currentDayKeyFromEpoch(time(nullptr));
+  if (historyRuntime.dayKey == 0 || historyRuntime.baselineEnergy != historyRuntime.baselineEnergy) {
+    historyRuntime.dayKey = dayKey;
+    historyRuntime.baselineEnergy = energy;
+    historyRuntime.daily[0] = 0.0f;
+    historyRuntime.dirty = true;
+  } else if (dayKey != 0 && dayKey != historyRuntime.dayKey) {
+    const float completedDay = energy - historyRuntime.baselineEnergy;
+    for (int i = 6; i > 0; --i) {
+      historyRuntime.daily[i] = historyRuntime.daily[i - 1];
+    }
+    historyRuntime.daily[0] = completedDay > 0 ? completedDay : 0.0f;
+    historyRuntime.dayKey = dayKey;
+    historyRuntime.baselineEnergy = energy;
+    historyRuntime.dirty = true;
+  } else {
+    const float currentDay = energy - historyRuntime.baselineEnergy;
+    historyRuntime.daily[0] = currentDay > 0 ? currentDay : 0.0f;
+    historyRuntime.dirty = true;
+  }
+
+  if (historyRuntime.dirty && nowMs - historyRuntime.lastPersistMs >= 30000UL) {
+    saveHistoryRuntime();
+  }
+}
+
+String buildRelayStateText() {
+  if (!currentProtectionConfig.relay_enabled) {
+    return String("disabled");
+  }
+  if (relayLockedOut) {
+    return String("locked");
+  }
+  return relayActualState ? String("on") : String("off");
+}
+
+bool canTurnRelayOn() {
+  if (!currentProtectionConfig.relay_enabled) {
+    return false;
+  }
+  if (relayLockedOut && millis() < relayTripUntilMs) {
+    return false;
+  }
+  return true;
+}
+
+void requestRelayState(bool on, const char* reason) {
+  if (!currentProtectionConfig.relay_enabled) {
+    setRelayOutput(false);
+    relayRequestedState = false;
+    Serial.println("Relay request ignored: relay disabled");
+    return;
+  }
+
+  if (on && !canTurnRelayOn()) {
+    Serial.print("Relay ON blocked: ");
+    Serial.println(reason);
+    return;
+  }
+
+  relayRequestedState = on;
+  setRelayOutput(on);
+  Serial.print("Relay state set: ");
+  Serial.print(on ? "ON" : "OFF");
+  Serial.print(" reason=");
+  Serial.println(reason);
+}
+
+void tripRelay(const char* reason, uint32_t nowMs) {
+  relayLockedOut = true;
+  relayTripUntilMs = nowMs + static_cast<uint32_t>(currentProtectionConfig.auto_retry_delay_sec) * 1000UL;
+  relayOvercurrentSinceMs = 0;
+  relayRequestedState = false;
+  setRelayOutput(false);
+  Serial.print("Relay tripped: ");
+  Serial.println(reason);
+}
+
+void updateProtectionRuntime(uint32_t nowMs) {
+  if (!currentProtectionConfig.relay_enabled) {
+    if (relayActualState) {
+      setRelayOutput(false);
+    }
+    relayRequestedState = false;
+    relayLockedOut = false;
+    relayTripUntilMs = 0;
+    relayOvercurrentSinceMs = 0;
+    return;
+  }
+
+  if (relayLockedOut) {
+    if (currentProtectionConfig.auto_retry_enabled && nowMs >= relayTripUntilMs) {
+      const bool safeCurrent = isnan(meterSnapshot.current) || meterSnapshot.current <= currentProtectionConfig.current_limit_a;
+      const bool meterOk = meterSnapshot.online;
+      if (safeCurrent && meterOk) {
+        relayLockedOut = false;
+        if (relayRequestedState) {
+          setRelayOutput(true);
+        }
+        Serial.println("Relay auto-retry unlocked");
+      }
+    }
+    if (relayLockedOut) {
+      setRelayOutput(false);
+      return;
+    }
+  }
+
+  const bool meterStale = meterSnapshot.lastSuccessMs > 0 && nowMs - meterSnapshot.lastSuccessMs > currentProtectionConfig.trip_delay_ms;
+  if (currentProtectionConfig.trip_on_meter_stale && !meterSnapshot.online && meterStale) {
+    tripRelay("meter stale", nowMs);
+    return;
+  }
+
+  if (relayRequestedState) {
+    const bool currentValid = !isnan(meterSnapshot.current);
+    if (currentValid && meterSnapshot.current > currentProtectionConfig.current_limit_a) {
+      if (relayOvercurrentSinceMs == 0) {
+        relayOvercurrentSinceMs = nowMs;
+      } else if (nowMs - relayOvercurrentSinceMs >= currentProtectionConfig.trip_delay_ms) {
+        tripRelay("overcurrent", nowMs);
+        return;
+      }
+    } else {
+      relayOvercurrentSinceMs = 0;
+    }
+  } else {
+    relayOvercurrentSinceMs = 0;
+  }
+
+  setRelayOutput(relayRequestedState);
+}
+
+String mqttCommandTopic() {
+  return getMqttBaseTopic() + "/cmd";
+}
+
+String mqttStateTopic() {
+  return getMqttBaseTopic() + "/state";
+}
+
+String mqttTelemetryTopic() {
+  return getMqttBaseTopic() + "/telemetry";
+}
+
+void publishMqttState();
+
+void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
+  String incomingTopic = String(topic ? topic : "");
+  String message;
+  message.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) {
+    message += static_cast<char>(payload[i]);
+  }
+  message.trim();
+  message.toLowerCase();
+
+  Serial.print("MQTT message: ");
+  Serial.print(incomingTopic);
+  Serial.print(" -> ");
+  Serial.println(message);
+
+  if (message.indexOf("set_relay") >= 0 || message.indexOf("\"action\":\"set_relay\"") >= 0) {
+    requestRelayState(true, "mqtt");
+    publishMqttState();
+    return;
+  }
+  if (message.indexOf("reset_relay") >= 0 || message.indexOf("\"action\":\"reset_relay\"") >= 0) {
+    requestRelayState(false, "mqtt");
+    publishMqttState();
+    return;
+  }
+}
+
+void configureMqttClient() {
+  mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+  mqttClient.setBufferSize(1024);
+  mqttClient.setKeepAlive(30);
+  mqttClient.setCallback(mqttMessageCallback);
+  mqttClientConfigured = true;
+}
+
+bool connectMqtt(uint32_t nowMs) {
+  if (!currentMqttConfig.enabled || WiFi.status() != WL_CONNECTED || currentMqttConfig.host[0] == '\0') {
+    mqttConnected = false;
+    return false;
+  }
+
+  if (!mqttClientConfigured) {
+    configureMqttClient();
+  }
+
+  if (mqttClient.connected()) {
+    mqttConnected = true;
+    return true;
+  }
+
+  if (nowMs - mqttLastReconnectAttemptMs < 5000UL) {
+    return false;
+  }
+  mqttLastReconnectAttemptMs = nowMs;
+
+  const String clientId = getMqttClientId();
+  const String willTopic = mqttStateTopic();
+  const String willPayload = F("{\"connected\":false}");
+
+  bool ok = false;
+  if (currentMqttConfig.username[0] != '\0' || currentMqttConfig.password[0] != '\0') {
+    ok = mqttClient.connect(clientId.c_str(),
+                            currentMqttConfig.username,
+                            currentMqttConfig.password,
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  } else {
+    ok = mqttClient.connect(clientId.c_str(),
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  }
+
+  if (!ok) {
+    mqttConnected = false;
+    Serial.print("MQTT connect failed, rc=");
+    Serial.println(mqttClient.state());
+    return false;
+  }
+
+  mqttClient.subscribe(mqttCommandTopic().c_str());
+  mqttClient.subscribe((getMqttBaseTopic() + "/relay/set").c_str());
+  mqttConnected = true;
+  Serial.println("MQTT connected");
+  publishMqttState();
+  return true;
+}
+
+String buildMqttPayload() {
+  String body;
+  body.reserve(512);
+  body += F("{\"uid\":\"");
+  body += getDeviceUid();
+  body += F("\",\"rtc\":\"");
+  body += getRtcString();
+  body += F("\",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"meter_data\":{");
+  body += F("\"voltage\":[\"");
+  body += String(meterSnapshot.voltage, 2);
+  body += F("\",\"V\"],\"current\":[\"");
+  body += String(meterSnapshot.current, 2);
+  body += F("\",\"A\"],\"power\":[\"");
+  body += String(meterSnapshot.power, 2);
+  body += F("\",\"kW\"],\"frequency\":[\"");
+  body += String(meterSnapshot.frequency, 2);
+  body += F("\",\"Hz\"],\"pf\":[\"");
+  body += String(meterSnapshot.pf, 2);
+  body += F("\",\"\"],\"energy\":[\"");
+  body += String(meterSnapshot.energy, 3);
+  body += F("\",\"kWh\"],\"co2\":[\"");
+  const float co2 = meterSnapshot.valid ? (meterSnapshot.energy * currentDeviceConfig.co2_factor_kg_per_kwh) : 0.0f;
+  body += String(co2, 3);
+  body += F("\",\"kg\"]},\"energy_history\":");
+  body += buildEnergyHistoryJson();
+  body += F("}");
+  return body;
+}
+
+void publishMqttState() {
+  if (!mqttClient.connected()) {
+    return;
+  }
+
+  const String payload = buildMqttPayload();
+  mqttClient.publish(mqttStateTopic().c_str(), payload.c_str(), true);
+  mqttClient.publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
+}
+
+void updateMqttRuntime(uint32_t nowMs) {
+  if (!currentMqttConfig.enabled) {
+    mqttConnected = false;
+    if (mqttClient.connected()) {
+      mqttClient.disconnect();
+    }
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    mqttConnected = false;
+    return;
+  }
+
+  if (!mqttClientConfigured) {
+    configureMqttClient();
+  } else {
+    mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+  }
+
+  if (!mqttClient.connected()) {
+    connectMqtt(nowMs);
+  } else {
+    mqttClient.loop();
+    mqttConnected = true;
+  }
+
+  if (mqttClient.connected() && nowMs - mqttLastPublishMs >= static_cast<uint32_t>(currentMqttConfig.publish_interval_sec) * 1000UL) {
+    mqttLastPublishMs = nowMs;
+    publishMqttState();
+  }
+}
+
+U8G2* getActiveDisplayDriver() {
+  if (currentDisplayConfig.type == 1) {
+    return &displaySsd1306;
+  }
+  return &displaySt7567;
+}
+
+void initDisplayRuntime() {
+  if (!currentDisplayConfig.enabled) {
+    displayReady = false;
+    return;
+  }
+
+  U8G2* driver = getActiveDisplayDriver();
+  if (driver == nullptr) {
+    displayReady = false;
+    return;
+  }
+
+  driver->begin();
+  driver->setContrast(currentDisplayConfig.brightness);
+  displayReady = true;
+  Serial.println("LCD display ready");
+}
+
+void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
+  driver->clearBuffer();
+  driver->setFont(u8g2_font_6x12_tf);
+
+  switch (pageIndex % 4) {
+    case 0:
+      driver->drawStr(0, 12, "PM1611 RS485");
+      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.voltage, 1, "V").c_str());
+      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.current, 1, "A").c_str());
+      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.power, 1, "kW").c_str());
+      break;
+    case 1:
+      driver->drawStr(0, 12, "Energy / Power");
+      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.energy, 3, "kWh").c_str());
+      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.frequency, 1, "Hz").c_str());
+      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.pf, 2, "PF").c_str());
+      break;
+    case 2:
+      driver->drawStr(0, 12, "Network / MQTT");
+      driver->drawStr(0, 28, wifiConnected ? "STA connected" : "STA offline");
+      driver->drawStr(0, 42, mqttConnected ? "MQTT connected" : "MQTT offline");
+      driver->drawStr(0, 56, getMqttBaseTopic().c_str());
+      break;
+    default:
+      driver->drawStr(0, 12, "Relay / Fault");
+      driver->drawStr(0, 28, buildRelayStateText().c_str());
+      driver->drawStr(0, 42, relayLockedOut ? "lockout active" : "ready");
+      driver->drawStr(0, 56, meterSnapshot.online ? "meter ok" : "meter off");
+      break;
+  }
+
+  driver->sendBuffer();
+}
+
+void updateDisplayRuntime(uint32_t nowMs) {
+  if (!currentDisplayConfig.enabled) {
+    return;
+  }
+
+  if (!displayReady) {
+    initDisplayRuntime();
+    if (!displayReady) {
+      return;
+    }
+  }
+
+  const uint32_t intervalMs = static_cast<uint32_t>(currentDisplayConfig.rotation_interval_sec) * 1000UL;
+  if (intervalMs > 0 && nowMs - displayLastUpdateMs < intervalMs) {
+    return;
+  }
+
+  displayLastUpdateMs = nowMs;
+  displayPage = (displayPage + 1) % 4;
+  U8G2* driver = getActiveDisplayDriver();
+  if (driver != nullptr) {
+    drawDisplayPage(driver, displayPage);
+  }
+}
+
+void loadFeatureRuntime() {
+  loadHistoryRuntime();
+  setRelayOutput(false);
+  relayRequestedState = false;
+  relayActualState = false;
+  relayLockedOut = false;
+  relayTripUntilMs = 0;
+  relayOvercurrentSinceMs = 0;
 }
 
 void resetMeterSnapshot() {
@@ -528,6 +1092,8 @@ void pollModbusMeter(uint32_t nowMs) {
     meterSnapshot.valid = false;
     Serial.println("Modbus meter read failed");
   }
+
+  updateHistoryRuntime(nowMs);
 }
 
 void startNtpSync() {
@@ -1122,6 +1688,11 @@ void handleMqttConfigSaveApi() {
   bool ok = ConfigManager::saveMqttConfig(cfg);
   if (ok) {
     currentMqttConfig = cfg;
+    mqttClientConfigured = false;
+    if (mqttClient.connected()) {
+      mqttClient.disconnect();
+    }
+    mqttConnected = false;
   }
   sendNoCacheHeader();
   if (ok) {
@@ -1171,6 +1742,9 @@ void handleProtectionConfigSaveApi() {
   bool ok = ConfigManager::saveProtectionConfig(cfg);
   if (ok) {
     currentProtectionConfig = cfg;
+    if (!currentProtectionConfig.relay_enabled) {
+      requestRelayState(false, "protection_disabled");
+    }
   }
   sendNoCacheHeader();
   if (ok) {
@@ -1192,6 +1766,7 @@ void handleDisplayConfigSaveApi() {
   bool ok = ConfigManager::saveDisplayConfig(cfg);
   if (ok) {
     currentDisplayConfig = cfg;
+    displayReady = false;
   }
   sendNoCacheHeader();
   if (ok) {
@@ -1211,6 +1786,7 @@ void handleHistoryConfigSaveApi() {
   bool ok = ConfigManager::saveHistoryConfig(cfg);
   if (ok) {
     currentHistoryConfig = cfg;
+    historyRuntime.loaded = false;
   }
   sendNoCacheHeader();
   if (ok) {
@@ -1246,6 +1822,40 @@ void handleSystemConfigSaveApi() {
   }
 }
 
+void handleRelayStateApi() {
+  String body;
+  body.reserve(64);
+  body += F("{\"ok\":true,\"relay_enabled\":");
+  body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
+  body += F(",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"relay_requested\":\"");
+  body += relayRequestedState ? F("1") : F("0");
+  body += F("\",\"relay_locked\":");
+  body += relayLockedOut ? F("true") : F("false");
+  body += F("}");
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", body);
+}
+
+void handleRelaySetApi() {
+  String action;
+  if (configServer.hasArg("action")) {
+    action = configServer.arg("action");
+  } else if (configServer.hasArg("state")) {
+    action = configServer.arg("state");
+  }
+  action.toLowerCase();
+
+  if (action.indexOf("set") >= 0 || action == "1" || action == "on" || action == "true") {
+    requestRelayState(true, "web");
+  } else {
+    requestRelayState(false, "web");
+  }
+
+  handleRelayStateApi();
+}
+
 void handleSetupRoot() {
   sendNoCacheHeader();
   configServer.send(200, "text/html", buildHomePage());
@@ -1259,7 +1869,7 @@ void handleNetworkPage() {
 
 void handleStatusApi() {
   String body;
-  body.reserve(256);
+  body.reserve(1024);
   body += F("{\"firmware\":\"");
   body += FW_VERSION;
   body += F("\",\"mode\":\"");
@@ -1292,6 +1902,12 @@ void handleStatusApi() {
   body += String(currentModbusConfig.meter_profile);
   body += F(",\"relay_enabled\":");
   body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
+  body += F(",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"relay_requested\":\"");
+  body += relayRequestedState ? F("1") : F("0");
+  body += F("\",\"relay_locked\":");
+  body += relayLockedOut ? F("true") : F("false");
   body += F(",\"display_enabled\":");
   body += currentDisplayConfig.enabled ? F("true") : F("false");
   body += F(",\"history_enabled\":");
@@ -1302,7 +1918,23 @@ void handleStatusApi() {
   body += jsonEscape(currentSystemConfig.ntp_server2);
   body += F("\",\"debug_enabled\":");
   body += currentSystemConfig.debug_enabled ? F("true") : F("false");
-  body += F("\",\"sta_ip\":\"");
+  body += F(",\"mqtt_connected\":");
+  body += mqttConnected ? F("true") : F("false");
+  body += F(",\"mqtt_state_topic\":\"");
+  body += jsonEscape(mqttStateTopic());
+  body += F("\",\"mqtt_telemetry_topic\":\"");
+  body += jsonEscape(mqttTelemetryTopic());
+  body += F("\",\"mqtt_base_topic\":\"");
+  body += jsonEscape(getMqttBaseTopic());
+  body += F("\",\"display_ready\":");
+  body += displayReady ? F("true") : F("false");
+  body += F(",\"display_page\":");
+  body += String(displayPage);
+  body += F(",\"history_day_key\":\"");
+  body += formatDayKey(historyRuntime.dayKey);
+  body += F("\",\"energy_history\":");
+  body += buildEnergyHistoryJson();
+  body += F(",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   body += F("\",\"rtc\":\"");
   body += jsonEscape(getRtcString());
@@ -1367,6 +1999,10 @@ void handleStatusApi() {
   body += String(meterSnapshot.lastPollMs);
   body += F(",\"meter_last_success_ms\":");
   body += String(meterSnapshot.lastSuccessMs);
+  body += F(",\"relay_limit_a\":");
+  body += String(currentProtectionConfig.current_limit_a);
+  body += F(",\"relay_trip_delay_ms\":");
+  body += String(currentProtectionConfig.trip_delay_ms);
   body += F("}");
 
   sendNoCacheHeader();
@@ -1513,6 +2149,8 @@ void startConfigWebServer() {
   configServer.on("/api/display/save", HTTP_POST, handleDisplayConfigSaveApi);
   configServer.on("/api/history/save", HTTP_POST, handleHistoryConfigSaveApi);
   configServer.on("/api/system/save", HTTP_POST, handleSystemConfigSaveApi);
+  configServer.on("/api/relay/state", HTTP_GET, handleRelayStateApi);
+  configServer.on("/api/relay/set", HTTP_POST, handleRelaySetApi);
   configServer.on("/api/reboot", HTTP_POST, handleRebootApi);
   configServer.onNotFound(handleNotFound);
   configServer.begin();
@@ -1611,6 +2249,8 @@ void setup() {
 
   pinMode(PinMap::kConfigButton, INPUT_PULLUP);
   pinMode(PinMap::kBuiltinLed, OUTPUT);
+  pinMode(PinMap::kRelayOutput, OUTPUT);
+  setRelayOutput(false);
   // setBuiltinLed(false);
 
   printBootBanner();
@@ -1625,6 +2265,7 @@ void setup() {
   currentHistoryConfig = ConfigManager::loadHistoryConfig();
   currentSystemConfig = ConfigManager::loadSystemConfig();
   currentModbusConfigLoaded = true;
+  loadFeatureRuntime();
   resetMeterSnapshot();
   if (hasSavedWifi) {
     wifiConnecting = true;
@@ -1643,6 +2284,9 @@ void loop() {
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
   pollModbusMeter(nowMs);
+  updateProtectionRuntime(nowMs);
+  updateMqttRuntime(nowMs);
+  updateDisplayRuntime(nowMs);
   if (configWebStarted) {
     configServer.handleClient();
   }

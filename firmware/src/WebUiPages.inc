@@ -73,6 +73,10 @@ String buildHomePage() {
   page += F("<div>WiFi RSSI</div><div>");
   page += wifiConnected ? String(WiFi.RSSI()) + String(" dBm") : String("(n/a)");
   page += F("</div>");
+  page += F("<div>MQTT</div><div>"); page += mqttConnected ? F("connected") : (currentMqttConfig.enabled ? F("offline") : F("disabled")); page += F("</div>");
+  page += F("<div>Relay</div><div>"); page += buildRelayStateText(); page += F("</div>");
+  page += F("<div>Display</div><div>"); page += currentDisplayConfig.enabled ? (displayReady ? F("ready") : F("starting")) : F("disabled"); page += F("</div>");
+  page += F("<div>History</div><div>"); page += currentHistoryConfig.enabled ? formatDayKey(historyRuntime.dayKey) : F("disabled"); page += F("</div>");
   page += F("</div></section>");
   page += F("<section class=\"panel\"><div class=\"metric\"><div class=\"metricTop\"><span>RAM Used</span><span>");
   page += String(getHeapUsedPercent()); page += F("%</span></div><div class=\"track\"><div class=\"fill\" style=\"width:"); page += String(getHeapUsedPercent()); page += F("%\"></div></div><div class=\"muted\">"); page += formatBytesHuman(getHeapUsedBytes()); page += F(" used / "); page += formatBytesHuman(getHeapTotalBytes()); page += F(" total</div></div>");
@@ -115,7 +119,9 @@ String buildMeterPage() {
   page += meterSnapshot.online ? F("100") : F("0");
   page += F("%\"></div></div><div class=\"muted\">");
   page += meterSnapshot.online ? F("RS485 responds to bootstrap profile.") : F("Waiting for a valid Modbus reply.");
-  page += F("</div></div></section>");
+  page += F("</div></div></section><section class=\"panel\"><div class=\"muted\">Relay control</div><div class=\"actions\"><button type=\"button\" onclick=\"relayAction('set')\">Relay ON</button><button type=\"button\" onclick=\"relayAction('reset')\">Relay OFF</button><button type=\"button\" onclick=\"location.reload()\">Refresh</button></div><div class=\"muted\">State: ");
+  page += buildRelayStateText();
+  page += F("</div></section><script>function relayAction(action){fetch('/api/relay/set',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action='+encodeURIComponent(action)}).then(()=>location.reload());}</script>");
   page += buildPageFooter();
   return page;
 }

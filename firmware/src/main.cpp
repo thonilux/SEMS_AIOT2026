@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include "AppMode.h"
@@ -9,8 +10,12 @@ namespace {
 constexpr uint32_t kSerialBaud = 115200;
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
 constexpr uint32_t kRuntimeConfigHoldMs = 5000;
+constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr char kConfigApSsidPrefix[] = "PM1611-SETUP";
 constexpr char kConfigApPassword[] = "PM123456";
+constexpr char kNetworkPrefsNamespace[] = "network";
+constexpr char kWifiSsidKey[] = "wifi_ssid";
+constexpr char kWifiPassKey[] = "wifi_pass";
 
 uint32_t lastHeartbeatMs = 0;
 uint32_t heartbeatCount = 0;
@@ -19,6 +24,11 @@ uint32_t lastConfigButtonProgressSecond = 0;
 AppMode currentMode = AppMode::Normal;
 bool configApStarted = false;
 bool configWebStarted = false;
+bool rebootRequested = false;
+uint32_t rebootAtMs = 0;
+String savedWifiSsid;
+String savedWifiPassword;
+bool hasSavedWifi = false;
 WebServer configServer(80);
 
 bool isConfigButtonPressed() {
@@ -78,6 +88,27 @@ void printModeInfo() {
   Serial.println(appModeToString(currentMode));
 }
 
+const char* wifiStatusToString(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "idle";
+    case WL_NO_SSID_AVAIL:
+      return "ssid_not_available";
+    case WL_SCAN_COMPLETED:
+      return "scan_completed";
+    case WL_CONNECTED:
+      return "connected";
+    case WL_CONNECT_FAILED:
+      return "connect_failed";
+    case WL_CONNECTION_LOST:
+      return "connection_lost";
+    case WL_DISCONNECTED:
+      return "disconnected";
+    default:
+      return "unknown";
+  }
+}
+
 String getMacSuffix() {
   const uint64_t chipId = ESP.getEfuseMac();
   char suffix[7] = {};
@@ -112,14 +143,112 @@ String jsonEscape(const String& value) {
   return escaped;
 }
 
+String htmlEscape(const String& value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+
+  for (size_t i = 0; i < value.length(); i++) {
+    const char c = value.charAt(i);
+    if (c == '&') {
+      escaped += F("&amp;");
+    } else if (c == '<') {
+      escaped += F("&lt;");
+    } else if (c == '>') {
+      escaped += F("&gt;");
+    } else if (c == '"') {
+      escaped += F("&quot;");
+    } else if (c == '\'') {
+      escaped += F("&#39;");
+    } else {
+      escaped += c;
+    }
+  }
+
+  return escaped;
+}
+
 void sendNoCacheHeader() {
   configServer.sendHeader("Cache-Control", "no-store");
+}
+
+void loadWifiConfig() {
+  Preferences prefs;
+  if (!prefs.begin(kNetworkPrefsNamespace, false)) {
+    Serial.println("NVS network open failed");
+    return;
+  }
+
+  savedWifiSsid = prefs.isKey(kWifiSsidKey) ? prefs.getString(kWifiSsidKey, "") : "";
+  savedWifiPassword = prefs.isKey(kWifiPassKey) ? prefs.getString(kWifiPassKey, "") : "";
+  prefs.end();
+
+  hasSavedWifi = savedWifiSsid.length() > 0;
+  Serial.print("Saved WiFi config: ");
+  Serial.println(hasSavedWifi ? savedWifiSsid : "(none)");
+}
+
+bool saveWifiConfig(const String& ssid, const String& password) {
+  Preferences prefs;
+  if (!prefs.begin(kNetworkPrefsNamespace, false)) {
+    Serial.println("NVS network write open failed");
+    return false;
+  }
+
+  const size_t ssidBytes = prefs.putString(kWifiSsidKey, ssid);
+  const size_t passBytes = prefs.putString(kWifiPassKey, password);
+  prefs.end();
+
+  if (ssidBytes == 0) {
+    Serial.println("NVS WiFi SSID write failed");
+    return false;
+  }
+
+  savedWifiSsid = ssid;
+  savedWifiPassword = password;
+  hasSavedWifi = true;
+
+  Serial.print("Saved WiFi SSID to NVS: ");
+  Serial.println(savedWifiSsid);
+  Serial.print("Saved WiFi password length: ");
+  Serial.println(passBytes > 0 ? savedWifiPassword.length() : 0);
+  return true;
+}
+
+void connectToSavedWifi() {
+  if (!hasSavedWifi) {
+    Serial.println("WiFi STA skipped: no saved credentials");
+    return;
+  }
+
+  Serial.print("WiFi STA connecting to: ");
+  Serial.println(savedWifiSsid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(savedWifiSsid.c_str(), savedWifiPassword.c_str());
+
+  const uint32_t startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
+    delay(500);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi STA connected");
+    Serial.print("STA IP: ");
+    Serial.println(WiFi.localIP());
+    return;
+  }
+
+  Serial.print("WiFi STA failed: ");
+  Serial.println(wifiStatusToString(WiFi.status()));
+  WiFi.disconnect(false, false);
 }
 
 String buildSetupPage() {
   const String apSsid = getConfigApSsid();
   String page;
-  page.reserve(5200);
+  page.reserve(7800);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
   page += F("<title>PM1611 Setup</title><style>");
@@ -127,9 +256,10 @@ String buildSetupPage() {
   page += F("body{margin:0}.bar{background:#111827;color:white;padding:14px 18px}");
   page += F(".wrap{max-width:760px;margin:0 auto;padding:18px}.panel{background:white;border:1px solid #d9e1e8;border-radius:8px;padding:16px;margin:14px 0}");
   page += F("h1{font-size:21px;margin:0}.muted{color:#667085}.grid{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}");
-  page += F("button{background:#0f766e;color:white;border:0;border-radius:6px;padding:10px 13px;font-weight:700}");
+  page += F("label{font-weight:700;display:block;margin:12px 0 6px}input{box-sizing:border-box;width:100%;border:1px solid #cbd5e1;border-radius:6px;padding:10px;font-size:15px}");
+  page += F(".actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}button{background:#0f766e;color:white;border:0;border-radius:6px;padding:10px 13px;font-weight:700}");
   page += F("button:disabled{background:#94a3b8}.net{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #e5e7eb;padding:10px 0}");
-  page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}");
+  page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}.use{background:#334155;padding:7px 10px}");
   page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}}");
   page += F("</style></head><body>");
   page += F("<div class=\"bar\"><h1>PM1611 RS485 Setup</h1><div class=\"muted\">Config Mode</div></div>");
@@ -142,6 +272,12 @@ String buildSetupPage() {
   page += apSsid;
   page += F("</div><div>AP IP</div><div>");
   page += WiFi.softAPIP().toString();
+  page += F("</div><div>Saved WiFi</div><div>");
+  page += hasSavedWifi ? htmlEscape(savedWifiSsid) : F("(none)");
+  page += F("</div><div>STA status</div><div>");
+  page += wifiStatusToString(WiFi.status());
+  page += F("</div><div>STA IP</div><div>");
+  page += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : F("-");
   page += F("</div><div>MAC suffix</div><div>");
   page += getMacSuffix();
   page += F("</div><div>Free heap</div><div id=\"heap\">");
@@ -149,13 +285,25 @@ String buildSetupPage() {
   page += F(" bytes</div></div></section>");
   page += F("<section class=\"panel\"><h2>WiFi Nearby</h2>");
   page += F("<button id=\"scanBtn\" onclick=\"scanWifi()\">Scan WiFi</button>");
-  page += F("<p id=\"scanState\" class=\"muted\">Ready.</p><div id=\"networks\"></div></section></main>");
+  page += F("<p id=\"scanState\" class=\"muted\">Ready.</p><div id=\"networks\"></div></section>");
+  page += F("<section class=\"panel\"><h2>WiFi Connection</h2>");
+  page += F("<label for=\"ssid\">SSID</label><input id=\"ssid\" maxlength=\"32\" placeholder=\"WiFi SSID\" value=\"");
+  page += htmlEscape(savedWifiSsid);
+  page += F("\"><label for=\"password\">Password</label><input id=\"password\" type=\"password\" maxlength=\"64\" placeholder=\"WiFi password\">");
+  page += F("<div class=\"actions\"><button onclick=\"saveWifi()\">Save WiFi</button><button onclick=\"rebootDevice()\">Reboot</button></div>");
+  page += F("<p id=\"saveState\" class=\"muted\">Saved credentials apply after reboot.</p></section></main>");
   page += F("<script>");
   page += F("async function scanWifi(){const b=document.getElementById('scanBtn'),s=document.getElementById('scanState'),n=document.getElementById('networks');");
   page += F("b.disabled=true;s.textContent='Scanning...';n.innerHTML='';try{const r=await fetch('/api/wifi/scan');const d=await r.json();");
-  page += F("s.textContent=d.count+' network(s) found';n.innerHTML=d.networks.map(x=>'<div class=\"net\"><div><div class=\"ssid\">'+esc(x.ssid||'(hidden)')+'</div><div class=\"muted\">CH '+x.channel+' · '+x.encryption+'</div></div><div class=\"tag\">'+x.rssi+' dBm</div></div>').join('');");
+  page += F("s.textContent=d.count+' network(s) found';n.innerHTML=d.networks.map(x=>'<div class=\"net\"><div><div class=\"ssid\">'+esc(x.ssid||'(hidden)')+'</div><div class=\"muted\">CH '+x.channel+' · '+x.encryption+'</div></div><div><span class=\"tag\">'+x.rssi+' dBm</span> <button class=\"use\" onclick=\"useSsid(\\''+escAttr(x.ssid)+'\\')\">Use</button></div></div>').join('');");
   page += F("}catch(e){s.textContent='Scan failed';}b.disabled=false}");
+  page += F("function useSsid(v){document.getElementById('ssid').value=v;document.getElementById('password').focus()}");
+  page += F("async function saveWifi(){const s=document.getElementById('saveState'),ssid=document.getElementById('ssid').value.trim(),password=document.getElementById('password').value;");
+  page += F("if(!ssid){s.textContent='SSID is required';return}const body=new URLSearchParams({ssid,password});s.textContent='Saving...';");
+  page += F("try{const r=await fetch('/api/wifi/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved. Reboot to connect.':(d.error||'Save failed')}catch(e){s.textContent='Save failed'}}");
+  page += F("async function rebootDevice(){document.getElementById('saveState').textContent='Rebooting...';await fetch('/api/reboot',{method:'POST'}).catch(()=>{});}");
   page += F("function esc(v){return String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]))}");
+  page += F("function escAttr(v){return String(v).replace(/[\\\\']/g,m=>'\\\\'+m).replace(/[\\r\\n]/g,'')}");
   page += F("</script></body></html>");
   return page;
 }
@@ -176,6 +324,12 @@ void handleStatusApi() {
   body += jsonEscape(getConfigApSsid());
   body += F("\",\"ap_ip\":\"");
   body += WiFi.softAPIP().toString();
+  body += F("\",\"saved_wifi_ssid\":\"");
+  body += jsonEscape(savedWifiSsid);
+  body += F("\",\"sta_status\":\"");
+  body += wifiStatusToString(WiFi.status());
+  body += F("\",\"sta_ip\":\"");
+  body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   body += F("\",\"mac_suffix\":\"");
   body += getMacSuffix();
   body += F("\",\"free_heap\":");
@@ -218,6 +372,49 @@ void handleWifiScanApi() {
   configServer.send(200, "application/json", body);
 }
 
+void handleWifiSaveApi() {
+  if (!configServer.hasArg("ssid")) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}");
+    return;
+  }
+
+  String ssid = configServer.arg("ssid");
+  String password = configServer.arg("password");
+  ssid.trim();
+
+  if (ssid.length() == 0 || ssid.length() > 32) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_ssid\"}");
+    return;
+  }
+
+  if (password.length() > 64) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_password\"}");
+    return;
+  }
+
+  const bool saved = saveWifiConfig(ssid, password);
+  if (!saved) {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"nvs_write_failed\"}");
+    return;
+  }
+
+  String body;
+  body.reserve(96);
+  body += F("{\"ok\":true,\"ssid\":\"");
+  body += jsonEscape(savedWifiSsid);
+  body += F("\",\"reboot_required\":true}");
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", body);
+}
+
+void handleRebootApi() {
+  rebootRequested = true;
+  rebootAtMs = millis() + 800;
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+  Serial.println("Reboot requested from setup UI");
+}
+
 void handleNotFound() {
   configServer.sendHeader("Location", "/", true);
   configServer.send(302, "text/plain", "");
@@ -231,6 +428,8 @@ void startConfigWebServer() {
   configServer.on("/", HTTP_GET, handleSetupRoot);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
+  configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
+  configServer.on("/api/reboot", HTTP_POST, handleRebootApi);
   configServer.onNotFound(handleNotFound);
   configServer.begin();
 
@@ -331,6 +530,8 @@ void setup() {
   printBootBanner();
   printChipInfo();
   printButtonInfo();
+  loadWifiConfig();
+  connectToSavedWifi();
   printModeInfo();
 }
 
@@ -340,6 +541,11 @@ void loop() {
   handleConfigButton(nowMs);
   if (configWebStarted) {
     configServer.handleClient();
+  }
+
+  if (rebootRequested && millis() >= rebootAtMs) {
+    Serial.println("Restarting now");
+    ESP.restart();
   }
 
   if (nowMs - lastHeartbeatMs >= kHeartbeatIntervalMs) {
@@ -353,6 +559,8 @@ void loop() {
     Serial.print(" free_heap=");
     Serial.print(ESP.getFreeHeap());
     Serial.print(" mode=");
-    Serial.println(appModeToString(currentMode));
+    Serial.print(appModeToString(currentMode));
+    Serial.print(" wifi=");
+    Serial.println(wifiStatusToString(WiFi.status()));
   }
 }

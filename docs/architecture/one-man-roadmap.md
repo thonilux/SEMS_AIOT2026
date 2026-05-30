@@ -65,22 +65,22 @@ Current status:
 | Config button firmware | Done | Runtime GPIO32 hold selects `CONFIG_MODE` and turns builtin LED ON |
 | WiFi AP Config Mode | Done | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}` |
 | Web UI setup portal | Done | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1` |
+| WiFi NVS persistence | Done | Setup UI saves SSID/password to NVS and boot attempts STA connection |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:
 
 ```text
-Implement WiFi credential form mock.
+Implement WiFi connection verification flow.
 
 Input:
-- Active setup page and WiFi scan results
+- Saved WiFi credentials from NVS
 
 Output:
-- Select SSID from scan result
-- Enter WiFi password
-- Validate form locally
-- Print submitted config to serial only
-- No NVS writes yet
+- Show saved SSID and station status in UI
+- Add explicit test/connect endpoint before reboot
+- Add fallback rule if station connection fails
+- Keep Config Mode recoverable from GPIO32 hold
 ```
 
 ```text

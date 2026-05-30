@@ -445,7 +445,11 @@ String buildPageHeader(const String& title) {
   page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}nav{margin-top:10px}}");
   page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
   page += htmlEscape(title);
-  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a><a href=\"/network\">Network</a><a href=\"/device\">Device</a><a href=\"/mqtt\">MQTT</a><a href=\"/modbus\">Modbus</a><a href=\"/protection\">Protection</a><a href=\"/display\">Display</a><a href=\"/history\">History</a><a href=\"/system\">System</a></nav></div></div>");
+  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a>");
+  if (currentMode == AppMode::Config || configApStarted) {
+    page += F("<a href=\"/network\">Network</a><a href=\"/device\">Device</a><a href=\"/mqtt\">MQTT</a><a href=\"/modbus\">Modbus</a><a href=\"/protection\">Protection</a><a href=\"/display\">Display</a><a href=\"/history\">History</a><a href=\"/system\">System</a>");
+  }
+  page += F("</nav></div></div>");
   page += F("<main class=\"wrap\">");
   return page;
 }
@@ -814,38 +818,54 @@ String buildSystemConfigPage() {
 // ============================================================================
 // CONFIG PAGE HANDLERS
 // ============================================================================
+bool requireConfigMode() {
+  if (currentMode == AppMode::Config || configApStarted) {
+    return true;
+  }
+
+  configServer.sendHeader("Location", "/", true);
+  configServer.send(302, "text/plain", "");
+  return false;
+}
 void handleDeviceConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildDeviceConfigPage());
 }
 
 void handleMqttConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildMqttConfigPage());
 }
 
 void handleModbusConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildModbusConfigPage());
 }
 
 void handleProtectionConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildProtectionConfigPage());
 }
 
 void handleDisplayConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildDisplayConfigPage());
 }
 
 void handleHistoryConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildHistoryConfigPage());
 }
 
 void handleSystemConfigPage() {
   sendNoCacheHeader();
+  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildSystemConfigPage());
 }
 
@@ -1030,7 +1050,8 @@ void handleSetupRoot() {
 }
 
 void handleNetworkPage() {
-  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
   configServer.send(200, "text/html", buildNetworkPage());
 }
 

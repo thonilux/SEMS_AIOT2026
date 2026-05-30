@@ -95,6 +95,90 @@ void printModeInfo() {
   Serial.println(appModeToString(currentMode));
 }
 
+uint8_t clampPercent(int value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 100) {
+    return 100;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+uint8_t percentUsed(uint32_t used, uint32_t total) {
+  if (total == 0) {
+    return 0;
+  }
+  return clampPercent(static_cast<int>((used * 100UL) / total));
+}
+
+uint32_t getHeapTotalBytes() {
+  return ESP.getHeapSize();
+}
+
+uint32_t getHeapUsedBytes() {
+  const uint32_t total = getHeapTotalBytes();
+  const uint32_t free = ESP.getFreeHeap();
+  return total > free ? total - free : 0;
+}
+
+uint8_t getHeapUsedPercent() {
+  return percentUsed(getHeapUsedBytes(), getHeapTotalBytes());
+}
+
+uint32_t getSketchCapacityBytes() {
+  return ESP.getSketchSize() + ESP.getFreeSketchSpace();
+}
+
+uint8_t getSketchUsedPercent() {
+  return percentUsed(ESP.getSketchSize(), getSketchCapacityBytes());
+}
+
+int getWifiRssi() {
+  return WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127;
+}
+
+uint8_t getWifiQualityPercent() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return 0;
+  }
+
+  const int rssi = WiFi.RSSI();
+  if (rssi <= -100) {
+    return 0;
+  }
+  if (rssi >= -50) {
+    return 100;
+  }
+  return clampPercent(2 * (rssi + 100));
+}
+
+String formatUptime(uint32_t uptimeMs) {
+  uint32_t totalSeconds = uptimeMs / 1000;
+  const uint32_t days = totalSeconds / 86400;
+  totalSeconds %= 86400;
+  const uint32_t hours = totalSeconds / 3600;
+  totalSeconds %= 3600;
+  const uint32_t minutes = totalSeconds / 60;
+  const uint32_t seconds = totalSeconds % 60;
+
+  char buffer[32] = {};
+  if (days > 0) {
+    snprintf(buffer, sizeof(buffer), "%lud %02lu:%02lu:%02lu",
+             static_cast<unsigned long>(days),
+             static_cast<unsigned long>(hours),
+             static_cast<unsigned long>(minutes),
+             static_cast<unsigned long>(seconds));
+  } else {
+    snprintf(buffer, sizeof(buffer), "%02lu:%02lu:%02lu",
+             static_cast<unsigned long>(hours),
+             static_cast<unsigned long>(minutes),
+             static_cast<unsigned long>(seconds));
+  }
+
+  return String(buffer);
+}
+
 String formatDateTime(time_t epoch) {
   if (epoch <= 0) {
     return String("not_synced");
@@ -339,6 +423,7 @@ String buildPageHeader(const String& title) {
   page += F(".actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}button{background:#0f766e;color:white;border:0;border-radius:6px;padding:10px 13px;font-weight:700}");
   page += F("button:disabled{background:#94a3b8}.net{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #e5e7eb;padding:10px 0}");
   page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}.use{background:#334155;padding:7px 10px}");
+  page += F(".metric{margin:12px 0}.metricTop{display:flex;justify-content:space-between;gap:10px}.track{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}.fill{height:100%;background:#0f766e;border-radius:999px}.warn{background:#d97706}.bad{background:#dc2626}");
   page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}nav{margin-top:10px}}");
   page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
   page += htmlEscape(title);
@@ -353,8 +438,11 @@ String buildPageFooter() {
 
 String buildHomePage() {
   const String apSsid = getConfigApSsid();
+  const uint8_t heapPercent = getHeapUsedPercent();
+  const uint8_t sketchPercent = getSketchUsedPercent();
+  const uint8_t wifiPercent = getWifiQualityPercent();
   String page = buildPageHeader("Home");
-  page.reserve(5200);
+  page.reserve(6500);
   page += F("<section class=\"panel\"><h2>Status</h2><div class=\"grid\">");
   page += F("<div>Firmware</div><div>");
   page += FW_VERSION;
@@ -374,11 +462,52 @@ String buildHomePage() {
   page += htmlEscape(getRtcString());
   page += F("</div><div>Last NTP Sync</div><div>");
   page += timeSynced ? htmlEscape(formatDateTime(lastNtpSyncEpoch)) : F("-");
+  page += F("</div><div>Uptime</div><div>");
+  page += formatUptime(millis());
+  page += F("</div><div>CPU</div><div>");
+  page += String(ESP.getCpuFreqMHz());
+  page += F(" MHz</div><div>WiFi RSSI</div><div>");
+  if (WiFi.status() == WL_CONNECTED) {
+    page += String(getWifiRssi());
+    page += F(" dBm");
+  } else {
+    page += F("-");
+  }
   page += F("</div><div>MAC suffix</div><div>");
   page += getMacSuffix();
   page += F("</div><div>Free heap</div><div id=\"heap\">");
   page += String(ESP.getFreeHeap());
   page += F(" bytes</div></div></section>");
+  page += F("<section class=\"panel\"><h2>Resources</h2>");
+  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>RAM Used</strong><span>");
+  page += String(heapPercent);
+  page += F("% · ");
+  page += String(getHeapUsedBytes());
+  page += F(" / ");
+  page += String(getHeapTotalBytes());
+  page += F(" bytes</span></div><div class=\"track\"><div class=\"fill ");
+  page += heapPercent >= 85 ? F("bad") : heapPercent >= 70 ? F("warn") : F("");
+  page += F("\" style=\"width:");
+  page += String(heapPercent);
+  page += F("%\"></div></div></div>");
+  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>Firmware Slot Used</strong><span>");
+  page += String(sketchPercent);
+  page += F("% · ");
+  page += String(ESP.getSketchSize());
+  page += F(" / ");
+  page += String(getSketchCapacityBytes());
+  page += F(" bytes</span></div><div class=\"track\"><div class=\"fill ");
+  page += sketchPercent >= 85 ? F("bad") : sketchPercent >= 70 ? F("warn") : F("");
+  page += F("\" style=\"width:");
+  page += String(sketchPercent);
+  page += F("%\"></div></div></div>");
+  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>WiFi Signal</strong><span>");
+  page += WiFi.status() == WL_CONNECTED ? String(wifiPercent) + F("% · ") + String(getWifiRssi()) + F(" dBm") : String("not connected");
+  page += F("</span></div><div class=\"track\"><div class=\"fill ");
+  page += wifiPercent <= 30 ? F("bad") : wifiPercent <= 55 ? F("warn") : F("");
+  page += F("\" style=\"width:");
+  page += String(wifiPercent);
+  page += F("%\"></div></div></div></section>");
   page += F("<section class=\"panel\"><h2>Quick Actions</h2><div class=\"actions\"><a href=\"/network\"><button>Network Settings</button></a><button onclick=\"rebootDevice()\">Reboot</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
   page += F("<script>");
   page += F("async function rebootDevice(){document.getElementById('saveState').textContent='Rebooting...';await fetch('/api/reboot',{method:'POST'}).catch(()=>{});}");
@@ -453,6 +582,27 @@ void handleStatusApi() {
   body += getMacSuffix();
   body += F("\",\"free_heap\":");
   body += String(ESP.getFreeHeap());
+  body += F(",\"heap_total\":");
+  body += String(getHeapTotalBytes());
+  body += F(",\"heap_used\":");
+  body += String(getHeapUsedBytes());
+  body += F(",\"heap_used_percent\":");
+  body += String(getHeapUsedPercent());
+  body += F(",\"sketch_size\":");
+  body += String(ESP.getSketchSize());
+  body += F(",\"sketch_capacity\":");
+  body += String(getSketchCapacityBytes());
+  body += F(",\"sketch_used_percent\":");
+  body += String(getSketchUsedPercent());
+  body += F(",\"wifi_rssi\":");
+  body += String(getWifiRssi());
+  body += F(",\"wifi_quality_percent\":");
+  body += String(getWifiQualityPercent());
+  body += F(",\"uptime_ms\":");
+  body += String(millis());
+  body += F(",\"uptime_text\":\"");
+  body += formatUptime(millis());
+  body += F("\"");
   body += F("}");
 
   sendNoCacheHeader();

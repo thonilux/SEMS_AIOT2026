@@ -98,7 +98,17 @@ Current implemented `GET /api/status` response:
   "time_synced": true,
   "last_ntp_sync": "30/05/2026 14:09:55",
   "mac_suffix": "83D1B4",
-  "free_heap": 256120
+  "free_heap": 247336,
+  "heap_total": 307000,
+  "heap_used": 59664,
+  "heap_used_percent": 19,
+  "sketch_size": 821061,
+  "sketch_capacity": 1310720,
+  "sketch_used_percent": 62,
+  "wifi_rssi": -45,
+  "wifi_quality_percent": 100,
+  "uptime_ms": 16934,
+  "uptime_text": "00:00:16"
 }
 ```
 

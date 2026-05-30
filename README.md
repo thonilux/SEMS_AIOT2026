@@ -44,6 +44,7 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | WiFi client | On reboot, firmware reads NVS and connects as STA |
 | Normal Mode Web UI | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects |
 | RTC / NTP | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
+| Home dashboard | Shows status plus RAM, firmware slot, and WiFi signal progress bars |
 
 Current verified board identity:
 

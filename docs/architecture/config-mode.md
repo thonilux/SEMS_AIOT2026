@@ -61,7 +61,7 @@ Current firmware implementation:
 | `NORMAL_MODE` | Loads WiFi credentials from NVS, connects as STA, starts the lightweight Web UI on the STA IP if connected |
 | `CONFIG_MODE` | Entered by holding `GPIO32` to `GND` for 5 seconds, turns builtin LED ON, starts setup AP and Web UI |
 
-The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing.
+The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing. Home includes measured progress bars for RAM usage, firmware slot usage, and WiFi signal quality.
 
 Current RTC baseline:
 

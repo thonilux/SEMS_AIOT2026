@@ -114,6 +114,24 @@ Normal Mode
   -> STA connects to configured WiFi
 ```
 
+Current implemented behavior:
+
+```text
+Normal Mode
+  -> loads WiFi credentials from NVS
+  -> connects to saved WiFi as STA when credentials exist
+  -> starts lightweight Web UI at http://<STA_IP>/ after STA connects
+
+Runtime config entry
+  -> hold GPIO32 to GND for 5 seconds
+  -> builtin LED GPIO2 turns ON
+  -> AP starts as PM1611-SETUP-{last6mac}
+  -> setup Web UI is available at http://192.168.4.1/
+  -> user can scan nearby WiFi
+  -> user can save SSID/password to NVS
+  -> user can reboot from Web UI
+```
+
 Recommended AP defaults:
 
 ```text
@@ -455,18 +473,19 @@ fallback uptime mode
 
 Recommended order:
 
-1. Config mode AP.
-2. Web UI login shell.
-3. WiFi setup and reboot flow.
-4. Status page with device info.
-5. Configurable Modbus engine.
-6. Meter data page.
-7. MQTT config and publish.
-8. Relay/protection.
-9. Energy history.
-10. LCD pages.
-11. Admin user management.
-12. OTA update.
+1. Config mode AP. Done.
+2. Minimal Web UI and WiFi scan. Done.
+3. WiFi setup, NVS persistence, reboot flow, and STA Web UI. Done.
+4. Login shell and admin/user protection. Next security hardening item.
+5. Status page with richer device info.
+6. Configurable Modbus engine.
+7. Meter data page.
+8. MQTT config and publish.
+9. Relay/protection.
+10. Energy history.
+11. LCD pages.
+12. Admin user management.
+13. OTA update.
 
 ## ⚠️ Important Differences From Original PM1611
 
@@ -479,4 +498,3 @@ Recommended order:
 | Fixed LCD hardware | ST7567 LCD abstraction |
 
 The firmware should clearly show when Modbus data is missing, stale, or invalid.
-

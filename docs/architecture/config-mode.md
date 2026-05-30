@@ -54,6 +54,15 @@ CONFIG_MODE
 NORMAL_MODE
 ```
 
+Current firmware implementation:
+
+| Mode | Current behavior |
+| --- | --- |
+| `NORMAL_MODE` | Loads WiFi credentials from NVS, connects as STA, starts the lightweight Web UI on the STA IP if connected |
+| `CONFIG_MODE` | Entered by holding `GPIO32` to `GND` for 5 seconds, turns builtin LED ON, starts setup AP and Web UI |
+
+The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP.
+
 ## 🔘 Config Button Behavior
 
 Recommended button:
@@ -106,14 +115,11 @@ BOOT
 Mode decision:
 
 ```text
-if force_config_flag:
+load WiFi credentials from NVS
+try STA connection if credentials exist
+start NORMAL_MODE
+if GPIO32 is held for 5 seconds at runtime:
     CONFIG_MODE
-else if wifi_config_missing:
-    CONFIG_MODE
-else if config_invalid:
-    CONFIG_MODE
-else:
-    NORMAL_MODE
 ```
 
 Normal mode WiFi failure fallback:
@@ -252,6 +258,7 @@ User flow:
 14. User clicks Reboot.
 15. Device reboots.
 16. Device disables AP and connects as WiFi STA.
+17. If STA connects, the same Web UI is available at http://<STA_IP>/.
 ```
 
 Optional later:
@@ -312,6 +319,13 @@ LittleFS:
 ```
 
 Initial MVP can store everything in NVS or a static struct while building the mode logic.
+
+Current MVP NVS keys:
+
+| Namespace | Key | Value |
+| --- | --- | --- |
+| `network` | `wifi_ssid` | Saved WiFi SSID |
+| `network` | `wifi_pass` | Saved WiFi password |
 
 Final design:
 
@@ -403,6 +417,16 @@ Modbus OFF or diagnostic only
 Relay unchanged/off
 ```
 
+In current Normal Mode:
+
+| Service | Behavior |
+| --- | --- |
+| WiFi STA | ON if credentials are saved |
+| Web UI | ON after STA connects |
+| WiFi AP | OFF unless user enters Config Mode |
+| MQTT | OFF, not implemented yet |
+| Modbus polling | OFF, not implemented yet |
+
 ## 🧲 Relay Safety In Config Mode
 
 Config Mode should not unexpectedly turn loads ON.
@@ -479,7 +503,7 @@ Builtin LED ON in CONFIG_MODE
 No hold -> stay NORMAL_MODE
 ```
 
-No WiFi yet.
+Status: implemented.
 
 ### Milestone 2: AP Mode
 
@@ -489,7 +513,7 @@ If CONFIG_MODE:
   print AP IP
 ```
 
-No Web UI yet.
+Status: implemented.
 
 ### Milestone 3: Minimal Web Server
 
@@ -498,13 +522,19 @@ serve setup page
 show UID/MAC/FW/version/mode
 ```
 
+Status: implemented as a lightweight root page at `/`.
+
 ### Milestone 4: WiFi Save Mock
 
 ```text
 form: ssid/password
-save to temporary config
-print saved config
+scan WiFi
+select SSID
+enter password
+save through HTTP API
 ```
+
+Status: implemented.
 
 ### Milestone 5: NVS Persistence
 
@@ -513,6 +543,8 @@ save WiFi config to NVS
 load on boot
 normal/config mode decision based on config
 ```
+
+Status: implemented for `wifi_ssid` and `wifi_pass`.
 
 ### Milestone 6: Save And Reboot
 
@@ -523,6 +555,18 @@ click reboot
 ESP.restart()
 connect to WiFi STA
 ```
+
+Status: implemented. The setup UI sends `/api/reboot`, firmware calls `ESP.restart()`, then connects to saved WiFi on boot.
+
+### Milestone 7: Normal Mode Web UI
+
+```text
+if WiFi STA is connected:
+  start the same lightweight Web UI
+  print http://<STA_IP>/
+```
+
+Status: implemented.
 
 ## ✅ Recommended Constants
 
@@ -540,13 +584,13 @@ WIFI_CONNECT_RETRY_MS = 3000
 
 ## 🎯 Next Implementation Step
 
-Implement Milestone 1 only:
+Implement the WiFi verification and recovery layer:
 
 ```text
-PinMap.h
-Config button read
-Runtime mode decision
-Serial output
+show saved SSID and STA IP clearly
+add explicit test/connect endpoint if needed
+add fallback AP behavior after repeated STA failure
+add clear/reconfigure WiFi endpoint
 ```
 
-This keeps the next firmware change small, testable, and reversible.
+After that, move to RS485 Modbus proof.

@@ -27,6 +27,49 @@ The device should provide:
 
 The final firmware must not depend on ESPHome. PlatformIO is used because this project needs full control over tasks, Modbus polling, relay safety, web authentication, OTA, MQTT compatibility, and long-term firmware structure.
 
+## Current Firmware Status
+
+Working firmware checkpoints already implemented and tested on the ESP32-WROOM board:
+
+| Area | Status |
+| --- | --- |
+| PlatformIO baseline | Builds and uploads on `esp32dev` |
+| Serial diagnostics | Boot banner, chip info, heartbeat, free heap, WiFi state |
+| Config button | Hold `GPIO32` to `GND` for 5 seconds to enter `CONFIG_MODE` |
+| Builtin LED | `GPIO2` turns ON in `CONFIG_MODE` |
+| Config AP | Broadcasts `PM1611-SETUP-{last6mac}` with password `PM123456` |
+| Setup Web UI | Available at `http://192.168.4.1/` in Config Mode |
+| WiFi scan | Web UI can scan nearby WiFi networks |
+| WiFi save | Web UI saves SSID/password to NVS using `Preferences` |
+| WiFi client | On reboot, firmware reads NVS and connects as STA |
+| Normal Mode Web UI | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects |
+
+Current verified board identity:
+
+```text
+Chip: ESP32-D0WD-V3
+MAC:  38:18:2b:83:d1:b4
+AP:   PM1611-SETUP-83D1B4
+```
+
+Current HTTP endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Lightweight setup/status UI |
+| `GET` | `/api/status` | Firmware, mode, AP, STA, heap status |
+| `GET` | `/api/wifi/scan` | Scan nearby WiFi networks |
+| `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS |
+| `POST` | `/api/reboot` | Reboot after config save |
+
+Current limitations:
+
+- No login/session protection yet.
+- No static IP configuration yet.
+- No explicit WiFi test-before-save endpoint yet.
+- No RS485/Modbus polling yet.
+- No MQTT, relay protection, LCD, OTA, or production auth yet.
+
 ## 🧰 Target Platform
 
 ```text
@@ -934,12 +977,12 @@ Exit criteria:
 
 ## 👉 Immediate Next Step
 
-The next practical step is to confirm the hardware and PlatformIO baseline:
+The next practical firmware step is to start the RS485 Modbus proof while keeping the network/config foundation stable:
 
-1. Confirm the ESP32 board model.
-2. Confirm relay GPIO and active level.
-3. Confirm RS485 transceiver wiring.
-4. Confirm the external Modbus meter model/register map.
-5. Confirm LCD type, if already selected.
+1. Confirm RS485 A/B wiring and transceiver direction behavior.
+2. Initialize UART2 with RX `GPIO16`, TX `GPIO17`, baud `19200`.
+3. Add one Modbus RTU read request with timeout/retry logging.
+4. Read one known register from the external meter.
+5. Document the meter model and first working register map.
 
-After that, create the PlatformIO baseline and implement Step 0 and Step 1.
+Before production use, also add login/session protection around the Web UI config routes.

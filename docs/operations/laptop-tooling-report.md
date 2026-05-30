@@ -371,7 +371,7 @@ The ESP32-WROOM board is now detected on `COM3`, so USB serial readiness is good
 
 The previous cache and obsolete-core issues are no longer blocking this firmware project. The project uses `firmware/pio-core`, while generated folders are ignored by Git.
 
-Firmware baseline update:
+Current firmware update:
 
 ```text
 Build:        success
@@ -384,22 +384,25 @@ Flash:        4 MB
 CPU:          240 MHz
 ```
 
-Baseline memory usage:
+Current firmware memory usage:
 
 ```text
-RAM:   6.6%  (21472 bytes used from 327680 bytes)
-Flash: 20.5% (269021 bytes used from 1310720 bytes)
+RAM:   13.8% (45208 bytes used from 327680 bytes)
+Flash: 60.4% (about 792 KB used from 1310720 bytes)
 ```
 
-Verified serial output:
+Implemented and verified firmware behavior:
 
 ```text
-PM1611_RS485_READER
-Firmware: 0.1.0-dev
-Target: ESP32-WROOM / esp32dev
-Project: PM1611 RS485 Reader
-Status: boot baseline online
-heartbeat=1 uptime_ms=1000 free_heap=350968
+GPIO32 runtime hold enters CONFIG_MODE
+GPIO2 builtin LED turns ON in CONFIG_MODE
+Config AP starts as PM1611-SETUP-83D1B4
+Setup UI is available at http://192.168.4.1/
+Setup UI scans nearby WiFi networks
+Setup UI saves WiFi credentials to NVS
+Firmware reconnects as WiFi STA after reboot
+Normal Mode Web UI starts at the STA IP
+Verified STA UI example: http://10.161.93.131/
 ```
 
 Minimum required for Step 1:
@@ -414,6 +417,6 @@ USB serial: ready, COM3 CH340
 
 ## 👉 Recommended Next Actions
 
-1. Add `docs/hardware/pin-map.md`.
-2. Define RS485 pins, relay pin, LCD SPI pins, and LED pins.
+1. Add WiFi recovery controls: clear saved WiFi and explicit test/connect endpoint.
+2. Add login/session protection before relying on Web UI in shared networks.
 3. Start the RS485 UART proof milestone.

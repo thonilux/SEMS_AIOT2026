@@ -87,15 +87,15 @@ Output:
 ```text
 Phase 0: Repository and hardware decisions       [mostly done]
 Phase 1: PlatformIO firmware baseline           [done]
-Phase 2: Serial diagnostics and config foundation [in progress]
+Phase 2: Serial diagnostics and config foundation [done for network MVP]
 Phase 3: RS485 Modbus proof                     [not started]
 Phase 4: Meter data model                       [not started]
 Phase 5: Relay and protection                   [not started]
-Phase 6: WiFi and setup mode                    [designed, not implemented]
+Phase 6: WiFi and setup mode                    [MVP implemented]
 Phase 7: MQTT compatibility                     [designed, not implemented]
 Phase 8: Time and energy history                [not started]
 Phase 9: LCD and LEDs                           [hardware analyzed, not implemented]
-Phase 10: Web UI                                [API drafted, not implemented]
+Phase 10: Web UI                                [setup MVP implemented]
 Phase 11: OTA and administration                [not started]
 Phase 12: Hardening and release                 [not started]
 ```

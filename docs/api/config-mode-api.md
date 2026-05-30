@@ -1,8 +1,8 @@
 # 📨 Config Mode API Draft
 
-This document defines the future HTTP API used by the Config Mode Web UI.
+This document defines the HTTP API used by the current Config Mode Web UI and the longer-term target API shape.
 
-Initial firmware can start with static HTML and simple endpoints. This API is the target shape for a maintainable implementation.
+The firmware currently uses a small Arduino `WebServer` implementation with lightweight endpoints. A larger structured API can replace or extend these routes later.
 
 ## 🎯 API Goals
 
@@ -40,6 +40,25 @@ first boot password change
 
 ## 📍 Endpoint Overview
 
+Current implemented endpoints:
+
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| `GET` | `/` | Lightweight setup/status page | none yet |
+| `GET` | `/api/status` | Firmware, mode, AP, STA, heap status | none yet |
+| `GET` | `/api/wifi/scan` | Scan nearby WiFi networks | none yet |
+| `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS | none yet |
+| `POST` | `/api/reboot` | Reboot after config save | none yet |
+
+Current status:
+
+- Routes are available in Config Mode through `http://192.168.4.1/`.
+- The same routes are available in Normal Mode through `http://<STA_IP>/` after WiFi connects.
+- Authentication is not implemented yet.
+- Static IP configuration is not implemented yet.
+
+Future target endpoint overview:
+
 | Method | Path | Purpose | Role |
 | --- | --- | --- | --- |
 | `GET` | `/api/setup/status` | Read setup/system status | user |
@@ -62,6 +81,24 @@ docs/api/modbus-config-api.md
 ```
 
 ## 📊 Setup Status Response
+
+Current implemented `GET /api/status` response:
+
+```json
+{
+  "firmware": "0.1.0-dev",
+  "mode": "NORMAL_MODE",
+  "ap_ssid": "PM1611-SETUP-83D1B4",
+  "ap_ip": "192.168.4.1",
+  "saved_wifi_ssid": "OfficeWiFi",
+  "sta_status": "connected",
+  "sta_ip": "192.168.43.120",
+  "mac_suffix": "83D1B4",
+  "free_heap": 256120
+}
+```
+
+Future expanded response:
 
 ```json
 {
@@ -106,6 +143,30 @@ docs/api/modbus-config-api.md
 
 ## 📡 WiFi Scan Response
 
+Current implemented `GET /api/wifi/scan` response:
+
+```json
+{
+  "count": 2,
+  "networks": [
+    {
+      "ssid": "OfficeWiFi",
+      "rssi": -54,
+      "channel": 6,
+      "encryption": "secured"
+    },
+    {
+      "ssid": "Guest",
+      "rssi": -72,
+      "channel": 11,
+      "encryption": "open"
+    }
+  ]
+}
+```
+
+Future expanded response:
+
 ```json
 {
   "networks": [
@@ -134,6 +195,34 @@ scan cooldown: 10 seconds
 ```
 
 ## 🛜 Save WiFi Config Request
+
+Current implemented `POST /api/wifi/save` request:
+
+```text
+Content-Type: application/x-www-form-urlencoded
+
+ssid=OfficeWiFi&password=secret-password
+```
+
+Current implemented response:
+
+```json
+{
+  "ok": true,
+  "ssid": "OfficeWiFi",
+  "reboot_required": true
+}
+```
+
+Storage:
+
+```text
+NVS namespace: network
+wifi_ssid: saved SSID
+wifi_pass: saved password
+```
+
+Future JSON request:
 
 ```json
 {
@@ -237,6 +326,25 @@ Passwords must not be returned.
 
 ## 🔄 Reboot Request
 
+Current implemented `POST /api/reboot` response:
+
+```json
+{
+  "ok": true,
+  "rebooting": true
+}
+```
+
+Current firmware behavior:
+
+```text
+send response
+delay about 800 ms
+ESP.restart()
+```
+
+Future request:
+
 ```json
 {
   "reason": "config_saved"
@@ -290,7 +398,15 @@ internal_error
 
 ## 🧠 MVP API Order
 
-Implement in this order:
+Implemented MVP order:
+
+1. `GET /`
+2. `GET /api/status`
+3. `GET /api/wifi/scan`
+4. `POST /api/wifi/save`
+5. `POST /api/reboot`
+
+Future implementation order:
 
 1. `GET /api/setup/status`
 2. `GET /api/setup/scan-wifi`
@@ -303,14 +419,23 @@ Do not implement every endpoint at once.
 
 ## ✅ First Implementation Target
 
-Before HTTP API, implement serial-only mode decision:
+Completed first implementation target:
 
 ```text
 CONFIG_BUTTON_PIN GPIO32
-Hold at boot -> CONFIG_MODE
-No hold -> NORMAL_MODE
-Serial print selected mode
+Runtime 5 second hold -> CONFIG_MODE
+Config AP starts
+Web UI starts on AP IP
+WiFi credentials save to NVS
+STA connects on reboot
+Web UI starts on STA IP
 ```
 
-Then add AP and `GET /api/setup/status`.
+Next API targets:
 
+```text
+WiFi test/connect endpoint
+clear WiFi credentials endpoint
+auth/session protection
+static IP settings
+```

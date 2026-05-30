@@ -81,6 +81,7 @@ Implement RS485 Modbus proof.
 
 Input:
 - External Modbus meter on RS485
+- Start from Schneider EM6400 / PM2xxx bootstrap profile
 
 Output:
 - Read one known register from the meter

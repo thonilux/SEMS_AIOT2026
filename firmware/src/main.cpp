@@ -35,9 +35,18 @@ uint32_t rebootAtMs = 0;
 String savedWifiSsid;
 String savedWifiPassword;
 bool hasSavedWifi = false;
+bool wifiConnecting = false;
+uint32_t wifiConnectStartedMs = 0;
+bool wifiConnected = false;
+bool ntpSyncStarted = false;
+bool fallbackApActive = false;
 bool timeSynced = false;
 time_t lastNtpSyncEpoch = 0;
 WebServer configServer(80);
+
+void startConfigWebServer();
+void enterConfigMode();
+void startConfigAccessPoint(bool disconnectSta = true);
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
@@ -47,6 +56,23 @@ bool isConfigButtonPressed() {
 void setBuiltinLed(bool on) {
   const bool outputHigh = PinMap::kBuiltinLedActiveHigh ? on : !on;
   digitalWrite(PinMap::kBuiltinLed, outputHigh ? HIGH : LOW);
+}
+
+
+void updateStatusLed(uint32_t nowMs) {
+
+  if (currentMode == AppMode::Config) {
+    setBuiltinLed(true);
+    return;
+  }
+
+  if (fallbackApActive || wifiConnecting) {
+    const bool blink = ((nowMs / 500) % 2) == 0;
+    setBuiltinLed(blink);
+    return;
+  }
+
+  setBuiltinLed(false);
 }
 
 void printBootBanner() {
@@ -220,37 +246,35 @@ String getRtcString() {
   return formatDateTime(time(nullptr));
 }
 
-void syncTimeFromNtp() {
+void startNtpSync() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("NTP skipped: WiFi is not connected");
     return;
   }
 
-  Serial.print("NTP sync: ");
+  Serial.print("NTP sync started: ");
   Serial.print(kNtpServer1);
   Serial.print(", ");
   Serial.println(kNtpServer2);
 
   configTzTime(kNtpTimezone, kNtpServer1, kNtpServer2);
+  ntpSyncStarted = true;
+}
 
-  struct tm timeInfo {};
-  const uint32_t startMs = millis();
-  while (!getLocalTime(&timeInfo, 250) && millis() - startMs < kNtpSyncTimeoutMs) {
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (!getLocalTime(&timeInfo, 1)) {
-    timeSynced = false;
-    Serial.println("NTP sync failed");
+void checkNtpSync() {
+  if (!ntpSyncStarted || timeSynced) {
     return;
   }
 
-  lastNtpSyncEpoch = time(nullptr);
-  timeSynced = true;
-
-  Serial.print("RTC synced: ");
-  Serial.println(getRtcString());
+  struct tm timeInfo {};
+  if (getLocalTime(&timeInfo, 0)) {
+    if (timeInfo.tm_year > 120) {
+      lastNtpSyncEpoch = time(nullptr);
+      timeSynced = true;
+      Serial.print("RTC synced: ");
+      Serial.println(getRtcString());
+    }
+  }
 }
 
 const char* wifiStatusToString(wl_status_t status) {
@@ -390,24 +414,49 @@ void connectToSavedWifi() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(savedWifiSsid.c_str(), savedWifiPassword.c_str());
+}
 
-  const uint32_t startMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
-    delay(500);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi STA connected");
-    Serial.print("STA IP: ");
-    Serial.println(WiFi.localIP());
+void handleWiFiLifecycle(uint32_t nowMs) {
+  if (currentMode == AppMode::Config) {
     return;
   }
 
-  Serial.print("WiFi STA failed: ");
-  Serial.println(wifiStatusToString(WiFi.status()));
-  WiFi.disconnect(false, false);
+  if (wifiConnecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiConnecting = false;
+      wifiConnected = true;
+      Serial.println("WiFi STA connected");
+      Serial.print("STA IP: ");
+      Serial.println(WiFi.localIP());
+      startConfigWebServer();
+      startNtpSync();
+      if (fallbackApActive) {
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_STA);
+        fallbackApActive = false;
+        configApStarted = false;
+        setBuiltinLed(false);
+        Serial.println("STA connected, shutting down fallback AP.");
+      }
+    } else if (nowMs - wifiConnectStartedMs >= kWifiConnectTimeoutMs && !fallbackApActive) {
+      Serial.print("WiFi STA connection timeout after ");
+      Serial.print(kWifiConnectTimeoutMs);
+      Serial.println(" ms. Starting fallback AP.");
+      startConfigAccessPoint(false);
+      fallbackApActive = true;
+      // setBuiltinLed(true);
+    }
+  } else if (wifiConnected) {
+    if (WiFi.status() != WL_CONNECTED) {
+      wifiConnected = false;
+      Serial.println("WiFi STA disconnected! Attempting auto-reconnect...");
+      wifiConnecting = true;
+      wifiConnectStartedMs = nowMs;
+      connectToSavedWifi();
+    } else {
+      checkNtpSync();
+    }
+  }
 }
 
 void printWebUiAddresses() {
@@ -1257,7 +1306,7 @@ void startConfigWebServer() {
   printWebUiAddresses();
 }
 
-void startConfigAccessPoint() {
+void startConfigAccessPoint(bool disconnectSta) {
   if (configApStarted) {
     startConfigWebServer();
     return;
@@ -1268,8 +1317,10 @@ void startConfigAccessPoint() {
   const IPAddress gateway(192, 168, 4, 1);
   const IPAddress subnet(255, 255, 255, 0);
 
-  WiFi.disconnect(true, true);
-  delay(100);
+  if (disconnectSta) {
+      WiFi.disconnect(false, false);
+      delay(100);
+  }
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(apIp, gateway, subnet);
 
@@ -1305,7 +1356,7 @@ void enterConfigMode() {
 
 void handleConfigButton(uint32_t nowMs) {
   if (currentMode == AppMode::Config) {
-    setBuiltinLed(true);
+    // setBuiltinLed(true);
     startConfigAccessPoint();
     return;
   }
@@ -1313,7 +1364,7 @@ void handleConfigButton(uint32_t nowMs) {
   if (!isConfigButtonPressed()) {
     configButtonPressedSinceMs = 0;
     lastConfigButtonProgressSecond = 0;
-    setBuiltinLed(false);
+    // setBuiltinLed(false);
     return;
   }
 
@@ -1344,25 +1395,27 @@ void setup() {
 
   pinMode(PinMap::kConfigButton, INPUT_PULLUP);
   pinMode(PinMap::kBuiltinLed, OUTPUT);
-  setBuiltinLed(false);
+  // setBuiltinLed(false);
 
   printBootBanner();
   printChipInfo();
   printButtonInfo();
   loadWifiConfig();
-  connectToSavedWifi();
-  if (WiFi.status() == WL_CONNECTED) {
-    syncTimeFromNtp();
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    startConfigWebServer();
+  if (hasSavedWifi) {
+    wifiConnecting = true;
+    wifiConnectStartedMs = millis();
+    connectToSavedWifi();
+  } else {
+    Serial.println("No saved WiFi configuration. Entering CONFIG_MODE.");
+    enterConfigMode();
   }
   printModeInfo();
 }
 
 void loop() {
   const uint32_t nowMs = millis();
-
+  updateStatusLed(nowMs);
+  handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
   if (configWebStarted) {
     configServer.handleClient();

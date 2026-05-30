@@ -66,6 +66,7 @@ Current status:
 | WiFi AP Config Mode | Done | Runtime `CONFIG_MODE` starts AP `PM1611-SETUP-{last6mac}` |
 | Web UI setup portal | Done | Minimal setup page and nearby WiFi scan API are available on `192.168.4.1` |
 | WiFi NVS persistence | Done | Setup UI saves SSID/password to NVS and boot attempts STA connection |
+| Normal Mode Web UI | Done | Same lightweight UI starts on the STA IP after WiFi connects |
 | RS485 Modbus proof | Not started | Use configurable static map first |
 
 Current next milestone:

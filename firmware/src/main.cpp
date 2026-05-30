@@ -245,6 +245,20 @@ void connectToSavedWifi() {
   WiFi.disconnect(false, false);
 }
 
+void printWebUiAddresses() {
+  if (configApStarted) {
+    Serial.print("Open AP Web UI: http://");
+    Serial.print(WiFi.softAPIP());
+    Serial.println("/");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Open STA Web UI: http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("/");
+  }
+}
+
 String buildSetupPage() {
   const String apSsid = getConfigApSsid();
   String page;
@@ -434,8 +448,8 @@ void startConfigWebServer() {
   configServer.begin();
 
   configWebStarted = true;
-  Serial.println("Config Web UI started");
-  Serial.println("Open: http://192.168.4.1/");
+  Serial.println("Web UI started");
+  printWebUiAddresses();
 }
 
 void startConfigAccessPoint() {
@@ -532,6 +546,9 @@ void setup() {
   printButtonInfo();
   loadWifiConfig();
   connectToSavedWifi();
+  if (WiFi.status() == WL_CONNECTED) {
+    startConfigWebServer();
+  }
   printModeInfo();
 }
 

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <time.h>
@@ -44,9 +45,12 @@ bool timeSynced = false;
 time_t lastNtpSyncEpoch = 0;
 WebServer configServer(80);
 
+bool littleFsReady = false;
+
 void startConfigWebServer();
 void enterConfigMode();
 void startConfigAccessPoint(bool disconnectSta = true);
+void sendNoCacheHeader();
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
@@ -56,6 +60,29 @@ bool isConfigButtonPressed() {
 void setBuiltinLed(bool on) {
   const bool outputHigh = PinMap::kBuiltinLedActiveHigh ? on : !on;
   digitalWrite(PinMap::kBuiltinLed, outputHigh ? HIGH : LOW);
+}
+
+bool initLittleFs() {
+  littleFsReady = LittleFS.begin(true);
+  Serial.print("LittleFS: ");
+  Serial.println(littleFsReady ? "mounted" : "mount_failed");
+  return littleFsReady;
+}
+
+bool serveLittleFsPage(const char* path, const char* contentType) {
+  if (!littleFsReady || !LittleFS.exists(path)) {
+    return false;
+  }
+
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    return false;
+  }
+
+  sendNoCacheHeader();
+  configServer.streamFile(file, contentType);
+  file.close();
+  return true;
 }
 
 
@@ -1117,6 +1144,10 @@ void handleSystemConfigSaveApi() {
 }
 
 void handleSetupRoot() {
+  if (serveLittleFsPage("/index.html", "text/html")) {
+    return;
+  }
+
   sendNoCacheHeader();
   configServer.send(200, "text/html", buildHomePage());
 }
@@ -1124,7 +1155,24 @@ void handleSetupRoot() {
 void handleNetworkPage() {
   if (!requireConfigMode()) return;
 
+  if (serveLittleFsPage("/network.html", "text/html")) {
+    return;
+  }
+
+  sendNoCacheHeader();
   configServer.send(200, "text/html", buildNetworkPage());
+}
+
+void handleAppCss() {
+  if (!serveLittleFsPage("/app.css", "text/css")) {
+    configServer.send(404, "text/plain", "missing");
+  }
+}
+
+void handleAppJs() {
+  if (!serveLittleFsPage("/app.js", "application/javascript")) {
+    configServer.send(404, "text/plain", "missing");
+  }
 }
 
 void handleStatusApi() {
@@ -1154,6 +1202,10 @@ void handleStatusApi() {
   body += getMacSuffix();
   body += F("\",\"free_heap\":");
   body += String(ESP.getFreeHeap());
+  body += F(",\"cpu_mhz\":");
+  body += String(ESP.getCpuFreqMHz());
+  body += F(",\"flash_mb\":");
+  body += String(ESP.getFlashChipSize() / (1024 * 1024));
   body += F(",\"heap_total\":");
   body += String(getHeapTotalBytes());
   body += F(",\"heap_total_human\":\"");
@@ -1280,6 +1332,8 @@ void startConfigWebServer() {
 
   configServer.on("/", HTTP_GET, handleSetupRoot);
   configServer.on("/network", HTTP_GET, handleNetworkPage);
+  configServer.on("/app.css", HTTP_GET, handleAppCss);
+  configServer.on("/app.js", HTTP_GET, handleAppJs);
   configServer.on("/device", HTTP_GET, handleDeviceConfigPage);
   configServer.on("/mqtt", HTTP_GET, handleMqttConfigPage);
   configServer.on("/modbus", HTTP_GET, handleModbusConfigPage);
@@ -1400,6 +1454,7 @@ void setup() {
   printBootBanner();
   printChipInfo();
   printButtonInfo();
+  initLittleFs();
   loadWifiConfig();
   if (hasSavedWifi) {
     wifiConnecting = true;

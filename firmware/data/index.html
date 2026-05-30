@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Home</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body data-page="home">
+  <header class="bar">
+    <div class="top">
+      <div class="brand">
+        <h1>Home</h1>
+        <div class="muted">PM1611 RS485 Reader</div>
+      </div>
+      <button id="menuBtn" class="menuBtn" type="button">Menu</button>
+    </div>
+    <nav id="mainNav" class="nav">
+      <a href="/">Home</a>
+      <a href="/network">Network</a>
+      <a href="/device">Device</a>
+      <a href="/mqtt">MQTT</a>
+      <a href="/modbus">Modbus</a>
+      <a href="/protection">Protection</a>
+      <a href="/display">Display</a>
+      <a href="/history">History</a>
+      <a href="/system">System</a>
+      <a href="#" onclick="rebootDevice();return false;">Reboot</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <section class="panel">
+      <h2>Status</h2>
+      <div class="grid">
+        <div>Firmware</div><div id="firmware_value">-</div>
+        <div>Mode</div><div id="mode_value">-</div>
+        <div>AP SSID</div><div id="ap_ssid_value">-</div>
+        <div>AP IP</div><div id="ap_ip_value">-</div>
+        <div>Saved WiFi</div><div id="saved_wifi_value">-</div>
+        <div>STA status</div><div id="sta_status_value">-</div>
+        <div>STA IP</div><div id="sta_ip_value">-</div>
+        <div>RTC</div><div id="rtc_value">-</div>
+        <div>Last NTP Sync</div><div id="last_ntp_value">-</div>
+        <div>Uptime</div><div id="uptime_value">-</div>
+        <div>CPU</div><div id="cpu_value">-</div>
+        <div>WiFi RSSI</div><div id="wifi_rssi_value">-</div>
+        <div>MAC suffix</div><div id="mac_suffix_value">-</div>
+        <div>Free heap</div><div id="heap_value">-</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Resources</h2>
+      <div class="metric">
+        <div class="metricTop">
+          <strong>RAM Used</strong>
+          <span id="heap_pct">-</span>
+        </div>
+        <div class="track"><div id="heap_fill" class="fill"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metricTop">
+          <strong>Firmware Slot Used</strong>
+          <span id="sketch_pct">-</span>
+        </div>
+        <div class="track"><div id="sketch_fill" class="fill"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metricTop">
+          <strong>WiFi Signal</strong>
+          <span id="wifi_pct">-</span>
+        </div>
+        <div class="track"><div id="wifi_fill" class="fill"></div></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -442,20 +442,43 @@ String buildPageHeader(const String& title) {
   page += F("button:disabled{background:#94a3b8}.net{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #e5e7eb;padding:10px 0}");
   page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}.use{background:#334155;padding:7px 10px}");
   page += F(".metric{margin:12px 0}.metricTop{display:flex;justify-content:space-between;gap:10px}.track{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}.fill{height:100%;background:#0f766e;border-radius:999px}.warn{background:#d97706}.bad{background:#dc2626}");
-  page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}nav{margin-top:10px}}");
+  page += F(".menuBtn{display:none;background:#1f2937;color:white;border:1px solid #374151;border-radius:6px;padding:8px 10px;font-size:18px}");
+  page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}.menuBtn{display:block;margin-top:10px}nav{display:none;flex-direction:column;margin-top:10px}nav.open{display:flex}}");
   page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
   page += htmlEscape(title);
-  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div><nav><a href=\"/\">Home</a>");
+  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div>");
+  page += F("<button class=\"menuBtn\" onclick=\"toggleMenu()\">☰</button>");
+  page += F("<nav id=\"mainNav\"><a href=\"/\">🏠 Home</a>");
+
   if (currentMode == AppMode::Config || configApStarted) {
-    page += F("<a href=\"/network\">Network</a><a href=\"/device\">Device</a><a href=\"/mqtt\">MQTT</a><a href=\"/modbus\">Modbus</a><a href=\"/protection\">Protection</a><a href=\"/display\">Display</a><a href=\"/history\">History</a><a href=\"/system\">System</a>");
+      page += F("<a href=\"/network\">📶 Network</a>");
+      page += F("<a href=\"/device\">⚙ Device</a>");
+      page += F("<a href=\"/mqtt\">📡 MQTT</a>");
+      page += F("<a href=\"/modbus\">🔌 Modbus</a>");
+      page += F("<a href=\"/protection\">🛡 Protection</a>");
+      page += F("<a href=\"/display\">🖥 Display</a>");
+      page += F("<a href=\"/history\">📊 History</a>");
+      page += F("<a href=\"/system\">🔧 System</a>");
   }
+
+  page += F("<a href=\"#\" onclick=\"rebootDevice();return false;\">🔄 Reboot</a>");
   page += F("</nav></div></div>");
   page += F("<main class=\"wrap\">");
   return page;
 }
 
 String buildPageFooter() {
-  return String(F("</main></body></html>"));
+  // return String(F("<script>function toggleMenu(){document.getElementById('mainNav').classList.toggle('open')}</script></main></body></html>"));
+  return String(F(
+    "<script>"
+    "function toggleMenu(){document.getElementById('mainNav').classList.toggle('open')}"
+    "async function rebootDevice(){"
+    "if(!confirm('Reboot device?')) return;"
+    "await fetch('/api/reboot',{method:'POST'}).catch(()=>{});"
+    "}"
+    "</script>"
+    "</main></body></html>"
+    ));
 }
 
 String buildHomePage() {

@@ -43,7 +43,13 @@ bool ntpSyncStarted = false;
 bool fallbackApActive = false;
 bool timeSynced = false;
 time_t lastNtpSyncEpoch = 0;
+DeviceConfig currentDeviceConfig;
+MqttConfig currentMqttConfig;
 ModbusConfig currentModbusConfig;
+ProtectionConfig currentProtectionConfig;
+DisplayConfig currentDisplayConfig;
+HistoryConfig currentHistoryConfig;
+SystemConfig currentSystemConfig;
 bool currentModbusConfigLoaded = false;
 bool modbusPortReady = false;
 uint32_t lastModbusPollMs = 0;
@@ -530,13 +536,24 @@ void startNtpSync() {
     return;
   }
 
-  Serial.print("NTP sync started: ");
-  Serial.print(kNtpServer1);
-  Serial.print(", ");
-  Serial.println(kNtpServer2);
+  const char* timezone = currentDeviceConfig.timezone[0] != '\0' ? currentDeviceConfig.timezone : kNtpTimezone;
+  const char* server1 = currentSystemConfig.ntp_server1[0] != '\0' ? currentSystemConfig.ntp_server1 : kNtpServer1;
+  const char* server2 = currentSystemConfig.ntp_server2[0] != '\0' ? currentSystemConfig.ntp_server2 : kNtpServer2;
 
-  configTzTime(kNtpTimezone, kNtpServer1, kNtpServer2);
+  Serial.print("NTP sync started: ");
+  Serial.print(server1);
+  Serial.print(", ");
+  Serial.println(server2);
+
+  configTzTime(timezone, server1, server2);
   ntpSyncStarted = true;
+}
+
+void restartNtpSync() {
+  ntpSyncStarted = false;
+  timeSynced = false;
+  lastNtpSyncEpoch = 0;
+  startNtpSync();
 }
 
 void checkNtpSync() {
@@ -760,7 +777,7 @@ void printWebUiAddresses() {
 // ============================================================================
 
 String buildDeviceConfigPage() {
-  DeviceConfig cfg = ConfigManager::loadDeviceConfig();
+  const DeviceConfig& cfg = currentDeviceConfig;
   String page = buildPageHeader("Device Configuration");
   page.reserve(4000);
   page += F("<section class=\"panel\"><h2>Device Settings</h2>");
@@ -785,7 +802,7 @@ String buildDeviceConfigPage() {
 }
 
 String buildMqttConfigPage() {
-  MqttConfig cfg = ConfigManager::loadMqttConfig();
+  const MqttConfig& cfg = currentMqttConfig;
   String page = buildPageHeader("MQTT Configuration");
   page.reserve(5000);
   page += F("<section class=\"panel\"><h2>MQTT Broker Settings</h2>");
@@ -820,7 +837,7 @@ String buildMqttConfigPage() {
 }
 
 String buildModbusConfigPage() {
-  ModbusConfig cfg = ConfigManager::loadModbusConfig();
+  const ModbusConfig& cfg = currentModbusConfig;
   String page = buildPageHeader("Modbus Configuration");
   page.reserve(4500);
   page += F("<section class=\"panel\"><h2>Modbus RTU Settings</h2>");
@@ -872,7 +889,7 @@ String buildModbusConfigPage() {
 }
 
 String buildProtectionConfigPage() {
-  ProtectionConfig cfg = ConfigManager::loadProtectionConfig();
+  const ProtectionConfig& cfg = currentProtectionConfig;
   String page = buildPageHeader("Protection Configuration");
   page.reserve(4000);
   page += F("<section class=\"panel\"><h2>Relay Protection Settings</h2>");
@@ -909,7 +926,7 @@ String buildProtectionConfigPage() {
 }
 
 String buildDisplayConfigPage() {
-  DisplayConfig cfg = ConfigManager::loadDisplayConfig();
+  const DisplayConfig& cfg = currentDisplayConfig;
   String page = buildPageHeader("Display Configuration");
   page.reserve(3500);
   page += F("<section class=\"panel\"><h2>LCD Display Settings</h2>");
@@ -939,7 +956,7 @@ String buildDisplayConfigPage() {
 }
 
 String buildHistoryConfigPage() {
-  HistoryConfig cfg = ConfigManager::loadHistoryConfig();
+  const HistoryConfig& cfg = currentHistoryConfig;
   String page = buildPageHeader("History Configuration");
   page.reserve(3000);
   page += F("<section class=\"panel\"><h2>Energy History Settings</h2>");
@@ -961,7 +978,7 @@ String buildHistoryConfigPage() {
 }
 
 String buildSystemConfigPage() {
-  SystemConfig cfg = ConfigManager::loadSystemConfig();
+  const SystemConfig& cfg = currentSystemConfig;
   String page = buildPageHeader("System Configuration");
   page.reserve(3500);
   page += F("<section class=\"panel\"><h2>System Settings</h2>");
@@ -1040,8 +1057,7 @@ void handleSystemConfigPage() {
 // CONFIG API HANDLERS
 // ============================================================================
 void handleDeviceConfigSaveApi() {
-  DeviceConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  DeviceConfig cfg = currentDeviceConfig;
 
   if (configServer.hasArg("device_name")) {
     String name = configServer.arg("device_name");
@@ -1060,6 +1076,10 @@ void handleDeviceConfigSaveApi() {
   }
 
   bool ok = ConfigManager::saveDeviceConfig(cfg);
+  if (ok) {
+    currentDeviceConfig = cfg;
+    restartNtpSync();
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1069,8 +1089,7 @@ void handleDeviceConfigSaveApi() {
 }
 
 void handleMqttConfigSaveApi() {
-  MqttConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  MqttConfig cfg = currentMqttConfig;
 
   if (configServer.hasArg("mqtt_host")) {
     String host = configServer.arg("mqtt_host");
@@ -1101,6 +1120,9 @@ void handleMqttConfigSaveApi() {
   cfg.enabled = configServer.hasArg("mqtt_enabled") && configServer.arg("mqtt_enabled") == "1";
 
   bool ok = ConfigManager::saveMqttConfig(cfg);
+  if (ok) {
+    currentMqttConfig = cfg;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1110,8 +1132,7 @@ void handleMqttConfigSaveApi() {
 }
 
 void handleModbusConfigSaveApi() {
-  ModbusConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  ModbusConfig cfg = currentModbusConfig;
 
   cfg.baudrate = configServer.hasArg("modbus_baudrate") ? configServer.arg("modbus_baudrate").toInt() : 19200;
   cfg.slave_id = configServer.hasArg("modbus_slave_id") ? configServer.arg("modbus_slave_id").toInt() : 1;
@@ -1137,8 +1158,7 @@ void handleModbusConfigSaveApi() {
 }
 
 void handleProtectionConfigSaveApi() {
-  ProtectionConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  ProtectionConfig cfg = currentProtectionConfig;
 
   cfg.relay_enabled = configServer.hasArg("relay_enabled") && configServer.arg("relay_enabled") == "1";
   cfg.current_limit_a = configServer.hasArg("current_limit") ? configServer.arg("current_limit").toInt() : 16;
@@ -1149,6 +1169,9 @@ void handleProtectionConfigSaveApi() {
   cfg.trip_on_meter_stale = configServer.hasArg("trip_on_stale") && configServer.arg("trip_on_stale") == "1";
 
   bool ok = ConfigManager::saveProtectionConfig(cfg);
+  if (ok) {
+    currentProtectionConfig = cfg;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1158,8 +1181,7 @@ void handleProtectionConfigSaveApi() {
 }
 
 void handleDisplayConfigSaveApi() {
-  DisplayConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  DisplayConfig cfg = currentDisplayConfig;
 
   cfg.enabled = configServer.hasArg("display_enabled") && configServer.arg("display_enabled") == "1";
   cfg.type = configServer.hasArg("display_type") ? configServer.arg("display_type").toInt() : 0;
@@ -1168,6 +1190,9 @@ void handleDisplayConfigSaveApi() {
   cfg.brightness = configServer.hasArg("brightness") ? configServer.arg("brightness").toInt() : 200;
 
   bool ok = ConfigManager::saveDisplayConfig(cfg);
+  if (ok) {
+    currentDisplayConfig = cfg;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1177,14 +1202,16 @@ void handleDisplayConfigSaveApi() {
 }
 
 void handleHistoryConfigSaveApi() {
-  HistoryConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  HistoryConfig cfg = currentHistoryConfig;
 
   cfg.enabled = configServer.hasArg("history_enabled") && configServer.arg("history_enabled") == "1";
   cfg.days_retained = configServer.hasArg("days_retained") ? configServer.arg("days_retained").toInt() : 7;
   cfg.flush_interval_sec = configServer.hasArg("flush_interval") ? configServer.arg("flush_interval").toInt() : 3600;
 
   bool ok = ConfigManager::saveHistoryConfig(cfg);
+  if (ok) {
+    currentHistoryConfig = cfg;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1194,8 +1221,7 @@ void handleHistoryConfigSaveApi() {
 }
 
 void handleSystemConfigSaveApi() {
-  SystemConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  SystemConfig cfg = currentSystemConfig;
 
   if (configServer.hasArg("ntp_server1")) {
     String ntp1 = configServer.arg("ntp_server1");
@@ -1208,6 +1234,10 @@ void handleSystemConfigSaveApi() {
   cfg.debug_enabled = configServer.hasArg("debug_enabled") && configServer.arg("debug_enabled") == "1";
 
   bool ok = ConfigManager::saveSystemConfig(cfg);
+  if (ok) {
+    currentSystemConfig = cfg;
+    restartNtpSync();
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1242,6 +1272,36 @@ void handleStatusApi() {
   body += jsonEscape(savedWifiSsid);
   body += F("\",\"sta_status\":\"");
   body += wifiStatusToString(WiFi.status());
+  body += F("\",\"device_name\":\"");
+  body += jsonEscape(currentDeviceConfig.device_name);
+  body += F("\",\"hostname\":\"");
+  body += jsonEscape(currentDeviceConfig.hostname);
+  body += F("\",\"timezone\":\"");
+  body += jsonEscape(currentDeviceConfig.timezone);
+  body += F("\",\"mqtt_enabled\":");
+  body += currentMqttConfig.enabled ? F("true") : F("false");
+  body += F(",\"mqtt_host\":\"");
+  body += jsonEscape(currentMqttConfig.host);
+  body += F("\",\"mqtt_port\":");
+  body += String(currentMqttConfig.port);
+  body += F(",\"modbus_baudrate\":");
+  body += String(currentModbusConfig.baudrate);
+  body += F(",\"modbus_slave_id\":");
+  body += String(currentModbusConfig.slave_id);
+  body += F(",\"modbus_profile\":");
+  body += String(currentModbusConfig.meter_profile);
+  body += F(",\"relay_enabled\":");
+  body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
+  body += F(",\"display_enabled\":");
+  body += currentDisplayConfig.enabled ? F("true") : F("false");
+  body += F(",\"history_enabled\":");
+  body += currentHistoryConfig.enabled ? F("true") : F("false");
+  body += F(",\"ntp_server1\":\"");
+  body += jsonEscape(currentSystemConfig.ntp_server1);
+  body += F("\",\"ntp_server2\":\"");
+  body += jsonEscape(currentSystemConfig.ntp_server2);
+  body += F("\",\"debug_enabled\":");
+  body += currentSystemConfig.debug_enabled ? F("true") : F("false");
   body += F("\",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   body += F("\",\"rtc\":\"");
@@ -1556,8 +1616,14 @@ void setup() {
   printBootBanner();
   printChipInfo();
   printButtonInfo();
+  currentDeviceConfig = ConfigManager::loadDeviceConfig();
+  currentMqttConfig = ConfigManager::loadMqttConfig();
   loadWifiConfig();
   currentModbusConfig = ConfigManager::loadModbusConfig();
+  currentProtectionConfig = ConfigManager::loadProtectionConfig();
+  currentDisplayConfig = ConfigManager::loadDisplayConfig();
+  currentHistoryConfig = ConfigManager::loadHistoryConfig();
+  currentSystemConfig = ConfigManager::loadSystemConfig();
   currentModbusConfigLoaded = true;
   resetMeterSnapshot();
   if (hasSavedWifi) {

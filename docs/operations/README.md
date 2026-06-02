@@ -13,3 +13,4 @@ This folder is reserved for operational procedures:
 Current documents:
 
 - [Laptop Tooling Readiness Report](laptop-tooling-report.md)
+- [Project Progress Report](project-progress-report.md)

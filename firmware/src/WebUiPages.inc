@@ -1,4 +1,4 @@
-﻿String buildPageHeader(const String& title) {
+String buildPageHeader(const String& title) {
   String page;
   page.reserve(2300);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
@@ -22,11 +22,12 @@
   page += htmlEscape(title);
   page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div>");
   page += F("<button class=\"menuBtn\" onclick=\"toggleMenu()\">☰</button>");
-  page += F("<nav id=\"mainNav\"><a href=\"/\">🏠 Home</a><a href=\"/meter\">⚡ Meter</a><a href=\"/network\">📶 Network</a><a href=\"/mqtt\">📡 MQTT</a>");
+  page += F("<nav id=\"mainNav\"><a href=\"/\">🏠 Home</a><a href=\"/meter\">⚡ Meter</a>");
 
   if (currentMode == AppMode::Config || configApStarted) {
-      page += F("<a href=\"/nvs\">NVS</a>");
+      page += F("<a href=\"/network\">📶 Network</a>");
       page += F("<a href=\"/device\">⚙ Device</a>");
+      page += F("<a href=\"/mqtt\">📡 MQTT</a>");
       page += F("<a href=\"/modbus\">🔌 Modbus</a>");
       page += F("<a href=\"/protection\">🛡 Protection</a>");
       page += F("<a href=\"/display\">🖥 Display</a>");
@@ -52,7 +53,7 @@ String buildPageFooter() {
 
 String buildHomePage() {
   String page = buildPageHeader(F("Home"));
-  page += F("<section class=\"panel\"><div class=\"muted\">ðŸ  Device status</div><div class=\"grid\">");
+  page += F("<section class=\"panel\"><div class=\"muted\">🏠 Device status</div><div class=\"grid\">");
   page += F("<div>Mode</div><div>"); page += appModeToString(currentMode); page += F("</div>");
   page += F("<div>Firmware</div><div>"); page += FW_VERSION; page += F("</div>");
   page += F("<div>Chip</div><div>ESP32"); page += F("</div>");
@@ -84,7 +85,7 @@ String buildHomePage() {
   page += F("<div class=\"metric\"><div class=\"metricTop\"><span>WiFi Signal</span><span>");
   page += String(getWifiQualityPercent()); page += F("%</span></div><div class=\"track\"><div class=\"fill\" style=\"width:"); page += String(getWifiQualityPercent()); page += F("%\"></div></div><div class=\"muted\">"); page += wifiConnected ? String(WiFi.RSSI()) + String(" dBm") : String("no link"); page += F("</div></div>");
   page += F("</section>");
-  page += F("<section class=\"panel\"><div class=\"muted\">âš¡ RS485 meter</div>");
+  page += F("<section class=\"panel\"><div class=\"muted\">⚡ RS485 meter</div>");
   page += F("<div class=\"grid\">");
   page += F("<div>Status</div><div>"); page += meterSnapshot.online ? F("online") : F("offline"); page += F("</div>");
   page += F("<div>Voltage</div><div>"); page += formatFloatValue(meterSnapshot.voltage, 2, "V"); page += F("</div>");
@@ -100,7 +101,7 @@ String buildHomePage() {
 
 String buildMeterPage() {
   String page = buildPageHeader(F("Meter"));
-  page += F("<section class=\"panel\"><div class=\"muted\">âš¡ Schneider EM6400 / PM2xxx bootstrap</div>");
+  page += F("<section class=\"panel\"><div class=\"muted\">⚡ Schneider EM6400 / PM2xxx bootstrap</div>");
   page += F("<div class=\"grid\">");
   page += F("<div>Status</div><div>"); page += meterSnapshot.online ? F("online") : F("offline"); page += F("</div>");
   page += F("<div>Valid</div><div>"); page += meterSnapshot.valid ? F("yes") : F("no"); page += F("</div>");
@@ -134,18 +135,17 @@ String buildNetworkPage() {
   page += F("</section>");
   page += F("<section class=\"panel\"><form id=\"wifiForm\"><label for=\"ssid\">SSID</label><input id=\"ssid\" name=\"ssid\" maxlength=\"64\" required>");
   page += F("<label for=\"password\">Password</label><input id=\"password\" name=\"password\" type=\"password\" maxlength=\"64\">");
-  page += F("<div class=\"actions\"><button type=\"submit\">Save WiFi</button><button type=\"button\" onclick=\"rebootDevice()\">Reboot</button></div>");
+  page += F("<div class=\"actions\"><button type=\"submit\">💾 Save WiFi</button><button type=\"button\" onclick=\"rebootDevice()\">🔄 Reboot</button></div>");
   page += F("</form></section>");
   page += F("<script>");
   page += F("const wifiStatus=document.getElementById('wifiStatus');const wifiList=document.getElementById('wifiList');const wifiForm=document.getElementById('wifiForm');");
   page += F("const ssidInput=document.getElementById('ssid');const passwordInput=document.getElementById('password');");
-  page += F("function setWifiStatus(text){wifiStatus.textContent=text;}");
-  page += F("function clearWifiList(){while(wifiList.firstChild){wifiList.removeChild(wifiList.firstChild);}};");
-  page += F("function createNetworkRow(n){const row=document.createElement('div');row.className='net';const left=document.createElement('div');const ssid=document.createElement('div');ssid.className='ssid';ssid.textContent=n.ssid||'(hidden)';const tag=document.createElement('div');tag.className='tag';tag.textContent=(n.security||'Unknown')+' | '+n.channel+' | '+n.rssi+' dBm';left.appendChild(ssid);left.appendChild(tag);const right=document.createElement('div');const btn=document.createElement('button');btn.className='use';btn.type='button';btn.textContent='Use';btn.addEventListener('click',function(){useNetwork(n.ssid||'');});right.appendChild(btn);row.appendChild(left);row.appendChild(right);return row;}");
-  page += F("async function scanWifi(){setWifiStatus('Scanning...');clearWifiList();try{const res=await fetch('/api/wifi/scan',{cache:'no-store'});const data=await res.json();if(!res.ok){setWifiStatus(data.error||'Scan failed');return;}const list=Array.isArray(data.networks)?data.networks:[];setWifiStatus('Found '+list.length+' network(s).');list.forEach(n=>wifiList.appendChild(createNetworkRow(n)));}catch(e){setWifiStatus('Scan failed');}};");
-  page += F("async function loadCurrentWifi(){try{const res=await fetch('/api/status',{cache:'no-store'});const data=await res.json();if(data.saved_wifi_ssid){ssidInput.value=data.saved_wifi_ssid;setWifiStatus('Loaded saved SSID.');}else if(data.wifi_ssid){ssidInput.value=data.wifi_ssid;setWifiStatus('Loaded saved SSID.');}else{setWifiStatus('No saved WiFi found.');}}catch(e){setWifiStatus('Load failed');}};");
+  page += F("async function scanWifi(){wifiStatus.textContent='Scanning...';wifiList.innerHTML='';const res=await fetch('/api/wifi/scan',{cache:'no-store'});const data=await res.json();if(!data.ok){wifiStatus.textContent=data.error||'Scan failed';return;}wifiStatus.textContent='Found '+data.networks.length+' network(s).';wifiList.innerHTML=data.networks.map(n=>'<div class=\"net\"><div><div class=\"ssid\">'+escapeHtml(n.ssid||'(hidden)')+'</div><div class=\"tag\">'+escapeHtml(n.security)+' | '+n.channel+' | '+n.rssi+' dBm</div></div><div><button class=\"use\" type=\"button\" onclick=\"useNetwork(\\''+escapeJs(n.ssid||'')+'\\')\">Use</button></div></div>').join('');}");
+  page += F("async function loadCurrentWifi(){const res=await fetch('/api/status',{cache:'no-store'});const data=await res.json();if(data.wifi_ssid){ssidInput.value=data.wifi_ssid;wifiStatus.textContent='Loaded saved SSID.';}else{wifiStatus.textContent='No saved WiFi found.';}}");
   page += F("function useNetwork(ssid){ssidInput.value=ssid;passwordInput.focus();}");
-  page += F("wifiForm.addEventListener('submit',async function(e){e.preventDefault();setWifiStatus('Saving...');const body={ssid:ssidInput.value,password:passwordInput.value};try{const res=await fetch('/api/wifi/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await res.json();setWifiStatus(data.ok?'Saved. Reboot to connect.':(data.error||'Save failed'));if(data.ok){setTimeout(()=>rebootDevice(),1200);}}catch(e){setWifiStatus('Save failed');}});");
+  page += F("wifiForm.addEventListener('submit',async function(e){e.preventDefault();wifiStatus.textContent='Saving...';const body={ssid:ssidInput.value,password:passwordInput.value};const res=await fetch('/api/wifi/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await res.json();wifiStatus.textContent=data.ok?'Saved. Reboot to connect.':(data.error||'Save failed');if(data.ok){setTimeout(()=>rebootDevice(),1200);}});");
+  page += F("function escapeHtml(s){return String(s).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}");
+  page += F("function escapeJs(s){return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,'\\\\\'');}");
   page += F("scanWifi();");
   page += F("</script>");
   page += buildPageFooter();

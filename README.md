@@ -85,7 +85,6 @@ Current HTTP endpoints:
 | ------ | ---------------- | ------------------------------------ |
 | `GET`  | `/`              | Home/status UI                       |
 | `GET`  | `/meter`         | Meter status UI                      |
-| `GET`  | `/nvs`           | Read-only NVS/config preview         |
 | `GET`  | `/network`       | Network scan and WiFi credential UI  |
 | `GET`  | `/api/status`    | Firmware, mode, AP, STA, heap status |
 | `GET`  | `/api/meter/status` | RS485 meter snapshot                |

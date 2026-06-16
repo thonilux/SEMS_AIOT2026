@@ -169,7 +169,7 @@ Config Mode starts a WiFi AP.
 Recommended AP identity:
 
 ```text
-SSID: PM1611-SETUP-{last6mac}
+SSID: SEMS-SETUP-{last6mac}
 IP:   192.168.4.1
 Host: pm1611-{last6mac}.local, later if mDNS enabled
 ```
@@ -177,7 +177,7 @@ Host: pm1611-{last6mac}.local, later if mDNS enabled
 Example:
 
 ```text
-PM1611-SETUP-83D1B4
+SEMS-SETUP-83D1B4
 ```
 
 Development password:
@@ -488,7 +488,7 @@ LCD pages in Config Mode:
 ```text
 Page 1:
 PM1611 SETUP
-SSID PM1611-SETUP-xxxx
+SSID SEMS-SETUP-xxxx
 IP 192.168.4.1
 
 Page 2:
@@ -548,7 +548,7 @@ Status: implemented.
 
 ```text
 If CONFIG_MODE:
-  start AP PM1611-SETUP-{last6mac}
+  start AP SEMS-SETUP-{last6mac}
   print AP IP
 ```
 
@@ -615,7 +615,7 @@ CONFIG_BUTTON_ACTIVE_LOW = true
 RUNTIME_CONFIG_HOLD_MS = 5000
 FACTORY_RESET_HOLD_MS = 10000
 CONFIG_AP_IP = 192.168.4.1
-CONFIG_AP_SSID_PREFIX = PM1611-SETUP
+CONFIG_AP_SSID_PREFIX = SEMS-SETUP
 CONFIG_AP_PASSWORD_DEV = PM123456
 WIFI_CONNECT_ATTEMPTS = 5
 WIFI_CONNECT_RETRY_MS = 3000

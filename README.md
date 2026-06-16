@@ -1,4 +1,4 @@
-# ⚡ PM1611 RS485 Reader
+# ⚡ SEMS AIoT
 
 ESP32-based RS485 Modbus energy monitoring gateway inspired by the PM1611Q-WD smart energy meter.
 
@@ -58,7 +58,7 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | Serial diagnostics  | Boot banner, chip info, heartbeat, free heap, WiFi state                    |
 | Config button       | Hold `GPIO32` to `GND` for 5 seconds to enter `CONFIG_MODE`                 |
 | Builtin LED         | `GPIO2` turns ON in `CONFIG_MODE`                                           |
-| Config AP           | Broadcasts `PM1611-SETUP-{last6mac}` with password `PM123456`               |
+| Config AP           | Broadcasts `SEMS-SETUP-{last6mac}` with password `PM123456`               |
 | Setup Web UI        | Available at `http://192.168.4.1/` in Config Mode                           |
 | WiFi scan           | Web UI can scan nearby WiFi networks                                        |
 | WiFi save           | Web UI saves SSID/password to NVS using `Preferences`                       |
@@ -76,7 +76,7 @@ Current verified board identity:
 ```text
 Chip: ESP32-D0WD-V3
 MAC:  38:18:2b:83:d1:b4
-AP:   PM1611-SETUP-83D1B4
+AP:   SEMS-SETUP-83D1B4
 ```
 
 Current HTTP endpoints:
@@ -635,7 +635,7 @@ Recommended default:
 ## 🗂️ Repository Structure
 
 ```text
-pm1611-rs485-reader/
+sems-aiot/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   └── workflows/

@@ -20,7 +20,7 @@ String buildPageHeader(const String& title) {
   page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}.menuBtn{display:block;margin-top:10px}nav{display:none;flex-direction:column;margin-top:10px}nav.open{display:flex}}");
   page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
   page += htmlEscape(title);
-  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div>");
+  page += F("</h1><div class=\"muted\">SEMS AIoT</div></div>");
   page += F("<button class=\"menuBtn\" onclick=\"toggleMenu()\">☰</button>");
   page += F("<nav id=\"mainNav\"><a href=\"/\">🏠 Home</a><a href=\"/meter\">⚡ Meter</a>");
 

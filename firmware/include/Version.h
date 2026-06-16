@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef FW_NAME
-#define FW_NAME "PM1611_RS485_READER"
+#define FW_NAME "SEMS_AIOT"
 #endif
 
 #ifndef FW_VERSION

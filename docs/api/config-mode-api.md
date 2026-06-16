@@ -105,7 +105,7 @@ Current implemented `GET /api/status` response:
 {
   "firmware": "0.1.0-dev",
   "mode": "NORMAL_MODE",
-  "ap_ssid": "PM1611-SETUP-83D1B4",
+  "ap_ssid": "SEMS-SETUP-83D1B4",
   "ap_ip": "192.168.4.1",
   "saved_wifi_ssid": "OfficeWiFi",
   "sta_status": "connected",
@@ -142,7 +142,7 @@ Future expanded response:
   "uptime_ms": 12000,
   "ap": {
     "enabled": true,
-    "ssid": "PM1611-SETUP-83D1B4",
+    "ssid": "SEMS-SETUP-83D1B4",
     "ip": "192.168.4.1",
     "clients": 1
   },

@@ -17,7 +17,7 @@ constexpr uint32_t kHeartbeatIntervalMs = 1000;
 constexpr uint32_t kRuntimeConfigHoldMs = 5000;
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kNtpSyncTimeoutMs = 10000;
-constexpr char kConfigApSsidPrefix[] = "PM1611-SETUP";
+constexpr char kConfigApSsidPrefix[] = "SEMS-SETUP";
 constexpr char kConfigApPassword[] = "PM123456";
 constexpr char kNetworkPrefsNamespace[] = "network";
 constexpr char kWifiSsidKey[] = "wifi_ssid";
@@ -139,7 +139,7 @@ void printBootBanner() {
   Serial.print("Firmware: ");
   Serial.println(FW_VERSION);
   Serial.println("Target: ESP32-WROOM / esp32dev");
-  Serial.println("Project: PM1611 RS485 Reader");
+  Serial.println("Project: SEMS AIoT");
   Serial.println("Status: boot baseline online");
   Serial.println("========================================");
   Serial.println();
@@ -326,7 +326,7 @@ String getDeviceUid() {
 
 String getMqttBaseTopic() {
   if (currentMqttConfig.base_topic[0] == '\0') {
-    return String("pm1611");
+    return String("sems");
   }
   return String(currentMqttConfig.base_topic);
 }
@@ -789,7 +789,7 @@ void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
 
   switch (pageIndex % 4) {
     case 0:
-      driver->drawStr(0, 12, "PM1611 RS485");
+      driver->drawStr(0, 12, "SEMS AIoT");
       driver->drawStr(0, 28, formatFloatValue(meterSnapshot.voltage, 1, "V").c_str());
       driver->drawStr(0, 42, formatFloatValue(meterSnapshot.current, 1, "A").c_str());
       driver->drawStr(0, 56, formatFloatValue(meterSnapshot.power, 1, "kW").c_str());

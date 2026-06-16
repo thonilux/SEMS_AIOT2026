@@ -27,10 +27,10 @@ DeviceConfig ConfigManager::loadDeviceConfig() {
 
   // Apply defaults if empty
   if (strlen(cfg.device_name) == 0) {
-    strncpy(cfg.device_name, "PM1611-Device", sizeof(cfg.device_name) - 1);
+    strncpy(cfg.device_name, "SEMS-AIoT", sizeof(cfg.device_name) - 1);
   }
   if (strlen(cfg.hostname) == 0) {
-    strncpy(cfg.hostname, "pm1611", sizeof(cfg.hostname) - 1);
+    strncpy(cfg.hostname, "sems", sizeof(cfg.hostname) - 1);
   }
   if (strlen(cfg.timezone) == 0) {
     strncpy(cfg.timezone, "WIB-7", sizeof(cfg.timezone) - 1);
@@ -77,10 +77,10 @@ MqttConfig ConfigManager::loadMqttConfig() {
     strncpy(cfg.host, "localhost", sizeof(cfg.host) - 1);
   }
   if (strlen(cfg.client_id) == 0) {
-    strncpy(cfg.client_id, "pm1611", sizeof(cfg.client_id) - 1);
+    strncpy(cfg.client_id, "sems", sizeof(cfg.client_id) - 1);
   }
   if (strlen(cfg.base_topic) == 0) {
-    strncpy(cfg.base_topic, "pm1611", sizeof(cfg.base_topic) - 1);
+    strncpy(cfg.base_topic, "sems", sizeof(cfg.base_topic) - 1);
   }
 
   return cfg;

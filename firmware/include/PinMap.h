@@ -12,10 +12,19 @@ constexpr bool kBuiltinLedActiveHigh = true;
 constexpr uint8_t kRs485Rx = 16;
 constexpr uint8_t kRs485Tx = 17;
 
-constexpr uint8_t kRelayOutput = 25;
+// Relay header pin 3 (GPIO13), active-LOW
+constexpr uint8_t kRelayOutput = 13;
 constexpr bool kRelayOutputActiveHigh = false;
 
-constexpr uint8_t kDisplayCs = 26;
-constexpr uint8_t kDisplayDc = 21;
-constexpr uint8_t kDisplayReset = 22;
+// LCD I2C (hardware I2C: SDA=GPIO21, SCL=GPIO22 — ESP32 default)
+constexpr uint8_t kDisplaySda = 21;
+constexpr uint8_t kDisplayScl = 22;
+
+// W5500 Ethernet (SPI)
+constexpr uint8_t kEthernetCs  = 5;
+constexpr uint8_t kEthernetMosi = 23;
+constexpr uint8_t kEthernetMiso = 19;
+constexpr uint8_t kEthernetSck  = 18;
+constexpr uint8_t kEthernetInt  = 27;
+constexpr uint8_t kEthernetRst  = 26;
 }  // namespace PinMap

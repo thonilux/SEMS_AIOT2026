@@ -2,6 +2,38 @@
 #include <Preferences.h>
 #include <cstring>
 
+namespace {
+template <typename Writer>
+bool saveWithRecovery(const char* ns, Writer writer) {
+  Preferences prefs;
+  if (!prefs.begin(ns, false)) {
+    return false;
+  }
+
+  bool ok = writer(prefs);
+  if (ok) {
+    prefs.end();
+    return true;
+  }
+
+  prefs.clear();
+  ok = writer(prefs);
+  prefs.end();
+  return ok;
+}
+
+bool putOptionalString(Preferences& prefs, const char* key, const char* value) {
+  if (!value || value[0] == '\0') {
+    if (prefs.isKey(key)) {
+      return prefs.remove(key);
+    }
+    return true;
+  }
+
+  return prefs.putString(key, value) > 0;
+}
+}  // namespace
+
 // ============================================================================
 // CONFIG MANAGER IMPLEMENTATION
 // ============================================================================
@@ -40,17 +72,14 @@ DeviceConfig ConfigManager::loadDeviceConfig() {
 }
 
 bool ConfigManager::saveDeviceConfig(const DeviceConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_DEVICE, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putString("device_name", cfg.device_name) > 0;
-  ok &= prefs.putString("hostname", cfg.hostname) > 0;
-  ok &= prefs.putString("timezone", cfg.timezone) > 0;
-  ok &= prefs.putUChar("co2_factor", cfg.co2_factor_kg_per_kwh) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_DEVICE, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= putOptionalString(prefs, "device_name", cfg.device_name);
+    ok &= putOptionalString(prefs, "hostname", cfg.hostname);
+    ok &= putOptionalString(prefs, "timezone", cfg.timezone);
+    ok &= prefs.putUChar("co2_factor", cfg.co2_factor_kg_per_kwh) > 0;
+    return ok;
+  });
 }
 
 // ===== MQTT CONFIG =====
@@ -67,7 +96,7 @@ MqttConfig ConfigManager::loadMqttConfig() {
   prefs.getString("password", cfg.password, sizeof(cfg.password));
   prefs.getString("client_id", cfg.client_id, sizeof(cfg.client_id));
   prefs.getString("base_topic", cfg.base_topic, sizeof(cfg.base_topic));
-  cfg.publish_interval_sec = prefs.getUShort("publish_interval_sec", 5);
+  cfg.publish_interval_sec = prefs.getUShort("pub_int_sec", 5);
   cfg.enabled = prefs.getBool("enabled", false);
 
   prefs.end();
@@ -87,21 +116,18 @@ MqttConfig ConfigManager::loadMqttConfig() {
 }
 
 bool ConfigManager::saveMqttConfig(const MqttConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_MQTT, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putString("host", cfg.host) > 0;
-  ok &= prefs.putUShort("port", cfg.port) > 0;
-  ok &= prefs.putString("username", cfg.username) > 0;
-  ok &= prefs.putString("password", cfg.password) > 0;
-  ok &= prefs.putString("client_id", cfg.client_id) > 0;
-  ok &= prefs.putString("base_topic", cfg.base_topic) > 0;
-  ok &= prefs.putUShort("publish_interval_sec", cfg.publish_interval_sec) > 0;
-  ok &= prefs.putBool("enabled", cfg.enabled) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_MQTT, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= putOptionalString(prefs, "host", cfg.host);
+    ok &= prefs.putUShort("port", cfg.port) > 0;
+    ok &= putOptionalString(prefs, "username", cfg.username);
+    ok &= putOptionalString(prefs, "password", cfg.password);
+    ok &= putOptionalString(prefs, "client_id", cfg.client_id);
+    ok &= putOptionalString(prefs, "base_topic", cfg.base_topic);
+    ok &= prefs.putUShort("pub_int_sec", cfg.publish_interval_sec) > 0;
+    ok &= prefs.putBool("enabled", cfg.enabled) > 0;
+    return ok;
+  });
 }
 
 // ===== MODBUS CONFIG =====
@@ -113,34 +139,31 @@ ModbusConfig ConfigManager::loadModbusConfig() {
   memset(&cfg, 0, sizeof(cfg));
 
   cfg.baudrate = prefs.getUInt("baudrate", 19200);
-  cfg.slave_id = prefs.getUChar("slave_id", 1);
+  cfg.slave_id = prefs.getUChar("slave", 1);
   cfg.parity = prefs.getUChar("parity", 0);
-  cfg.stop_bits = prefs.getUChar("stop_bits", 1);
-  cfg.poll_interval_ms = prefs.getUShort("poll_interval_ms", 1000);
+  cfg.stop_bits = prefs.getUChar("stopbits", 1);
+  cfg.poll_interval_ms = prefs.getUShort("poll_ms", 1000);
   cfg.timeout_ms = prefs.getUShort("timeout_ms", 1000);
-  cfg.retry_count = prefs.getUChar("retry_count", 3);
-  cfg.meter_profile = prefs.getUChar("meter_profile", 0);
+  cfg.retry_count = prefs.getUChar("retry_cnt", 3);
+  cfg.meter_profile = prefs.getUChar("profile", 0);
 
   prefs.end();
   return cfg;
 }
 
 bool ConfigManager::saveModbusConfig(const ModbusConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_MODBUS, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putUInt("baudrate", cfg.baudrate) > 0;
-  ok &= prefs.putUChar("slave_id", cfg.slave_id) > 0;
-  ok &= prefs.putUChar("parity", cfg.parity) > 0;
-  ok &= prefs.putUChar("stop_bits", cfg.stop_bits) > 0;
-  ok &= prefs.putUShort("poll_interval_ms", cfg.poll_interval_ms) > 0;
-  ok &= prefs.putUShort("timeout_ms", cfg.timeout_ms) > 0;
-  ok &= prefs.putUChar("retry_count", cfg.retry_count) > 0;
-  ok &= prefs.putUChar("meter_profile", cfg.meter_profile) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_MODBUS, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= prefs.putUInt("baudrate", cfg.baudrate) > 0;
+    ok &= prefs.putUChar("slave", cfg.slave_id) > 0;
+    ok &= prefs.putUChar("parity", cfg.parity) > 0;
+    ok &= prefs.putUChar("stopbits", cfg.stop_bits) > 0;
+    ok &= prefs.putUShort("poll_ms", cfg.poll_interval_ms) > 0;
+    ok &= prefs.putUShort("timeout_ms", cfg.timeout_ms) > 0;
+    ok &= prefs.putUChar("retry_cnt", cfg.retry_count) > 0;
+    ok &= prefs.putUChar("profile", cfg.meter_profile) > 0;
+    return ok;
+  });
 }
 
 // ===== PROTECTION CONFIG =====
@@ -151,33 +174,30 @@ ProtectionConfig ConfigManager::loadProtectionConfig() {
   ProtectionConfig cfg;
   memset(&cfg, 0, sizeof(cfg));
 
-  cfg.relay_enabled = prefs.getBool("relay_enabled", false);
-  cfg.current_limit_a = prefs.getUChar("current_limit_a", 16);
-  cfg.trip_delay_ms = prefs.getUInt("trip_delay_ms", 1000);
-  cfg.reset_mode = prefs.getUChar("reset_mode", 0);
-  cfg.auto_retry_enabled = prefs.getBool("auto_retry_enabled", false);
-  cfg.auto_retry_delay_sec = prefs.getUShort("auto_retry_delay_sec", 300);
-  cfg.trip_on_meter_stale = prefs.getBool("trip_on_meter_stale", true);
+  cfg.relay_enabled = prefs.getBool("relay_en", false);
+  cfg.current_limit_a = prefs.getUChar("curr_lim", 16);
+  cfg.trip_delay_ms = prefs.getUInt("trip_dly", 1000);
+  cfg.reset_mode = prefs.getUChar("reset_md", 0);
+  cfg.auto_retry_enabled = prefs.getBool("auto_retry_en", false);
+  cfg.auto_retry_delay_sec = prefs.getUShort("auto_retry_dly", 300);
+  cfg.trip_on_meter_stale = prefs.getBool("trip_stale", true);
 
   prefs.end();
   return cfg;
 }
 
 bool ConfigManager::saveProtectionConfig(const ProtectionConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_PROTECTION, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putBool("relay_enabled", cfg.relay_enabled) > 0;
-  ok &= prefs.putUChar("current_limit_a", cfg.current_limit_a) > 0;
-  ok &= prefs.putUInt("trip_delay_ms", cfg.trip_delay_ms) > 0;
-  ok &= prefs.putUChar("reset_mode", cfg.reset_mode) > 0;
-  ok &= prefs.putBool("auto_retry_enabled", cfg.auto_retry_enabled) > 0;
-  ok &= prefs.putUShort("auto_retry_delay_sec", cfg.auto_retry_delay_sec) > 0;
-  ok &= prefs.putBool("trip_on_meter_stale", cfg.trip_on_meter_stale) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_PROTECTION, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= prefs.putBool("relay_en", cfg.relay_enabled) > 0;
+    ok &= prefs.putUChar("curr_lim", cfg.current_limit_a) > 0;
+    ok &= prefs.putUInt("trip_dly", cfg.trip_delay_ms) > 0;
+    ok &= prefs.putUChar("reset_md", cfg.reset_mode) > 0;
+    ok &= prefs.putBool("auto_retry_en", cfg.auto_retry_enabled) > 0;
+    ok &= prefs.putUShort("auto_retry_dly", cfg.auto_retry_delay_sec) > 0;
+    ok &= prefs.putBool("trip_stale", cfg.trip_on_meter_stale) > 0;
+    return ok;
+  });
 }
 
 // ===== DISPLAY CONFIG =====
@@ -190,8 +210,8 @@ DisplayConfig ConfigManager::loadDisplayConfig() {
 
   cfg.enabled = prefs.getBool("enabled", false);
   cfg.type = prefs.getUChar("type", 0);
-  cfg.i2c_address = prefs.getUChar("i2c_address", 0x3C);
-  cfg.rotation_interval_sec = prefs.getUChar("rotation_interval_sec", 5);
+  cfg.i2c_address = prefs.getUChar("i2c_addr", 0x3C);
+  cfg.rotation_interval_sec = prefs.getUChar("rot_int_sec", 5);
   cfg.brightness = prefs.getUChar("brightness", 200);
 
   prefs.end();
@@ -199,18 +219,15 @@ DisplayConfig ConfigManager::loadDisplayConfig() {
 }
 
 bool ConfigManager::saveDisplayConfig(const DisplayConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_DISPLAY, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putBool("enabled", cfg.enabled) > 0;
-  ok &= prefs.putUChar("type", cfg.type) > 0;
-  ok &= prefs.putUChar("i2c_address", cfg.i2c_address) > 0;
-  ok &= prefs.putUChar("rotation_interval_sec", cfg.rotation_interval_sec) > 0;
-  ok &= prefs.putUChar("brightness", cfg.brightness) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_DISPLAY, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= prefs.putBool("enabled", cfg.enabled) > 0;
+    ok &= prefs.putUChar("type", cfg.type) > 0;
+    ok &= prefs.putUChar("i2c_addr", cfg.i2c_address) > 0;
+    ok &= prefs.putUChar("rot_int_sec", cfg.rotation_interval_sec) > 0;
+    ok &= prefs.putUChar("brightness", cfg.brightness) > 0;
+    return ok;
+  });
 }
 
 // ===== HISTORY CONFIG =====
@@ -223,23 +240,20 @@ HistoryConfig ConfigManager::loadHistoryConfig() {
 
   cfg.enabled = prefs.getBool("enabled", true);
   cfg.days_retained = prefs.getUChar("days_retained", 7);
-  cfg.flush_interval_sec = prefs.getUShort("flush_interval_sec", 3600);
+  cfg.flush_interval_sec = prefs.getUShort("flush_int_sec", 3600);
 
   prefs.end();
   return cfg;
 }
 
 bool ConfigManager::saveHistoryConfig(const HistoryConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_HISTORY, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putBool("enabled", cfg.enabled) > 0;
-  ok &= prefs.putUChar("days_retained", cfg.days_retained) > 0;
-  ok &= prefs.putUShort("flush_interval_sec", cfg.flush_interval_sec) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_HISTORY, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= prefs.putBool("enabled", cfg.enabled) > 0;
+    ok &= prefs.putUChar("days_retained", cfg.days_retained) > 0;
+    ok &= prefs.putUShort("flush_int_sec", cfg.flush_interval_sec) > 0;
+    return ok;
+  });
 }
 
 // ===== SYSTEM CONFIG =====
@@ -268,14 +282,11 @@ SystemConfig ConfigManager::loadSystemConfig() {
 }
 
 bool ConfigManager::saveSystemConfig(const SystemConfig& cfg) {
-  Preferences prefs;
-  if (!prefs.begin(NS_SYSTEM, false)) return false;
-
-  bool ok = true;
-  ok &= prefs.putString("ntp_server1", cfg.ntp_server1) > 0;
-  ok &= prefs.putString("ntp_server2", cfg.ntp_server2) > 0;
-  ok &= prefs.putBool("debug_enabled", cfg.debug_enabled) > 0;
-
-  prefs.end();
-  return ok;
+  return saveWithRecovery(NS_SYSTEM, [&](Preferences& prefs) {
+    bool ok = true;
+    ok &= putOptionalString(prefs, "ntp_server1", cfg.ntp_server1);
+    ok &= putOptionalString(prefs, "ntp_server2", cfg.ntp_server2);
+    ok &= prefs.putBool("debug_enabled", cfg.debug_enabled) > 0;
+    return ok;
+  });
 }

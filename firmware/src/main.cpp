@@ -3,6 +3,7 @@
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <U8g2lib.h>
 #include <cmath>
 #include <time.h>
@@ -60,6 +61,7 @@ bool mqttClientConfigured = false;
 uint32_t mqttLastReconnectAttemptMs = 0;
 uint32_t mqttLastPublishMs = 0;
 WiFiClient mqttTransport;
+WiFiClientSecure mqttSecureTransport;
 PubSubClient mqttClient(mqttTransport);
 bool relayRequestedState = false;
 bool relayActualState = false;
@@ -314,6 +316,27 @@ String formatFloatValue(float value, uint8_t decimals, const char* unit = nullpt
   } else {
     snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
   }
+  return String(buffer);
+}
+
+uint8_t parseHexByteValue(const String& text, uint8_t fallback) {
+  String trimmed = text;
+  trimmed.trim();
+  trimmed.toLowerCase();
+  if (trimmed.startsWith("0x")) {
+    trimmed.remove(0, 2);
+  } else if (trimmed.startsWith("x")) {
+    trimmed.remove(0, 1);
+  }
+  if (trimmed.length() == 0) {
+    return fallback;
+  }
+  return static_cast<uint8_t>(strtoul(trimmed.c_str(), nullptr, 16));
+}
+
+String formatHexByte(uint8_t value) {
+  char buffer[8] = {};
+  snprintf(buffer, sizeof(buffer), "0x%02X", value);
   return String(buffer);
 }
 
@@ -621,6 +644,12 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void configureMqttClient() {
+  if (currentMqttConfig.port == 8883) {
+    mqttSecureTransport.setInsecure();
+    mqttClient.setClient(mqttSecureTransport);
+  } else {
+    mqttClient.setClient(mqttTransport);
+  }
   mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
   mqttClient.setBufferSize(1024);
   mqttClient.setKeepAlive(30);
@@ -723,6 +752,60 @@ void publishMqttState() {
   const String payload = buildMqttPayload();
   mqttClient.publish(mqttStateTopic().c_str(), payload.c_str(), true);
   mqttClient.publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
+}
+
+bool testMqttBrokerConnection(String& errorOut) {
+  if (WiFi.status() != WL_CONNECTED) {
+    errorOut = "wifi_not_connected";
+    return false;
+  }
+  if (!currentMqttConfig.enabled) {
+    errorOut = "mqtt_disabled";
+    return false;
+  }
+  if (currentMqttConfig.host[0] == '\0') {
+    errorOut = "missing_host";
+    return false;
+  }
+
+  if (!mqttClientConfigured) {
+    configureMqttClient();
+  } else {
+    mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+  }
+
+  const String clientId = getMqttClientId();
+  const String willTopic = mqttStateTopic();
+  const String willPayload = F("{\"connected\":false}");
+
+  bool ok = false;
+  if (currentMqttConfig.username[0] != '\0' || currentMqttConfig.password[0] != '\0') {
+    ok = mqttClient.connect(clientId.c_str(),
+                            currentMqttConfig.username,
+                            currentMqttConfig.password,
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  } else {
+    ok = mqttClient.connect(clientId.c_str(),
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  }
+
+  if (!ok) {
+    errorOut = String("rc_") + String(mqttClient.state());
+    mqttConnected = false;
+    return false;
+  }
+
+  mqttConnected = true;
+  mqttClient.disconnect();
+  mqttConnected = false;
+  errorOut = "ok";
+  return true;
 }
 
 void updateMqttRuntime(uint32_t nowMs) {
@@ -1389,7 +1472,7 @@ String buildMqttConfigPage() {
   page += htmlEscape(String(cfg.base_topic));
   page += F("\"><label for=\"mqtt_publish_interval\">Publish Interval (sec)</label><input id=\"mqtt_publish_interval\" type=\"number\" min=\"1\" max=\"3600\" value=\"");
   page += String(cfg.publish_interval_sec);
-  page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button><button type=\"button\" onclick=\"testMqttBroker()\">Test Broker</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
   page += F("<script>async function saveMqttConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("mqtt_enabled:document.getElementById('mqtt_enabled').checked?'1':'0',");
   page += F("mqtt_host:document.getElementById('mqtt_host').value,mqtt_port:document.getElementById('mqtt_port').value,");
@@ -1397,7 +1480,7 @@ String buildMqttConfigPage() {
   page += F("mqtt_client_id:document.getElementById('mqtt_client_id').value,mqtt_base_topic:document.getElementById('mqtt_base_topic').value,");
   page += F("mqtt_publish_interval:document.getElementById('mqtt_publish_interval').value});try{const r=await fetch('/api/mqtt/save',{method:'POST',");
   page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
-  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += F("catch(e){s.textContent='Save failed'}}async function testMqttBroker(){const s=document.getElementById('saveState');s.textContent='Testing broker...';try{const r=await fetch('/api/mqtt/test',{method:'POST'});const d=await r.json();s.textContent=d.ok?'Broker connection OK':('Broker test failed: '+(d.error||'unknown'))}catch(e){s.textContent='Broker test failed'}}</script>");
   page += buildPageFooter();
   return page;
 }
@@ -1485,7 +1568,7 @@ String buildProtectionConfigPage() {
   page += F("trip_delay:document.getElementById('trip_delay').value,reset_mode:document.getElementById('reset_mode').value,");
   page += F("auto_retry_enabled:document.getElementById('auto_retry_enabled').checked?'1':'0',auto_retry_delay:document.getElementById('auto_retry_delay').value,");
   page += F("trip_on_stale:document.getElementById('trip_on_stale').checked?'1':'0'});try{const r=await fetch('/api/protection/save',{method:'POST',");
-  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':((d.detail||d.error)||'Save failed')}");
   page += F("catch(e){s.textContent='Save failed'}}</script>");
   page += buildPageFooter();
   return page;
@@ -1505,6 +1588,7 @@ String buildDisplayConfigPage() {
   page += cfg.type == 1 ? F(" selected") : F("");
   page += F(">SSD1306</option></select>");
   page += F("<label for=\"i2c_address\">I2C Address (hex)</label><input id=\"i2c_address\" maxlength=\"4\" placeholder=\"0x3C\" value=\"");
+  page += F("0x");
   page += String(cfg.i2c_address, HEX);
   page += F("\"><label for=\"rotation_interval\">Page Rotation (sec)</label><input id=\"rotation_interval\" type=\"number\" min=\"1\" max=\"60\" value=\"");
   page += String(cfg.rotation_interval_sec);
@@ -1515,7 +1599,7 @@ String buildDisplayConfigPage() {
   page += F("display_enabled:document.getElementById('display_enabled').checked?'1':'0',display_type:document.getElementById('display_type').value,");
   page += F("i2c_address:document.getElementById('i2c_address').value,rotation_interval:document.getElementById('rotation_interval').value,");
   page += F("brightness:document.getElementById('brightness').value});try{const r=await fetch('/api/display/save',{method:'POST',");
-  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
+  page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':((d.detail||d.error)||'Save failed')}");
   page += F("catch(e){s.textContent='Save failed'}}</script>");
   page += buildPageFooter();
   return page;
@@ -1565,6 +1649,75 @@ String buildSystemConfigPage() {
   return page;
 }
 
+String buildNvsPreviewPage() {
+  String page = buildPageHeader("NVS Preview");
+  page.reserve(9000);
+  page += F("<section class=\"panel\"><h2>NVS Snapshot</h2><div class=\"muted\">Read-only preview of the config currently loaded into runtime. Empty values mean the namespace has no stored value for that field.</div>");
+  page += F("<div class=\"actions\"><button onclick=\"location.reload()\">Reload Preview</button></div></section>");
+
+  page += F("<section class=\"panel\"><h2>Device</h2><div class=\"grid\">");
+  page += F("<div>Device name</div><div>"); page += htmlEscape(String(currentDeviceConfig.device_name)); page += F("</div>");
+  page += F("<div>Hostname</div><div>"); page += htmlEscape(String(currentDeviceConfig.hostname)); page += F("</div>");
+  page += F("<div>Timezone</div><div>"); page += htmlEscape(String(currentDeviceConfig.timezone)); page += F("</div>");
+  page += F("<div>CO2 factor</div><div>"); page += String(currentDeviceConfig.co2_factor_kg_per_kwh); page += F(" kg/kWh</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>MQTT</h2><div class=\"grid\">");
+  page += F("<div>Enabled</div><div>"); page += currentMqttConfig.enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Host</div><div>"); page += htmlEscape(String(currentMqttConfig.host)); page += F("</div>");
+  page += F("<div>Port</div><div>"); page += String(currentMqttConfig.port); page += F("</div>");
+  page += F("<div>Username</div><div>"); page += strlen(currentMqttConfig.username) ? htmlEscape(String(currentMqttConfig.username)) : F("(empty)"); page += F("</div>");
+  page += F("<div>Password</div><div>"); page += strlen(currentMqttConfig.password) ? F("set") : F("(empty)"); page += F("</div>");
+  page += F("<div>Client ID</div><div>"); page += htmlEscape(String(currentMqttConfig.client_id)); page += F("</div>");
+  page += F("<div>Base topic</div><div>"); page += htmlEscape(String(currentMqttConfig.base_topic)); page += F("</div>");
+  page += F("<div>Publish interval</div><div>"); page += String(currentMqttConfig.publish_interval_sec); page += F(" sec</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>Modbus</h2><div class=\"grid\">");
+  page += F("<div>Baudrate</div><div>"); page += String(currentModbusConfig.baudrate); page += F("</div>");
+  page += F("<div>Slave ID</div><div>"); page += String(currentModbusConfig.slave_id); page += F("</div>");
+  page += F("<div>Parity</div><div>"); page += String(currentModbusConfig.parity); page += F("</div>");
+  page += F("<div>Stop bits</div><div>"); page += String(currentModbusConfig.stop_bits); page += F("</div>");
+  page += F("<div>Poll interval</div><div>"); page += String(currentModbusConfig.poll_interval_ms); page += F(" ms</div>");
+  page += F("<div>Timeout</div><div>"); page += String(currentModbusConfig.timeout_ms); page += F(" ms</div>");
+  page += F("<div>Retry count</div><div>"); page += String(currentModbusConfig.retry_count); page += F("</div>");
+  page += F("<div>Meter profile</div><div>"); page += String(currentModbusConfig.meter_profile); page += F("</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>Protection</h2><div class=\"grid\">");
+  page += F("<div>Relay enabled</div><div>"); page += currentProtectionConfig.relay_enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Current limit</div><div>"); page += String(currentProtectionConfig.current_limit_a); page += F(" A</div>");
+  page += F("<div>Trip delay</div><div>"); page += String(currentProtectionConfig.trip_delay_ms); page += F(" ms</div>");
+  page += F("<div>Reset mode</div><div>"); page += currentProtectionConfig.reset_mode == 0 ? F("manual") : F("auto"); page += F("</div>");
+  page += F("<div>Auto-retry</div><div>"); page += currentProtectionConfig.auto_retry_enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Auto-retry delay</div><div>"); page += String(currentProtectionConfig.auto_retry_delay_sec); page += F(" sec</div>");
+  page += F("<div>Trip on stale meter</div><div>"); page += currentProtectionConfig.trip_on_meter_stale ? F("yes") : F("no"); page += F("</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>Display</h2><div class=\"grid\">");
+  page += F("<div>Enabled</div><div>"); page += currentDisplayConfig.enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Type</div><div>"); page += currentDisplayConfig.type == 0 ? F("ST7567") : F("SSD1306"); page += F("</div>");
+  page += F("<div>I2C address</div><div>"); page += formatHexByte(currentDisplayConfig.i2c_address); page += F("</div>");
+  page += F("<div>Page rotation</div><div>"); page += String(currentDisplayConfig.rotation_interval_sec); page += F(" sec</div>");
+  page += F("<div>Brightness</div><div>"); page += String(currentDisplayConfig.brightness); page += F("</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>History</h2><div class=\"grid\">");
+  page += F("<div>Enabled</div><div>"); page += currentHistoryConfig.enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("<div>Days retained</div><div>"); page += String(currentHistoryConfig.days_retained); page += F("</div>");
+  page += F("<div>Flush interval</div><div>"); page += String(currentHistoryConfig.flush_interval_sec); page += F(" sec</div>");
+  page += F("</div></section>");
+
+  page += F("<section class=\"panel\"><h2>System</h2><div class=\"grid\">");
+  page += F("<div>NTP server 1</div><div>"); page += htmlEscape(String(currentSystemConfig.ntp_server1)); page += F("</div>");
+  page += F("<div>NTP server 2</div><div>"); page += htmlEscape(String(currentSystemConfig.ntp_server2)); page += F("</div>");
+  page += F("<div>Debug logging</div><div>"); page += currentSystemConfig.debug_enabled ? F("yes") : F("no"); page += F("</div>");
+  page += F("</div></section>");
+
+  page += buildPageFooter();
+  return page;
+}
+
 // ============================================================================
 // CONFIG PAGE HANDLERS
 // ============================================================================
@@ -1585,7 +1738,6 @@ void handleDeviceConfigPage() {
 
 void handleMqttConfigPage() {
   sendNoCacheHeader();
-  if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildMqttConfigPage());
 }
 
@@ -1617,6 +1769,12 @@ void handleSystemConfigPage() {
   sendNoCacheHeader();
   if (!requireConfigMode()) return;
   configServer.send(200, "text/html", buildSystemConfigPage());
+}
+
+void handleNvsPreviewPage() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+  configServer.send(200, "text/html", buildNvsPreviewPage());
 }
 
 // ============================================================================
@@ -1702,6 +1860,20 @@ void handleMqttConfigSaveApi() {
   }
 }
 
+void handleMqttTestApi() {
+  String error = "unknown";
+  const bool ok = testMqttBrokerConnection(error);
+  sendNoCacheHeader();
+  if (ok) {
+    configServer.send(200, "application/json", "{\"ok\":true,\"result\":\"connected\"}");
+  } else {
+    String body = "{\"ok\":false,\"error\":\"";
+    body += jsonEscape(error);
+    body += F("\"}");
+    configServer.send(200, "application/json", body);
+  }
+}
+
 void handleModbusConfigSaveApi() {
   ModbusConfig cfg = currentModbusConfig;
 
@@ -1739,6 +1911,21 @@ void handleProtectionConfigSaveApi() {
   cfg.auto_retry_delay_sec = configServer.hasArg("auto_retry_delay") ? configServer.arg("auto_retry_delay").toInt() : 300;
   cfg.trip_on_meter_stale = configServer.hasArg("trip_on_stale") && configServer.arg("trip_on_stale") == "1";
 
+  Serial.print("Protection save request: relay_enabled=");
+  Serial.print(cfg.relay_enabled ? "1" : "0");
+  Serial.print(" current_limit=");
+  Serial.print(cfg.current_limit_a);
+  Serial.print(" trip_delay=");
+  Serial.print(cfg.trip_delay_ms);
+  Serial.print(" reset_mode=");
+  Serial.print(cfg.reset_mode);
+  Serial.print(" auto_retry_enabled=");
+  Serial.print(cfg.auto_retry_enabled ? "1" : "0");
+  Serial.print(" auto_retry_delay=");
+  Serial.print(cfg.auto_retry_delay_sec);
+  Serial.print(" trip_on_stale=");
+  Serial.println(cfg.trip_on_meter_stale ? "1" : "0");
+
   bool ok = ConfigManager::saveProtectionConfig(cfg);
   if (ok) {
     currentProtectionConfig = cfg;
@@ -1750,6 +1937,7 @@ void handleProtectionConfigSaveApi() {
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
   } else {
+    Serial.println("Protection save failed in ConfigManager");
     configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
   }
 }
@@ -1759,9 +1947,20 @@ void handleDisplayConfigSaveApi() {
 
   cfg.enabled = configServer.hasArg("display_enabled") && configServer.arg("display_enabled") == "1";
   cfg.type = configServer.hasArg("display_type") ? configServer.arg("display_type").toInt() : 0;
-  cfg.i2c_address = configServer.hasArg("i2c_address") ? (uint8_t)strtol(configServer.arg("i2c_address").c_str(), nullptr, 16) : 0x3C;
+  cfg.i2c_address = configServer.hasArg("i2c_address") ? parseHexByteValue(configServer.arg("i2c_address"), 0x3C) : 0x3C;
   cfg.rotation_interval_sec = configServer.hasArg("rotation_interval") ? configServer.arg("rotation_interval").toInt() : 5;
   cfg.brightness = configServer.hasArg("brightness") ? configServer.arg("brightness").toInt() : 200;
+
+  Serial.print("Display save request: enabled=");
+  Serial.print(cfg.enabled ? "1" : "0");
+  Serial.print(" type=");
+  Serial.print(cfg.type);
+  Serial.print(" i2c=");
+  Serial.print(formatHexByte(cfg.i2c_address));
+  Serial.print(" rotation=");
+  Serial.print(cfg.rotation_interval_sec);
+  Serial.print(" brightness=");
+  Serial.println(cfg.brightness);
 
   bool ok = ConfigManager::saveDisplayConfig(cfg);
   if (ok) {
@@ -1772,6 +1971,7 @@ void handleDisplayConfigSaveApi() {
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
   } else {
+    Serial.println("Display save failed in ConfigManager");
     configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
   }
 }
@@ -1847,10 +2047,16 @@ void handleRelaySetApi() {
   }
   action.toLowerCase();
 
-  if (action.indexOf("set") >= 0 || action == "1" || action == "on" || action == "true") {
+  if (action == "set" || action == "1" || action == "on" || action == "true") {
     requestRelayState(true, "web");
-  } else {
+  } else if (action == "reset" || action == "0" || action == "off" || action == "false") {
     requestRelayState(false, "web");
+  } else {
+    Serial.print("Relay action invalid: ");
+    Serial.println(action);
+    sendNoCacheHeader();
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_action\"}");
+    return;
   }
 
   handleRelayStateApi();
@@ -1862,8 +2068,7 @@ void handleSetupRoot() {
 }
 
 void handleNetworkPage() {
-  if (!requireConfigMode()) return;
-
+  sendNoCacheHeader();
   configServer.send(200, "text/html", buildNetworkPage());
 }
 
@@ -2138,12 +2343,14 @@ void startConfigWebServer() {
   configServer.on("/display", HTTP_GET, handleDisplayConfigPage);
   configServer.on("/history", HTTP_GET, handleHistoryConfigPage);
   configServer.on("/system", HTTP_GET, handleSystemConfigPage);
+  configServer.on("/nvs", HTTP_GET, handleNvsPreviewPage);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
   configServer.on("/api/meter/status", HTTP_GET, handleMeterStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
   configServer.on("/api/device/save", HTTP_POST, handleDeviceConfigSaveApi);
   configServer.on("/api/mqtt/save", HTTP_POST, handleMqttConfigSaveApi);
+  configServer.on("/api/mqtt/test", HTTP_POST, handleMqttTestApi);
   configServer.on("/api/modbus/save", HTTP_POST, handleModbusConfigSaveApi);
   configServer.on("/api/protection/save", HTTP_POST, handleProtectionConfigSaveApi);
   configServer.on("/api/display/save", HTTP_POST, handleDisplayConfigSaveApi);

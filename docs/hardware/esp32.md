@@ -17,7 +17,7 @@ Expected runtime features:
 - JSON API
 - Login/session handling
 - OTA firmware update
-- LittleFS web assets and history storage
+- Optional LittleFS web assets and history storage for later phases
 - NVS configuration storage
 - Relay protection logic
 - LCD display task
@@ -40,7 +40,7 @@ This means the board should be selected for margin, not just minimum boot succes
 | Bluetooth | Not required | Can be disabled |
 | GPIO | 10+ usable pins | Avoid boot strapping pins for critical outputs |
 | OTA | Required | Partition layout must support OTA |
-| Filesystem | Required | LittleFS recommended |
+| Filesystem | Optional | LittleFS only if later UI/history assets justify it |
 
 ## 🆚 ESP32 Series Comparison
 
@@ -67,7 +67,7 @@ Strengths:
 Limitations:
 
 - Internal RAM can become tight with large web UI, TLS, AsyncWebServer, MQTT, and JSON at the same time.
-- 4 MB flash boards can be limiting once OTA and LittleFS are enabled.
+- 4 MB flash boards can be limiting once OTA, larger web assets, and future history storage are enabled.
 - Some dev boards expose boot strapping pins in ways that can cause boot problems.
 
 Verdict:
@@ -216,7 +216,7 @@ Why:
 - Low cost.
 - Sufficient for the first complete firmware version.
 
-Avoid 4 MB flash if possible because OTA plus LittleFS plus a web UI can become tight.
+Avoid 4 MB flash if possible because OTA plus a web UI and future storage features can become tight.
 
 ### 🚀 Best High-Margin Choice
 
@@ -271,7 +271,7 @@ Possible, but constrained.
 Risks:
 
 - OTA partition size may be small.
-- LittleFS space may be limited.
+- LittleFS space may be limited if it is enabled later.
 - Large web assets may not fit comfortably.
 - Future features may require repartitioning.
 
@@ -284,7 +284,7 @@ Recommended minimum.
 Allows:
 
 - OTA partitions
-- LittleFS web assets
+- Optional LittleFS web assets
 - History storage
 - Reasonable firmware growth
 
@@ -392,14 +392,14 @@ The most memory-sensitive features are:
 - OTA upload
 - MQTT payload buffers
 - TLS, if enabled
-- Large LittleFS assets
+- Large optional LittleFS assets
 - Modbus register maps if made dynamic
 
 Memory control rules:
 
 - Keep JSON documents sized explicitly.
 - Avoid building huge strings repeatedly.
-- Stream web assets from LittleFS.
+- Stream web assets from LittleFS only when the UI actually benefits from static file serving.
 - Avoid frequent dynamic allocation in polling loops.
 - Keep MQTT payload generation centralized.
 - Disable Bluetooth if unused.

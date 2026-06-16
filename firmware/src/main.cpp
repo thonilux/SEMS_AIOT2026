@@ -1,7 +1,10 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <U8g2lib.h>
+#include <cmath>
 #include <time.h>
 #include "AppMode.h"
 #include "PinMap.h"
@@ -42,6 +45,60 @@ bool ntpSyncStarted = false;
 bool fallbackApActive = false;
 bool timeSynced = false;
 time_t lastNtpSyncEpoch = 0;
+DeviceConfig currentDeviceConfig;
+MqttConfig currentMqttConfig;
+ModbusConfig currentModbusConfig;
+ProtectionConfig currentProtectionConfig;
+DisplayConfig currentDisplayConfig;
+HistoryConfig currentHistoryConfig;
+SystemConfig currentSystemConfig;
+bool currentModbusConfigLoaded = false;
+bool modbusPortReady = false;
+uint32_t lastModbusPollMs = 0;
+bool mqttConnected = false;
+bool mqttClientConfigured = false;
+uint32_t mqttLastReconnectAttemptMs = 0;
+uint32_t mqttLastPublishMs = 0;
+WiFiClient mqttTransport;
+PubSubClient mqttClient(mqttTransport);
+bool relayRequestedState = false;
+bool relayActualState = false;
+bool relayLockedOut = false;
+uint32_t relayTripUntilMs = 0;
+uint32_t relayOvercurrentSinceMs = 0;
+bool displayReady = false;
+uint32_t displayLastUpdateMs = 0;
+uint8_t displayPage = 0;
+U8G2_ST7567_ENH_DG128064_F_4W_HW_SPI displaySt7567(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI displaySsd1306(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+
+struct HistoryRuntime {
+  bool loaded = false;
+  bool dirty = false;
+  uint32_t dayKey = 0;
+  float baselineEnergy = NAN;
+  float daily[7] = {0, 0, 0, 0, 0, 0, 0};
+  uint32_t lastPersistMs = 0;
+};
+
+HistoryRuntime historyRuntime;
+
+struct MeterSnapshot {
+  bool online = false;
+  bool valid = false;
+  uint32_t lastPollMs = 0;
+  uint32_t lastSuccessMs = 0;
+  uint32_t lastErrorMs = 0;
+  uint16_t lastErrorCode = 0;
+  float voltage = NAN;
+  float current = NAN;
+  float power = NAN;
+  float frequency = NAN;
+  float pf = NAN;
+  float energy = NAN;
+};
+
+MeterSnapshot meterSnapshot;
 WebServer configServer(80);
 
 void startConfigWebServer();
@@ -246,19 +303,823 @@ String getRtcString() {
   return formatDateTime(time(nullptr));
 }
 
+String formatFloatValue(float value, uint8_t decimals, const char* unit = nullptr) {
+  if (isnan(value)) {
+    return String("N/A");
+  }
+
+  char buffer[32] = {};
+  if (unit != nullptr && unit[0] != '\0') {
+    snprintf(buffer, sizeof(buffer), "%.*f %s", decimals, value, unit);
+  } else {
+    snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
+  }
+  return String(buffer);
+}
+
+String getDeviceUid() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  char suffix[7] = {};
+  snprintf(suffix, sizeof(suffix), "%06X", static_cast<uint32_t>(chipId & 0xFFFFFFULL));
+  return String("ESP32-RS485-") + suffix;
+}
+
+String getMqttBaseTopic() {
+  if (currentMqttConfig.base_topic[0] == '\0') {
+    return String("pm1611");
+  }
+  return String(currentMqttConfig.base_topic);
+}
+
+String getMqttClientId() {
+  if (currentMqttConfig.client_id[0] == '\0') {
+    return getDeviceUid();
+  }
+  return String(currentMqttConfig.client_id);
+}
+
+uint32_t currentDayKeyFromEpoch(time_t epoch) {
+  if (epoch <= 0) {
+    return 0;
+  }
+
+  struct tm timeInfo {};
+  if (!localtime_r(&epoch, &timeInfo)) {
+    return 0;
+  }
+
+  return static_cast<uint32_t>((timeInfo.tm_year + 1900) * 10000UL +
+                               (timeInfo.tm_mon + 1) * 100UL +
+                               timeInfo.tm_mday);
+}
+
+String formatDayKey(uint32_t dayKey) {
+  if (dayKey == 0) {
+    return String("unknown");
+  }
+
+  const uint16_t year = dayKey / 10000UL;
+  const uint8_t month = (dayKey / 100UL) % 100;
+  const uint8_t day = dayKey % 100;
+
+  char buffer[16] = {};
+  snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u", year, month, day);
+  return String(buffer);
+}
+
+float currentMeterEnergyDelta() {
+  if (isnan(meterSnapshot.energy)) {
+    return NAN;
+  }
+
+  return meterSnapshot.energy;
+}
+
+void setRelayOutput(bool on) {
+  const bool outputHigh = PinMap::kRelayOutputActiveHigh ? on : !on;
+  digitalWrite(PinMap::kRelayOutput, outputHigh ? HIGH : LOW);
+  relayActualState = on;
+}
+
+void loadHistoryRuntime() {
+  Preferences prefs;
+  if (!prefs.begin("history_rt", true)) {
+    return;
+  }
+
+  historyRuntime.dayKey = prefs.getUInt("day_key", 0);
+  historyRuntime.baselineEnergy = prefs.getFloat("baseline", NAN);
+  for (size_t i = 0; i < 7; i++) {
+    char key[8] = {};
+    snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
+    historyRuntime.daily[i] = prefs.getFloat(key, 0.0f);
+  }
+  prefs.end();
+  historyRuntime.loaded = true;
+}
+
+void saveHistoryRuntime() {
+  Preferences prefs;
+  if (!prefs.begin("history_rt", false)) {
+    return;
+  }
+
+  prefs.putUInt("day_key", historyRuntime.dayKey);
+  prefs.putFloat("baseline", historyRuntime.baselineEnergy);
+  for (size_t i = 0; i < 7; i++) {
+    char key[8] = {};
+    snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
+    prefs.putFloat(key, historyRuntime.daily[i]);
+  }
+  prefs.end();
+  historyRuntime.dirty = false;
+  historyRuntime.lastPersistMs = millis();
+}
+
+String buildEnergyHistoryJson() {
+  String body;
+  body.reserve(128);
+  body += F("[");
+  for (size_t i = 0; i < 7; i++) {
+    if (i > 0) {
+      body += F(",");
+    }
+    body += F("\"");
+    body += String(historyRuntime.daily[i], 3);
+    body += F("\"");
+  }
+  body += F("]");
+  return body;
+}
+
+void updateHistoryRuntime(uint32_t nowMs) {
+  if (!currentHistoryConfig.enabled) {
+    return;
+  }
+
+  if (!historyRuntime.loaded) {
+    loadHistoryRuntime();
+  }
+
+  const float energy = currentMeterEnergyDelta();
+  if (isnan(energy)) {
+    return;
+  }
+
+  const uint32_t dayKey = currentDayKeyFromEpoch(time(nullptr));
+  if (historyRuntime.dayKey == 0 || historyRuntime.baselineEnergy != historyRuntime.baselineEnergy) {
+    historyRuntime.dayKey = dayKey;
+    historyRuntime.baselineEnergy = energy;
+    historyRuntime.daily[0] = 0.0f;
+    historyRuntime.dirty = true;
+  } else if (dayKey != 0 && dayKey != historyRuntime.dayKey) {
+    const float completedDay = energy - historyRuntime.baselineEnergy;
+    for (int i = 6; i > 0; --i) {
+      historyRuntime.daily[i] = historyRuntime.daily[i - 1];
+    }
+    historyRuntime.daily[0] = completedDay > 0 ? completedDay : 0.0f;
+    historyRuntime.dayKey = dayKey;
+    historyRuntime.baselineEnergy = energy;
+    historyRuntime.dirty = true;
+  } else {
+    const float currentDay = energy - historyRuntime.baselineEnergy;
+    historyRuntime.daily[0] = currentDay > 0 ? currentDay : 0.0f;
+    historyRuntime.dirty = true;
+  }
+
+  if (historyRuntime.dirty && nowMs - historyRuntime.lastPersistMs >= 30000UL) {
+    saveHistoryRuntime();
+  }
+}
+
+String buildRelayStateText() {
+  if (!currentProtectionConfig.relay_enabled) {
+    return String("disabled");
+  }
+  if (relayLockedOut) {
+    return String("locked");
+  }
+  return relayActualState ? String("on") : String("off");
+}
+
+bool canTurnRelayOn() {
+  if (!currentProtectionConfig.relay_enabled) {
+    return false;
+  }
+  if (relayLockedOut && millis() < relayTripUntilMs) {
+    return false;
+  }
+  return true;
+}
+
+void requestRelayState(bool on, const char* reason) {
+  if (!currentProtectionConfig.relay_enabled) {
+    setRelayOutput(false);
+    relayRequestedState = false;
+    Serial.println("Relay request ignored: relay disabled");
+    return;
+  }
+
+  if (on && !canTurnRelayOn()) {
+    Serial.print("Relay ON blocked: ");
+    Serial.println(reason);
+    return;
+  }
+
+  relayRequestedState = on;
+  setRelayOutput(on);
+  Serial.print("Relay state set: ");
+  Serial.print(on ? "ON" : "OFF");
+  Serial.print(" reason=");
+  Serial.println(reason);
+}
+
+void tripRelay(const char* reason, uint32_t nowMs) {
+  relayLockedOut = true;
+  relayTripUntilMs = nowMs + static_cast<uint32_t>(currentProtectionConfig.auto_retry_delay_sec) * 1000UL;
+  relayOvercurrentSinceMs = 0;
+  relayRequestedState = false;
+  setRelayOutput(false);
+  Serial.print("Relay tripped: ");
+  Serial.println(reason);
+}
+
+void updateProtectionRuntime(uint32_t nowMs) {
+  if (!currentProtectionConfig.relay_enabled) {
+    if (relayActualState) {
+      setRelayOutput(false);
+    }
+    relayRequestedState = false;
+    relayLockedOut = false;
+    relayTripUntilMs = 0;
+    relayOvercurrentSinceMs = 0;
+    return;
+  }
+
+  if (relayLockedOut) {
+    if (currentProtectionConfig.auto_retry_enabled && nowMs >= relayTripUntilMs) {
+      const bool safeCurrent = isnan(meterSnapshot.current) || meterSnapshot.current <= currentProtectionConfig.current_limit_a;
+      const bool meterOk = meterSnapshot.online;
+      if (safeCurrent && meterOk) {
+        relayLockedOut = false;
+        if (relayRequestedState) {
+          setRelayOutput(true);
+        }
+        Serial.println("Relay auto-retry unlocked");
+      }
+    }
+    if (relayLockedOut) {
+      setRelayOutput(false);
+      return;
+    }
+  }
+
+  const bool meterStale = meterSnapshot.lastSuccessMs > 0 && nowMs - meterSnapshot.lastSuccessMs > currentProtectionConfig.trip_delay_ms;
+  if (currentProtectionConfig.trip_on_meter_stale && !meterSnapshot.online && meterStale) {
+    tripRelay("meter stale", nowMs);
+    return;
+  }
+
+  if (relayRequestedState) {
+    const bool currentValid = !isnan(meterSnapshot.current);
+    if (currentValid && meterSnapshot.current > currentProtectionConfig.current_limit_a) {
+      if (relayOvercurrentSinceMs == 0) {
+        relayOvercurrentSinceMs = nowMs;
+      } else if (nowMs - relayOvercurrentSinceMs >= currentProtectionConfig.trip_delay_ms) {
+        tripRelay("overcurrent", nowMs);
+        return;
+      }
+    } else {
+      relayOvercurrentSinceMs = 0;
+    }
+  } else {
+    relayOvercurrentSinceMs = 0;
+  }
+
+  setRelayOutput(relayRequestedState);
+}
+
+String mqttCommandTopic() {
+  return getMqttBaseTopic() + "/cmd";
+}
+
+String mqttStateTopic() {
+  return getMqttBaseTopic() + "/state";
+}
+
+String mqttTelemetryTopic() {
+  return getMqttBaseTopic() + "/telemetry";
+}
+
+void publishMqttState();
+
+void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
+  String incomingTopic = String(topic ? topic : "");
+  String message;
+  message.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) {
+    message += static_cast<char>(payload[i]);
+  }
+  message.trim();
+  message.toLowerCase();
+
+  Serial.print("MQTT message: ");
+  Serial.print(incomingTopic);
+  Serial.print(" -> ");
+  Serial.println(message);
+
+  if (message.indexOf("set_relay") >= 0 || message.indexOf("\"action\":\"set_relay\"") >= 0) {
+    requestRelayState(true, "mqtt");
+    publishMqttState();
+    return;
+  }
+  if (message.indexOf("reset_relay") >= 0 || message.indexOf("\"action\":\"reset_relay\"") >= 0) {
+    requestRelayState(false, "mqtt");
+    publishMqttState();
+    return;
+  }
+}
+
+void configureMqttClient() {
+  mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+  mqttClient.setBufferSize(1024);
+  mqttClient.setKeepAlive(30);
+  mqttClient.setCallback(mqttMessageCallback);
+  mqttClientConfigured = true;
+}
+
+bool connectMqtt(uint32_t nowMs) {
+  if (!currentMqttConfig.enabled || WiFi.status() != WL_CONNECTED || currentMqttConfig.host[0] == '\0') {
+    mqttConnected = false;
+    return false;
+  }
+
+  if (!mqttClientConfigured) {
+    configureMqttClient();
+  }
+
+  if (mqttClient.connected()) {
+    mqttConnected = true;
+    return true;
+  }
+
+  if (nowMs - mqttLastReconnectAttemptMs < 5000UL) {
+    return false;
+  }
+  mqttLastReconnectAttemptMs = nowMs;
+
+  const String clientId = getMqttClientId();
+  const String willTopic = mqttStateTopic();
+  const String willPayload = F("{\"connected\":false}");
+
+  bool ok = false;
+  if (currentMqttConfig.username[0] != '\0' || currentMqttConfig.password[0] != '\0') {
+    ok = mqttClient.connect(clientId.c_str(),
+                            currentMqttConfig.username,
+                            currentMqttConfig.password,
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  } else {
+    ok = mqttClient.connect(clientId.c_str(),
+                            willTopic.c_str(),
+                            0,
+                            true,
+                            willPayload.c_str());
+  }
+
+  if (!ok) {
+    mqttConnected = false;
+    Serial.print("MQTT connect failed, rc=");
+    Serial.println(mqttClient.state());
+    return false;
+  }
+
+  mqttClient.subscribe(mqttCommandTopic().c_str());
+  mqttClient.subscribe((getMqttBaseTopic() + "/relay/set").c_str());
+  mqttConnected = true;
+  Serial.println("MQTT connected");
+  publishMqttState();
+  return true;
+}
+
+String buildMqttPayload() {
+  String body;
+  body.reserve(512);
+  body += F("{\"uid\":\"");
+  body += getDeviceUid();
+  body += F("\",\"rtc\":\"");
+  body += getRtcString();
+  body += F("\",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"meter_data\":{");
+  body += F("\"voltage\":[\"");
+  body += String(meterSnapshot.voltage, 2);
+  body += F("\",\"V\"],\"current\":[\"");
+  body += String(meterSnapshot.current, 2);
+  body += F("\",\"A\"],\"power\":[\"");
+  body += String(meterSnapshot.power, 2);
+  body += F("\",\"kW\"],\"frequency\":[\"");
+  body += String(meterSnapshot.frequency, 2);
+  body += F("\",\"Hz\"],\"pf\":[\"");
+  body += String(meterSnapshot.pf, 2);
+  body += F("\",\"\"],\"energy\":[\"");
+  body += String(meterSnapshot.energy, 3);
+  body += F("\",\"kWh\"],\"co2\":[\"");
+  const float co2 = meterSnapshot.valid ? (meterSnapshot.energy * currentDeviceConfig.co2_factor_kg_per_kwh) : 0.0f;
+  body += String(co2, 3);
+  body += F("\",\"kg\"]},\"energy_history\":");
+  body += buildEnergyHistoryJson();
+  body += F("}");
+  return body;
+}
+
+void publishMqttState() {
+  if (!mqttClient.connected()) {
+    return;
+  }
+
+  const String payload = buildMqttPayload();
+  mqttClient.publish(mqttStateTopic().c_str(), payload.c_str(), true);
+  mqttClient.publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
+}
+
+void updateMqttRuntime(uint32_t nowMs) {
+  if (!currentMqttConfig.enabled) {
+    mqttConnected = false;
+    if (mqttClient.connected()) {
+      mqttClient.disconnect();
+    }
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    mqttConnected = false;
+    return;
+  }
+
+  if (!mqttClientConfigured) {
+    configureMqttClient();
+  } else {
+    mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+  }
+
+  if (!mqttClient.connected()) {
+    connectMqtt(nowMs);
+  } else {
+    mqttClient.loop();
+    mqttConnected = true;
+  }
+
+  if (mqttClient.connected() && nowMs - mqttLastPublishMs >= static_cast<uint32_t>(currentMqttConfig.publish_interval_sec) * 1000UL) {
+    mqttLastPublishMs = nowMs;
+    publishMqttState();
+  }
+}
+
+U8G2* getActiveDisplayDriver() {
+  if (currentDisplayConfig.type == 1) {
+    return &displaySsd1306;
+  }
+  return &displaySt7567;
+}
+
+void initDisplayRuntime() {
+  if (!currentDisplayConfig.enabled) {
+    displayReady = false;
+    return;
+  }
+
+  U8G2* driver = getActiveDisplayDriver();
+  if (driver == nullptr) {
+    displayReady = false;
+    return;
+  }
+
+  driver->begin();
+  driver->setContrast(currentDisplayConfig.brightness);
+  displayReady = true;
+  Serial.println("LCD display ready");
+}
+
+void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
+  driver->clearBuffer();
+  driver->setFont(u8g2_font_6x12_tf);
+
+  switch (pageIndex % 4) {
+    case 0:
+      driver->drawStr(0, 12, "PM1611 RS485");
+      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.voltage, 1, "V").c_str());
+      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.current, 1, "A").c_str());
+      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.power, 1, "kW").c_str());
+      break;
+    case 1:
+      driver->drawStr(0, 12, "Energy / Power");
+      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.energy, 3, "kWh").c_str());
+      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.frequency, 1, "Hz").c_str());
+      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.pf, 2, "PF").c_str());
+      break;
+    case 2:
+      driver->drawStr(0, 12, "Network / MQTT");
+      driver->drawStr(0, 28, wifiConnected ? "STA connected" : "STA offline");
+      driver->drawStr(0, 42, mqttConnected ? "MQTT connected" : "MQTT offline");
+      driver->drawStr(0, 56, getMqttBaseTopic().c_str());
+      break;
+    default:
+      driver->drawStr(0, 12, "Relay / Fault");
+      driver->drawStr(0, 28, buildRelayStateText().c_str());
+      driver->drawStr(0, 42, relayLockedOut ? "lockout active" : "ready");
+      driver->drawStr(0, 56, meterSnapshot.online ? "meter ok" : "meter off");
+      break;
+  }
+
+  driver->sendBuffer();
+}
+
+void updateDisplayRuntime(uint32_t nowMs) {
+  if (!currentDisplayConfig.enabled) {
+    return;
+  }
+
+  if (!displayReady) {
+    initDisplayRuntime();
+    if (!displayReady) {
+      return;
+    }
+  }
+
+  const uint32_t intervalMs = static_cast<uint32_t>(currentDisplayConfig.rotation_interval_sec) * 1000UL;
+  if (intervalMs > 0 && nowMs - displayLastUpdateMs < intervalMs) {
+    return;
+  }
+
+  displayLastUpdateMs = nowMs;
+  displayPage = (displayPage + 1) % 4;
+  U8G2* driver = getActiveDisplayDriver();
+  if (driver != nullptr) {
+    drawDisplayPage(driver, displayPage);
+  }
+}
+
+void loadFeatureRuntime() {
+  loadHistoryRuntime();
+  setRelayOutput(false);
+  relayRequestedState = false;
+  relayActualState = false;
+  relayLockedOut = false;
+  relayTripUntilMs = 0;
+  relayOvercurrentSinceMs = 0;
+}
+
+void resetMeterSnapshot() {
+  meterSnapshot.online = false;
+  meterSnapshot.valid = false;
+  meterSnapshot.voltage = NAN;
+  meterSnapshot.current = NAN;
+  meterSnapshot.power = NAN;
+  meterSnapshot.frequency = NAN;
+  meterSnapshot.pf = NAN;
+  meterSnapshot.energy = NAN;
+}
+
+uint16_t modbusCrc16(const uint8_t* data, size_t length) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if (crc & 0x0001) {
+        crc = (crc >> 1) ^ 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+uint32_t serialConfigFromModbus(const ModbusConfig& cfg) {
+  if (cfg.parity == 0 && cfg.stop_bits == 1) return SERIAL_8E1;
+  if (cfg.parity == 0 && cfg.stop_bits == 2) return SERIAL_8E2;
+  if (cfg.parity == 1 && cfg.stop_bits == 1) return SERIAL_8O1;
+  if (cfg.parity == 1 && cfg.stop_bits == 2) return SERIAL_8O2;
+  if (cfg.parity == 2 && cfg.stop_bits == 2) return SERIAL_8N2;
+  return SERIAL_8N1;
+}
+
+void applyModbusPortConfig(const ModbusConfig& cfg) {
+  const bool needsInit = !modbusPortReady ||
+                         currentModbusConfig.baudrate != cfg.baudrate ||
+                         currentModbusConfig.parity != cfg.parity ||
+                         currentModbusConfig.stop_bits != cfg.stop_bits;
+  if (!needsInit) {
+    Serial2.setTimeout(cfg.timeout_ms);
+    currentModbusConfig = cfg;
+    return;
+  }
+
+  Serial2.end();
+  delay(20);
+  Serial2.begin(cfg.baudrate, serialConfigFromModbus(cfg), PinMap::kRs485Rx, PinMap::kRs485Tx);
+  currentModbusConfig = cfg;
+  currentModbusConfigLoaded = true;
+  modbusPortReady = true;
+
+  Serial.print("Modbus UART2 ready: baud=");
+  Serial.print(cfg.baudrate);
+  Serial.print(" slave=");
+  Serial.print(cfg.slave_id);
+  Serial.print(" parity=");
+  Serial.print(cfg.parity);
+  Serial.print(" stop_bits=");
+  Serial.println(cfg.stop_bits);
+  Serial2.setTimeout(cfg.timeout_ms);
+  currentModbusConfig = cfg;
+}
+
+bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
+  exceptionCode = 0;
+  if (quantity == 0 || quantity > 64 || response == nullptr || responseLen < quantity * 2) {
+    return false;
+  }
+
+  uint8_t request[8];
+  request[0] = slaveId;
+  request[1] = 0x03;
+  request[2] = static_cast<uint8_t>(startRegister >> 8);
+  request[3] = static_cast<uint8_t>(startRegister & 0xFF);
+  request[4] = static_cast<uint8_t>(quantity >> 8);
+  request[5] = static_cast<uint8_t>(quantity & 0xFF);
+  const uint16_t crc = modbusCrc16(request, 6);
+  request[6] = static_cast<uint8_t>(crc & 0xFF);
+  request[7] = static_cast<uint8_t>(crc >> 8);
+
+  while (Serial2.available() > 0) {
+    Serial2.read();
+  }
+
+  Serial2.write(request, sizeof(request));
+  Serial2.flush();
+
+  const uint32_t deadline = millis() + timeoutMs;
+  while (Serial2.available() < 3 && millis() < deadline) {
+    delay(1);
+  }
+  if (Serial2.available() < 3) {
+    return false;
+  }
+
+  uint8_t header[3];
+  if (Serial2.readBytes(header, sizeof(header)) != sizeof(header)) {
+    return false;
+  }
+
+  if (header[0] != slaveId) {
+    return false;
+  }
+
+  if (header[1] & 0x80) {
+    while (Serial2.available() < 2 && millis() < deadline) {
+      delay(1);
+    }
+    if (Serial2.available() < 2) {
+      return false;
+    }
+    uint8_t exceptionCrc[2];
+    if (Serial2.readBytes(exceptionCrc, sizeof(exceptionCrc)) != sizeof(exceptionCrc)) {
+      return false;
+    }
+    exceptionCode = header[2];
+    return false;
+  }
+
+  const uint8_t byteCount = header[2];
+  if (byteCount != quantity * 2 || byteCount > responseLen) {
+    return false;
+  }
+
+  while (Serial2.available() < byteCount + 2 && millis() < deadline) {
+    delay(1);
+  }
+  if (Serial2.available() < byteCount + 2) {
+    return false;
+  }
+
+  if (Serial2.readBytes(response, byteCount) != byteCount) {
+    return false;
+  }
+
+  uint8_t crcBytes[2];
+  if (Serial2.readBytes(crcBytes, sizeof(crcBytes)) != sizeof(crcBytes)) {
+    return false;
+  }
+
+  uint8_t frame[3 + 64];
+  frame[0] = header[0];
+  frame[1] = header[1];
+  frame[2] = header[2];
+  memcpy(frame + 3, response, byteCount);
+  const uint16_t expectedCrc = modbusCrc16(frame, 3 + byteCount);
+  const uint16_t receivedCrc = static_cast<uint16_t>(crcBytes[0]) | (static_cast<uint16_t>(crcBytes[1]) << 8);
+  return expectedCrc == receivedCrc;
+}
+
+float decodeFloat32BigEndian(const uint8_t* data) {
+  const uint32_t bits = (static_cast<uint32_t>(data[0]) << 24) |
+                        (static_cast<uint32_t>(data[1]) << 16) |
+                        (static_cast<uint32_t>(data[2]) << 8) |
+                        static_cast<uint32_t>(data[3]);
+  float value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+bool readSchneiderFloat(uint8_t slaveId, uint16_t startRegister, float& value, uint32_t timeoutMs) {
+  uint8_t buffer[4];
+  uint16_t exceptionCode = 0;
+  if (!modbusReadHoldingRegisters(slaveId, startRegister, 2, buffer, sizeof(buffer), exceptionCode, timeoutMs)) {
+    return false;
+  }
+
+  value = decodeFloat32BigEndian(buffer);
+  return true;
+}
+
+void pollModbusMeter(uint32_t nowMs) {
+  const ModbusConfig cfg = currentModbusConfigLoaded ? currentModbusConfig : ConfigManager::loadModbusConfig();
+  currentModbusConfig = cfg;
+  currentModbusConfigLoaded = true;
+
+  if (currentMode != AppMode::Normal || WiFi.status() != WL_CONNECTED) {
+    resetMeterSnapshot();
+    return;
+  }
+
+  applyModbusPortConfig(cfg);
+
+  if (nowMs - lastModbusPollMs < cfg.poll_interval_ms) {
+    return;
+  }
+  lastModbusPollMs = nowMs;
+
+  meterSnapshot.lastPollMs = nowMs;
+  meterSnapshot.online = false;
+  meterSnapshot.valid = false;
+
+  const uint8_t slaveId = cfg.slave_id == 0 ? 1 : cfg.slave_id;
+  const uint16_t voltageReg = 3027;
+  const uint16_t currentReg = 2999;
+  const uint16_t powerReg = 3053;
+  const uint16_t frequencyReg = 3109;
+  const uint16_t energyReg = 2675;
+
+  float voltage = NAN;
+  float current = NAN;
+  float power = NAN;
+  float frequency = NAN;
+  float energy = NAN;
+
+  bool ok = true;
+  ok = ok && readSchneiderFloat(slaveId, voltageReg, voltage, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, currentReg, current, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, powerReg, power, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, frequencyReg, frequency, cfg.timeout_ms);
+  ok = ok && readSchneiderFloat(slaveId, energyReg, energy, cfg.timeout_ms);
+
+  if (ok) {
+    meterSnapshot.online = true;
+    meterSnapshot.valid = true;
+    meterSnapshot.lastSuccessMs = nowMs;
+    meterSnapshot.voltage = voltage;
+    meterSnapshot.current = current;
+    meterSnapshot.power = power;
+    meterSnapshot.frequency = frequency;
+    meterSnapshot.energy = energy;
+    Serial.print("Modbus meter ok: V=");
+    Serial.print(voltage, 2);
+    Serial.print(" I=");
+    Serial.print(current, 2);
+    Serial.print(" P=");
+    Serial.print(power, 2);
+    Serial.print(" F=");
+    Serial.print(frequency, 2);
+    Serial.print(" E=");
+    Serial.println(energy, 3);
+  } else {
+    meterSnapshot.lastErrorMs = nowMs;
+    meterSnapshot.lastErrorCode = 1;
+    meterSnapshot.online = false;
+    meterSnapshot.valid = false;
+    Serial.println("Modbus meter read failed");
+  }
+
+  updateHistoryRuntime(nowMs);
+}
+
 void startNtpSync() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("NTP skipped: WiFi is not connected");
     return;
   }
 
-  Serial.print("NTP sync started: ");
-  Serial.print(kNtpServer1);
-  Serial.print(", ");
-  Serial.println(kNtpServer2);
+  const char* timezone = currentDeviceConfig.timezone[0] != '\0' ? currentDeviceConfig.timezone : kNtpTimezone;
+  const char* server1 = currentSystemConfig.ntp_server1[0] != '\0' ? currentSystemConfig.ntp_server1 : kNtpServer1;
+  const char* server2 = currentSystemConfig.ntp_server2[0] != '\0' ? currentSystemConfig.ntp_server2 : kNtpServer2;
 
-  configTzTime(kNtpTimezone, kNtpServer1, kNtpServer2);
+  Serial.print("NTP sync started: ");
+  Serial.print(server1);
+  Serial.print(", ");
+  Serial.println(server2);
+
+  configTzTime(timezone, server1, server2);
   ntpSyncStarted = true;
+}
+
+void restartNtpSync() {
+  ntpSyncStarted = false;
+  timeSynced = false;
+  lastNtpSyncEpoch = 0;
+  startNtpSync();
 }
 
 void checkNtpSync() {
@@ -472,190 +1333,7 @@ void printWebUiAddresses() {
     Serial.println("/");
   }
 }
-
-String buildPageHeader(const String& title) {
-  String page;
-  page.reserve(2300);
-  page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
-  page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-  page += F("<title>");
-  page += htmlEscape(title);
-  page += F("</title><style>");
-  page += F(":root{font-family:Inter,Segoe UI,Arial,sans-serif;color:#17202a;background:#f4f7f9}");
-  page += F("body{margin:0}.bar{background:#111827;color:white;padding:14px 18px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}");
-  page += F("nav{display:flex;gap:8px}nav a{color:#d1fae5;text-decoration:none;font-weight:700;padding:7px 9px;border-radius:6px}nav a:hover{background:#1f2937}");
-  page += F(".wrap{max-width:760px;margin:0 auto;padding:18px}.panel{background:white;border:1px solid #d9e1e8;border-radius:8px;padding:16px;margin:14px 0}");
-  page += F("h1{font-size:21px;margin:0}.muted{color:#667085}.grid{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}");
-  page += F("label{font-weight:700;display:block;margin:12px 0 6px}input{box-sizing:border-box;width:100%;border:1px solid #cbd5e1;border-radius:6px;padding:10px;font-size:15px}");
-  page += F(".actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}button{background:#0f766e;color:white;border:0;border-radius:6px;padding:10px 13px;font-weight:700}");
-  page += F("button:disabled{background:#94a3b8}.net{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #e5e7eb;padding:10px 0}");
-  page += F(".ssid{font-weight:700;overflow-wrap:anywhere}.tag{font-size:12px;color:#475467;background:#eef2f6;border-radius:999px;padding:2px 8px}.use{background:#334155;padding:7px 10px}");
-  page += F(".metric{margin:12px 0}.metricTop{display:flex;justify-content:space-between;gap:10px}.track{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}.fill{height:100%;background:#0f766e;border-radius:999px}.warn{background:#d97706}.bad{background:#dc2626}");
-  page += F(".menuBtn{display:none;background:#1f2937;color:white;border:1px solid #374151;border-radius:6px;padding:8px 10px;font-size:18px}");
-  page += F("@media(max-width:560px){.grid{grid-template-columns:1fr}.net{display:block}.top{display:block}.menuBtn{display:block;margin-top:10px}nav{display:none;flex-direction:column;margin-top:10px}nav.open{display:flex}}");
-  page += F("</style></head><body><div class=\"bar\"><div class=\"top\"><div><h1>");
-  page += htmlEscape(title);
-  page += F("</h1><div class=\"muted\">PM1611 RS485 Reader</div></div>");
-  page += F("<button class=\"menuBtn\" onclick=\"toggleMenu()\">☰</button>");
-  page += F("<nav id=\"mainNav\"><a href=\"/\">🏠 Home</a>");
-
-  if (currentMode == AppMode::Config || configApStarted) {
-      page += F("<a href=\"/network\">📶 Network</a>");
-      page += F("<a href=\"/device\">⚙ Device</a>");
-      page += F("<a href=\"/mqtt\">📡 MQTT</a>");
-      page += F("<a href=\"/modbus\">🔌 Modbus</a>");
-      page += F("<a href=\"/protection\">🛡 Protection</a>");
-      page += F("<a href=\"/display\">🖥 Display</a>");
-      page += F("<a href=\"/history\">📊 History</a>");
-      page += F("<a href=\"/system\">🔧 System</a>");
-  }
-
-  page += F("<a href=\"#\" onclick=\"rebootDevice();return false;\">🔄 Reboot</a>");
-  page += F("</nav></div></div>");
-  page += F("<main class=\"wrap\">");
-  return page;
-}
-
-String buildPageFooter() {
-  // return String(F("<script>function toggleMenu(){document.getElementById('mainNav').classList.toggle('open')}</script></main></body></html>"));
-  return String(F(
-    "<script>"
-    "function toggleMenu(){document.getElementById('mainNav').classList.toggle('open')}"
-    "async function rebootDevice(){"
-    "if(!confirm('Reboot device?')) return;"
-    "await fetch('/api/reboot',{method:'POST'}).catch(()=>{});"
-    "}"
-    "</script>"
-    "</main></body></html>"
-    ));
-}
-
-String buildHomePage() {
-  const String apSsid = getConfigApSsid();
-  const uint8_t heapPercent = getHeapUsedPercent();
-  const uint8_t sketchPercent = getSketchUsedPercent();
-  const uint8_t wifiPercent = getWifiQualityPercent();
-  String page = buildPageHeader("Home");
-  page.reserve(6500);
-  page += F("<section class=\"panel\"><h2>Status</h2><div class=\"grid\">");
-  page += F("<div>Firmware</div><div>");
-  page += FW_VERSION;
-  page += F("</div><div>Mode</div><div>");
-  page += appModeToString(currentMode);
-  page += F("</div><div>AP SSID</div><div>");
-  page += apSsid;
-  page += F("</div><div>AP IP</div><div>");
-  page += WiFi.softAPIP().toString();
-  page += F("</div><div>Saved WiFi</div><div>");
-  page += hasSavedWifi ? htmlEscape(savedWifiSsid) : F("(none)");
-  page += F("</div><div>STA status</div><div id=\"sta_status\">");
-  page += wifiStatusToString(WiFi.status());
-  page += F("</div><div>STA IP</div><div id=\"sta_ip\">");
-  page += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : F("-");
-  page += F("</div><div>RTC</div><div id=\"rtc\">");
-  page += htmlEscape(getRtcString());
-  page += F("</div><div>Last NTP Sync</div><div id=\"last_ntp\">");
-  page += timeSynced ? htmlEscape(formatDateTime(lastNtpSyncEpoch)) : F("-");
-  page += F("</div><div>Uptime</div><div id=\"uptime\">");
-  page += formatUptime(millis());
-  page += F("</div><div>CPU</div><div>");
-  page += String(ESP.getCpuFreqMHz());
-  page += F(" MHz</div><div>WiFi RSSI</div><div id=\"wifi_rssi\">");
-  if (WiFi.status() == WL_CONNECTED) {
-    page += String(getWifiRssi());
-    page += F(" dBm");
-  } else {
-    page += F("-");
-  }
-  page += F("</div><div>MAC suffix</div><div>");
-  page += getMacSuffix();
-  page += F("</div><div>Free heap</div><div id=\"heap\">");
-  page += formatBytesHuman(ESP.getFreeHeap());
-  page += F(" (");
-  page += String(ESP.getFreeHeap());
-  page += F(" bytes)</div></div></section>");
-  page += F("<section class=\"panel\"><h2>Resources</h2>");
-  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>RAM Used</strong><span id=\"heap_pct\">");
-  page += String(heapPercent);
-  page += F("% · ");
-  page += formatBytesHuman(getHeapUsedBytes());
-  page += F(" / ");
-  page += formatBytesHuman(getHeapTotalBytes());
-  page += F("</span></div><div class=\"track\"><div id=\"heap_fill\" class=\"fill ");
-  page += heapPercent >= 85 ? F("bad") : heapPercent >= 70 ? F("warn") : F("");
-  page += F("\" style=\"width:");
-  page += String(heapPercent);
-  page += F("%\"></div></div></div>");
-  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>Firmware Slot Used</strong><span id=\"sketch_pct\">");
-  page += String(sketchPercent);
-  page += F("% · ");
-  page += formatBytesHuman(ESP.getSketchSize());
-  page += F(" / ");
-  page += formatBytesHuman(getSketchCapacityBytes());
-  page += F("</span></div><div class=\"track\"><div id=\"sketch_fill\" class=\"fill ");
-  page += sketchPercent >= 85 ? F("bad") : sketchPercent >= 70 ? F("warn") : F("");
-  page += F("\" style=\"width:");
-  page += String(sketchPercent);
-  page += F("%\"></div></div></div>");
-  page += F("<div class=\"metric\"><div class=\"metricTop\"><strong>WiFi Signal</strong><span id=\"wifi_pct\">");
-  page += WiFi.status() == WL_CONNECTED ? String(wifiPercent) + F("% · ") + String(getWifiRssi()) + F(" dBm") : String("not connected");
-  page += F("</span></div><div class=\"track\"><div id=\"wifi_fill\" class=\"fill ");
-  page += wifiPercent <= 30 ? F("bad") : wifiPercent <= 55 ? F("warn") : F("");
-  page += F("\" style=\"width:");
-  page += String(wifiPercent);
-  page += F("%\"></div></div></div></section>");
-  // page += F("<section class=\"panel\"><h2>Quick Actions</h2><div class=\"actions\"><a href=\"/network\"><button>Network Settings</button></a><button onclick=\"rebootDevice()\">Reboot</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
-  // page += F("<script src=\"https://code.jquery.com/jquery-3.7.1.min.js\" integrity=\"sha256-3fpL0Lpn0lLDDWl12gXoK3l4U23j+gZM8x6Y1kubUFU=\" crossorigin=\"anonymous\"></script>");
-  page += F("<script>");
-  page += F("async function refreshStatus(){try{const r=await fetch('/api/status?_='+Date.now(),{cache:'no-store'});const d=await r.json();");
-  page += F("document.getElementById('sta_status').textContent=d.sta_status||'-';");
-  page += F("document.getElementById('sta_ip').textContent=d.sta_ip||'-';");
-  page += F("document.getElementById('rtc').textContent=d.rtc||'-';");
-  page += F("document.getElementById('last_ntp').textContent=d.last_ntp_sync||'-';");
-  page += F("document.getElementById('uptime').textContent=d.uptime_text||'-';");
-  page += F("document.getElementById('wifi_rssi').textContent=d.wifi_rssi<=-120?'-':d.wifi_rssi+' dBm';");
-  page += F("document.getElementById('heap').textContent=(100-d.heap_used_percent)+'% free';");
-  page += F("document.getElementById('heap_pct').textContent=d.heap_used_percent+'% · '+d.heap_used_human+' / '+d.heap_total_human;");
-  page += F("document.getElementById('heap_fill').style.width=d.heap_used_percent+'%';");
-  page += F("document.getElementById('sketch_pct').textContent=d.sketch_used_percent+'% · '+d.sketch_size_human+' / '+d.sketch_capacity_human;");
-  page += F("document.getElementById('sketch_fill').style.width=d.sketch_used_percent+'%';");
-  page += F("document.getElementById('wifi_pct').textContent=d.wifi_quality_percent+'% · '+(d.wifi_rssi<=-120?'-':d.wifi_rssi+' dBm');");
-  page += F("document.getElementById('wifi_fill').style.width=d.wifi_quality_percent+'%';");
-  page += F("}catch(e){console.log('refreshStatus failed',e)}}");
-  page += F("document.addEventListener('DOMContentLoaded',function(){refreshStatus();setInterval(refreshStatus,1000);});");
-  page += F("</script>");
-  page += buildPageFooter();
-  return page;
-}
-
-String buildNetworkPage() {
-  String page = buildPageHeader("Network");
-  page.reserve(5600);
-  page += F("<section class=\"panel\"><h2>WiFi Nearby</h2>");
-  page += F("<button id=\"scanBtn\" onclick=\"scanWifi()\">Scan WiFi</button>");
-  page += F("<p id=\"scanState\" class=\"muted\">Ready.</p><div id=\"networks\"></div></section>");
-  page += F("<section class=\"panel\"><h2>WiFi Connection</h2>");
-  page += F("<label for=\"ssid\">SSID</label><input id=\"ssid\" maxlength=\"32\" placeholder=\"WiFi SSID\" value=\"");
-  page += htmlEscape(savedWifiSsid);
-  page += F("\"><label for=\"password\">Password</label><input id=\"password\" type=\"password\" maxlength=\"64\" placeholder=\"WiFi password\">");
-  page += F("<div class=\"actions\"><button onclick=\"saveWifi()\">Save WiFi</button><button onclick=\"rebootDevice()\">Reboot</button></div>");
-  page += F("<p id=\"saveState\" class=\"muted\">Saved credentials apply after reboot.</p></section></main>");
-  page += F("<script>");
-  page += F("async function scanWifi(){const b=document.getElementById('scanBtn'),s=document.getElementById('scanState'),n=document.getElementById('networks');");
-  page += F("b.disabled=true;s.textContent='Scanning...';n.innerHTML='';try{const r=await fetch('/api/wifi/scan');const d=await r.json();");
-  page += F("s.textContent=d.count+' network(s) found';n.innerHTML=d.networks.map(x=>'<div class=\"net\"><div><div class=\"ssid\">'+esc(x.ssid||'(hidden)')+'</div><div class=\"muted\">CH '+x.channel+' · '+x.encryption+'</div></div><div><span class=\"tag\">'+x.rssi+' dBm</span> <button class=\"use\" onclick=\"useSsid(\\''+escAttr(x.ssid)+'\\')\">Use</button></div></div>').join('');");
-  page += F("}catch(e){s.textContent='Scan failed';}b.disabled=false}");
-  page += F("function useSsid(v){document.getElementById('ssid').value=v;document.getElementById('password').focus()}");
-  page += F("async function saveWifi(){const s=document.getElementById('saveState'),ssid=document.getElementById('ssid').value.trim(),password=document.getElementById('password').value;");
-  page += F("if(!ssid){s.textContent='SSID is required';return}const body=new URLSearchParams({ssid,password});s.textContent='Saving...';");
-  page += F("try{const r=await fetch('/api/wifi/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved. Reboot to connect.':(d.error||'Save failed')}catch(e){s.textContent='Save failed'}}");
-  page += F("async function rebootDevice(){document.getElementById('saveState').textContent='Rebooting...';await fetch('/api/reboot',{method:'POST'}).catch(()=>{});}");
-  page += F("function esc(v){return String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]))}");
-  page += F("function escAttr(v){return String(v).replace(/[\\\\']/g,m=>'\\\\'+m).replace(/[\\r\\n]/g,'')}");
-  page += F("</script>");
-  page += buildPageFooter();
-  return page;
-}
+#include "WebUiPages.inc"
 
 // ============================================================================
 // CONFIG PAGES - Device, MQTT, Modbus, Protection, Display, History, System
@@ -665,7 +1343,7 @@ String buildNetworkPage() {
 // ============================================================================
 
 String buildDeviceConfigPage() {
-  DeviceConfig cfg = ConfigManager::loadDeviceConfig();
+  const DeviceConfig& cfg = currentDeviceConfig;
   String page = buildPageHeader("Device Configuration");
   page.reserve(4000);
   page += F("<section class=\"panel\"><h2>Device Settings</h2>");
@@ -690,7 +1368,7 @@ String buildDeviceConfigPage() {
 }
 
 String buildMqttConfigPage() {
-  MqttConfig cfg = ConfigManager::loadMqttConfig();
+  const MqttConfig& cfg = currentMqttConfig;
   String page = buildPageHeader("MQTT Configuration");
   page.reserve(5000);
   page += F("<section class=\"panel\"><h2>MQTT Broker Settings</h2>");
@@ -725,7 +1403,7 @@ String buildMqttConfigPage() {
 }
 
 String buildModbusConfigPage() {
-  ModbusConfig cfg = ConfigManager::loadModbusConfig();
+  const ModbusConfig& cfg = currentModbusConfig;
   String page = buildPageHeader("Modbus Configuration");
   page.reserve(4500);
   page += F("<section class=\"panel\"><h2>Modbus RTU Settings</h2>");
@@ -761,9 +1439,9 @@ String buildModbusConfigPage() {
   page += String(cfg.retry_count);
   page += F("\"><label for=\"modbus_profile\">Meter Profile</label><select id=\"modbus_profile\"><option value=\"0\"");
   page += cfg.meter_profile == 0 ? F(" selected") : F("");
-  page += F(">PM2230</option><option value=\"1\"");
+  page += F(">Schneider EM6400 / PM2xxx</option><option value=\"1\"");
   page += cfg.meter_profile == 1 ? F(" selected") : F("");
-  page += F(">PM1611</option></select>");
+  page += F(">Generic float32</option></select>");
   page += F("<div class=\"actions\"><button onclick=\"saveModbusConfig()\">Save Modbus Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
   page += F("<script>async function saveModbusConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id:document.getElementById('modbus_slave_id').value,");
@@ -777,7 +1455,7 @@ String buildModbusConfigPage() {
 }
 
 String buildProtectionConfigPage() {
-  ProtectionConfig cfg = ConfigManager::loadProtectionConfig();
+  const ProtectionConfig& cfg = currentProtectionConfig;
   String page = buildPageHeader("Protection Configuration");
   page.reserve(4000);
   page += F("<section class=\"panel\"><h2>Relay Protection Settings</h2>");
@@ -814,7 +1492,7 @@ String buildProtectionConfigPage() {
 }
 
 String buildDisplayConfigPage() {
-  DisplayConfig cfg = ConfigManager::loadDisplayConfig();
+  const DisplayConfig& cfg = currentDisplayConfig;
   String page = buildPageHeader("Display Configuration");
   page.reserve(3500);
   page += F("<section class=\"panel\"><h2>LCD Display Settings</h2>");
@@ -844,7 +1522,7 @@ String buildDisplayConfigPage() {
 }
 
 String buildHistoryConfigPage() {
-  HistoryConfig cfg = ConfigManager::loadHistoryConfig();
+  const HistoryConfig& cfg = currentHistoryConfig;
   String page = buildPageHeader("History Configuration");
   page.reserve(3000);
   page += F("<section class=\"panel\"><h2>Energy History Settings</h2>");
@@ -866,7 +1544,7 @@ String buildHistoryConfigPage() {
 }
 
 String buildSystemConfigPage() {
-  SystemConfig cfg = ConfigManager::loadSystemConfig();
+  const SystemConfig& cfg = currentSystemConfig;
   String page = buildPageHeader("System Configuration");
   page.reserve(3500);
   page += F("<section class=\"panel\"><h2>System Settings</h2>");
@@ -945,8 +1623,7 @@ void handleSystemConfigPage() {
 // CONFIG API HANDLERS
 // ============================================================================
 void handleDeviceConfigSaveApi() {
-  DeviceConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  DeviceConfig cfg = currentDeviceConfig;
 
   if (configServer.hasArg("device_name")) {
     String name = configServer.arg("device_name");
@@ -965,6 +1642,10 @@ void handleDeviceConfigSaveApi() {
   }
 
   bool ok = ConfigManager::saveDeviceConfig(cfg);
+  if (ok) {
+    currentDeviceConfig = cfg;
+    restartNtpSync();
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -974,8 +1655,7 @@ void handleDeviceConfigSaveApi() {
 }
 
 void handleMqttConfigSaveApi() {
-  MqttConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  MqttConfig cfg = currentMqttConfig;
 
   if (configServer.hasArg("mqtt_host")) {
     String host = configServer.arg("mqtt_host");
@@ -1006,6 +1686,14 @@ void handleMqttConfigSaveApi() {
   cfg.enabled = configServer.hasArg("mqtt_enabled") && configServer.arg("mqtt_enabled") == "1";
 
   bool ok = ConfigManager::saveMqttConfig(cfg);
+  if (ok) {
+    currentMqttConfig = cfg;
+    mqttClientConfigured = false;
+    if (mqttClient.connected()) {
+      mqttClient.disconnect();
+    }
+    mqttConnected = false;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1015,8 +1703,7 @@ void handleMqttConfigSaveApi() {
 }
 
 void handleModbusConfigSaveApi() {
-  ModbusConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  ModbusConfig cfg = currentModbusConfig;
 
   cfg.baudrate = configServer.hasArg("modbus_baudrate") ? configServer.arg("modbus_baudrate").toInt() : 19200;
   cfg.slave_id = configServer.hasArg("modbus_slave_id") ? configServer.arg("modbus_slave_id").toInt() : 1;
@@ -1028,6 +1715,11 @@ void handleModbusConfigSaveApi() {
   cfg.meter_profile = configServer.hasArg("modbus_profile") ? configServer.arg("modbus_profile").toInt() : 0;
 
   bool ok = ConfigManager::saveModbusConfig(cfg);
+  if (ok) {
+    currentModbusConfig = cfg;
+    currentModbusConfigLoaded = true;
+    modbusPortReady = false;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1037,8 +1729,7 @@ void handleModbusConfigSaveApi() {
 }
 
 void handleProtectionConfigSaveApi() {
-  ProtectionConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  ProtectionConfig cfg = currentProtectionConfig;
 
   cfg.relay_enabled = configServer.hasArg("relay_enabled") && configServer.arg("relay_enabled") == "1";
   cfg.current_limit_a = configServer.hasArg("current_limit") ? configServer.arg("current_limit").toInt() : 16;
@@ -1049,6 +1740,12 @@ void handleProtectionConfigSaveApi() {
   cfg.trip_on_meter_stale = configServer.hasArg("trip_on_stale") && configServer.arg("trip_on_stale") == "1";
 
   bool ok = ConfigManager::saveProtectionConfig(cfg);
+  if (ok) {
+    currentProtectionConfig = cfg;
+    if (!currentProtectionConfig.relay_enabled) {
+      requestRelayState(false, "protection_disabled");
+    }
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1058,8 +1755,7 @@ void handleProtectionConfigSaveApi() {
 }
 
 void handleDisplayConfigSaveApi() {
-  DisplayConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  DisplayConfig cfg = currentDisplayConfig;
 
   cfg.enabled = configServer.hasArg("display_enabled") && configServer.arg("display_enabled") == "1";
   cfg.type = configServer.hasArg("display_type") ? configServer.arg("display_type").toInt() : 0;
@@ -1068,6 +1764,10 @@ void handleDisplayConfigSaveApi() {
   cfg.brightness = configServer.hasArg("brightness") ? configServer.arg("brightness").toInt() : 200;
 
   bool ok = ConfigManager::saveDisplayConfig(cfg);
+  if (ok) {
+    currentDisplayConfig = cfg;
+    displayReady = false;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1077,14 +1777,17 @@ void handleDisplayConfigSaveApi() {
 }
 
 void handleHistoryConfigSaveApi() {
-  HistoryConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  HistoryConfig cfg = currentHistoryConfig;
 
   cfg.enabled = configServer.hasArg("history_enabled") && configServer.arg("history_enabled") == "1";
   cfg.days_retained = configServer.hasArg("days_retained") ? configServer.arg("days_retained").toInt() : 7;
   cfg.flush_interval_sec = configServer.hasArg("flush_interval") ? configServer.arg("flush_interval").toInt() : 3600;
 
   bool ok = ConfigManager::saveHistoryConfig(cfg);
+  if (ok) {
+    currentHistoryConfig = cfg;
+    historyRuntime.loaded = false;
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
@@ -1094,8 +1797,7 @@ void handleHistoryConfigSaveApi() {
 }
 
 void handleSystemConfigSaveApi() {
-  SystemConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
+  SystemConfig cfg = currentSystemConfig;
 
   if (configServer.hasArg("ntp_server1")) {
     String ntp1 = configServer.arg("ntp_server1");
@@ -1108,12 +1810,50 @@ void handleSystemConfigSaveApi() {
   cfg.debug_enabled = configServer.hasArg("debug_enabled") && configServer.arg("debug_enabled") == "1";
 
   bool ok = ConfigManager::saveSystemConfig(cfg);
+  if (ok) {
+    currentSystemConfig = cfg;
+    restartNtpSync();
+  }
   sendNoCacheHeader();
   if (ok) {
     configServer.send(200, "application/json", "{\"ok\":true}");
   } else {
     configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
   }
+}
+
+void handleRelayStateApi() {
+  String body;
+  body.reserve(64);
+  body += F("{\"ok\":true,\"relay_enabled\":");
+  body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
+  body += F(",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"relay_requested\":\"");
+  body += relayRequestedState ? F("1") : F("0");
+  body += F("\",\"relay_locked\":");
+  body += relayLockedOut ? F("true") : F("false");
+  body += F("}");
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", body);
+}
+
+void handleRelaySetApi() {
+  String action;
+  if (configServer.hasArg("action")) {
+    action = configServer.arg("action");
+  } else if (configServer.hasArg("state")) {
+    action = configServer.arg("state");
+  }
+  action.toLowerCase();
+
+  if (action.indexOf("set") >= 0 || action == "1" || action == "on" || action == "true") {
+    requestRelayState(true, "web");
+  } else {
+    requestRelayState(false, "web");
+  }
+
+  handleRelayStateApi();
 }
 
 void handleSetupRoot() {
@@ -1129,7 +1869,7 @@ void handleNetworkPage() {
 
 void handleStatusApi() {
   String body;
-  body.reserve(256);
+  body.reserve(1024);
   body += F("{\"firmware\":\"");
   body += FW_VERSION;
   body += F("\",\"mode\":\"");
@@ -1142,7 +1882,59 @@ void handleStatusApi() {
   body += jsonEscape(savedWifiSsid);
   body += F("\",\"sta_status\":\"");
   body += wifiStatusToString(WiFi.status());
-  body += F("\",\"sta_ip\":\"");
+  body += F("\",\"device_name\":\"");
+  body += jsonEscape(currentDeviceConfig.device_name);
+  body += F("\",\"hostname\":\"");
+  body += jsonEscape(currentDeviceConfig.hostname);
+  body += F("\",\"timezone\":\"");
+  body += jsonEscape(currentDeviceConfig.timezone);
+  body += F("\",\"mqtt_enabled\":");
+  body += currentMqttConfig.enabled ? F("true") : F("false");
+  body += F(",\"mqtt_host\":\"");
+  body += jsonEscape(currentMqttConfig.host);
+  body += F("\",\"mqtt_port\":");
+  body += String(currentMqttConfig.port);
+  body += F(",\"modbus_baudrate\":");
+  body += String(currentModbusConfig.baudrate);
+  body += F(",\"modbus_slave_id\":");
+  body += String(currentModbusConfig.slave_id);
+  body += F(",\"modbus_profile\":");
+  body += String(currentModbusConfig.meter_profile);
+  body += F(",\"relay_enabled\":");
+  body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
+  body += F(",\"relay_state\":\"");
+  body += relayActualState ? F("1") : F("0");
+  body += F("\",\"relay_requested\":\"");
+  body += relayRequestedState ? F("1") : F("0");
+  body += F("\",\"relay_locked\":");
+  body += relayLockedOut ? F("true") : F("false");
+  body += F(",\"display_enabled\":");
+  body += currentDisplayConfig.enabled ? F("true") : F("false");
+  body += F(",\"history_enabled\":");
+  body += currentHistoryConfig.enabled ? F("true") : F("false");
+  body += F(",\"ntp_server1\":\"");
+  body += jsonEscape(currentSystemConfig.ntp_server1);
+  body += F("\",\"ntp_server2\":\"");
+  body += jsonEscape(currentSystemConfig.ntp_server2);
+  body += F("\",\"debug_enabled\":");
+  body += currentSystemConfig.debug_enabled ? F("true") : F("false");
+  body += F(",\"mqtt_connected\":");
+  body += mqttConnected ? F("true") : F("false");
+  body += F(",\"mqtt_state_topic\":\"");
+  body += jsonEscape(mqttStateTopic());
+  body += F("\",\"mqtt_telemetry_topic\":\"");
+  body += jsonEscape(mqttTelemetryTopic());
+  body += F("\",\"mqtt_base_topic\":\"");
+  body += jsonEscape(getMqttBaseTopic());
+  body += F("\",\"display_ready\":");
+  body += displayReady ? F("true") : F("false");
+  body += F(",\"display_page\":");
+  body += String(displayPage);
+  body += F(",\"history_day_key\":\"");
+  body += formatDayKey(historyRuntime.dayKey);
+  body += F("\",\"energy_history\":");
+  body += buildEnergyHistoryJson();
+  body += F(",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   body += F("\",\"rtc\":\"");
   body += jsonEscape(getRtcString());
@@ -1187,6 +1979,64 @@ void handleStatusApi() {
   body += F(",\"uptime_text\":\"");
   body += formatUptime(millis());
   body += F("\"");
+  body += F(",\"meter_online\":");
+  body += meterSnapshot.online ? F("true") : F("false");
+  body += F(",\"meter_valid\":");
+  body += meterSnapshot.valid ? F("true") : F("false");
+  body += F(",\"meter_voltage\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
+  body += F("\",\"meter_current\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
+  body += F("\",\"meter_power\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
+  body += F("\",\"meter_frequency\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
+  body += F("\",\"meter_pf\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
+  body += F("\",\"meter_energy\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
+  body += F("\",\"meter_last_poll_ms\":");
+  body += String(meterSnapshot.lastPollMs);
+  body += F(",\"meter_last_success_ms\":");
+  body += String(meterSnapshot.lastSuccessMs);
+  body += F(",\"relay_limit_a\":");
+  body += String(currentProtectionConfig.current_limit_a);
+  body += F(",\"relay_trip_delay_ms\":");
+  body += String(currentProtectionConfig.trip_delay_ms);
+  body += F("}");
+
+  sendNoCacheHeader();
+  configServer.send(200, "application/json", body);
+}
+
+void handleMeterPage() {
+  sendNoCacheHeader();
+  configServer.send(200, "text/html", buildMeterPage());
+}
+
+void handleMeterStatusApi() {
+  String body;
+  body.reserve(256);
+  body += F("{\"online\":");
+  body += meterSnapshot.online ? F("true") : F("false");
+  body += F(",\"valid\":");
+  body += meterSnapshot.valid ? F("true") : F("false");
+  body += F(",\"voltage\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
+  body += F("\",\"current\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
+  body += F("\",\"power\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
+  body += F("\",\"frequency\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
+  body += F("\",\"pf\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
+  body += F("\",\"energy\":\"");
+  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
+  body += F("\",\"last_poll_ms\":");
+  body += String(meterSnapshot.lastPollMs);
+  body += F(",\"last_success_ms\":");
+  body += String(meterSnapshot.lastSuccessMs);
   body += F("}");
 
   sendNoCacheHeader();
@@ -1279,6 +2129,7 @@ void startConfigWebServer() {
   }
 
   configServer.on("/", HTTP_GET, handleSetupRoot);
+  configServer.on("/meter", HTTP_GET, handleMeterPage);
   configServer.on("/network", HTTP_GET, handleNetworkPage);
   configServer.on("/device", HTTP_GET, handleDeviceConfigPage);
   configServer.on("/mqtt", HTTP_GET, handleMqttConfigPage);
@@ -1288,6 +2139,7 @@ void startConfigWebServer() {
   configServer.on("/history", HTTP_GET, handleHistoryConfigPage);
   configServer.on("/system", HTTP_GET, handleSystemConfigPage);
   configServer.on("/api/status", HTTP_GET, handleStatusApi);
+  configServer.on("/api/meter/status", HTTP_GET, handleMeterStatusApi);
   configServer.on("/api/wifi/scan", HTTP_GET, handleWifiScanApi);
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
   configServer.on("/api/device/save", HTTP_POST, handleDeviceConfigSaveApi);
@@ -1297,6 +2149,8 @@ void startConfigWebServer() {
   configServer.on("/api/display/save", HTTP_POST, handleDisplayConfigSaveApi);
   configServer.on("/api/history/save", HTTP_POST, handleHistoryConfigSaveApi);
   configServer.on("/api/system/save", HTTP_POST, handleSystemConfigSaveApi);
+  configServer.on("/api/relay/state", HTTP_GET, handleRelayStateApi);
+  configServer.on("/api/relay/set", HTTP_POST, handleRelaySetApi);
   configServer.on("/api/reboot", HTTP_POST, handleRebootApi);
   configServer.onNotFound(handleNotFound);
   configServer.begin();
@@ -1395,12 +2249,24 @@ void setup() {
 
   pinMode(PinMap::kConfigButton, INPUT_PULLUP);
   pinMode(PinMap::kBuiltinLed, OUTPUT);
+  pinMode(PinMap::kRelayOutput, OUTPUT);
+  setRelayOutput(false);
   // setBuiltinLed(false);
 
   printBootBanner();
   printChipInfo();
   printButtonInfo();
+  currentDeviceConfig = ConfigManager::loadDeviceConfig();
+  currentMqttConfig = ConfigManager::loadMqttConfig();
   loadWifiConfig();
+  currentModbusConfig = ConfigManager::loadModbusConfig();
+  currentProtectionConfig = ConfigManager::loadProtectionConfig();
+  currentDisplayConfig = ConfigManager::loadDisplayConfig();
+  currentHistoryConfig = ConfigManager::loadHistoryConfig();
+  currentSystemConfig = ConfigManager::loadSystemConfig();
+  currentModbusConfigLoaded = true;
+  loadFeatureRuntime();
+  resetMeterSnapshot();
   if (hasSavedWifi) {
     wifiConnecting = true;
     wifiConnectStartedMs = millis();
@@ -1417,6 +2283,10 @@ void loop() {
   updateStatusLed(nowMs);
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
+  pollModbusMeter(nowMs);
+  updateProtectionRuntime(nowMs);
+  updateMqttRuntime(nowMs);
+  updateDisplayRuntime(nowMs);
   if (configWebStarted) {
     configServer.handleClient();
   }

@@ -481,3 +481,18 @@ No relay, no MQTT, no Web UI yet.
 
 Once this works, expand to multiple values and Web UI configuration.
 
+## 📘 Bootstrap Meter Profile
+
+For this project, the first real hardware profile should come from the Schneider EM6400 / PM2xxx register list already used in the previous ESPHome setup.
+
+Reference:
+
+- `docs/modbus-profiles/schneider-em6400-pm2xxx.md`
+
+Important detail:
+
+- The previous YAML used zero-based register addresses.
+- The Excel list uses human register numbers.
+- Firmware should treat the old YAML values as `human register - 1`.
+
+This gives us a very fast starting point for the first RS485 proof-of-life without inventing a new meter map from scratch.

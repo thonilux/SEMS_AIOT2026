@@ -67,6 +67,9 @@ Working firmware checkpoints already implemented and tested on the ESP32-WROOM b
 | Normal Mode Web UI  | Same lightweight UI is served at `http://<STA_IP>/` after WiFi connects     |
 | RTC / NTP           | After WiFi connects, firmware syncs NTP and exposes PM1611-style `rtc` text |
 | Home dashboard      | Shows status plus RAM, firmware slot, and WiFi signal progress bars         |
+| Meter dashboard     | Shows RS485 meter status and Schneider bootstrap readings                    |
+| Web UI structure    | Lightweight string-render UI, with page helpers split into `WebUiPages.inc` |
+| LittleFS trial      | Tried for static UI, then rolled back because string render felt lighter     |
 
 Current verified board identity:
 
@@ -81,8 +84,10 @@ Current HTTP endpoints:
 | Method | Path             | Purpose                              |
 | ------ | ---------------- | ------------------------------------ |
 | `GET`  | `/`              | Home/status UI                       |
+| `GET`  | `/meter`         | Meter status UI                      |
 | `GET`  | `/network`       | Network scan and WiFi credential UI  |
 | `GET`  | `/api/status`    | Firmware, mode, AP, STA, heap status |
+| `GET`  | `/api/meter/status` | RS485 meter snapshot                |
 | `GET`  | `/api/wifi/scan` | Scan nearby WiFi networks            |
 | `POST` | `/api/wifi/save` | Save `ssid` and `password` to NVS    |
 | `POST` | `/api/reboot`    | Reboot after config save             |
@@ -93,9 +98,10 @@ Current limitations:
 - No static IP configuration yet.
 - No explicit WiFi test-before-save endpoint yet.
 - No dedicated WiFi verify endpoint yet; current validation happens through connect + timeout + fallback AP behavior.
-- No RS485/Modbus polling yet.
+- RS485 Modbus bootstrap polling is in place for the Schneider EM6400 / PM2xxx profile, but live meter verification still needs a connected meter.
 - No hardware RTC backup across power loss yet; time is restored through NTP after WiFi connects.
 - No MQTT, relay protection, LCD, OTA, or production auth yet.
+- LittleFS UI is not the active path; the current UI stays string-rendered and split into a helper file for readability.
 
 ## 🧰 Target Platform
 
@@ -663,7 +669,7 @@ Folder purpose:
 | `docs/api/`          | MQTT, web API, payload, and configuration contracts                  |
 | `docs/operations/`   | Flashing, deployment, recovery, and production procedures            |
 | `firmware/`          | PlatformIO ESP32 firmware project                                    |
-| `firmware/data/`     | LittleFS web UI assets                                               |
+| `firmware/data/`     | Reserved for optional LittleFS assets and future static files       |
 | `hardware/`          | Schematics, PCB files, enclosure drawings, and wiring diagrams       |
 | `scripts/`           | Repeatable build, flash, release, and maintenance scripts            |
 | `tools/`             | Developer utilities, validators, and generators                      |

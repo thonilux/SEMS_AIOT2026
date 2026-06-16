@@ -128,7 +128,7 @@ Configuration for RS485/Modbus communication with external meter:
 | `poll_interval_ms` | uint16_t | 2 bytes | 1000    | How often to poll meter registers (milliseconds)    |
 | `timeout_ms`       | uint16_t | 2 bytes | 1000    | Modbus response timeout before retry (milliseconds) |
 | `retry_count`      | uint8_t  | 1 byte  | 3       | Failed poll attempts before marking meter offline   |
-| `meter_profile`    | uint8_t  | 1 byte  | 0       | Register map profile: 0=PM2230, 1=PM1611            |
+| `meter_profile`    | uint8_t  | 1 byte  | 0       | Register map profile: 0=Schneider EM6400 / PM2xxx, 1=Generic float32 |
 
 **Example payload**:
 
@@ -141,7 +141,7 @@ Configuration for RS485/Modbus communication with external meter:
   "modbus_poll_interval_ms": 1000,
   "modbus_timeout_ms": 1000,
   "modbus_retry_count": 3,
-  "modbus_profile": 1
+  "modbus_profile": 0
 }
 ```
 
@@ -388,7 +388,7 @@ curl -X POST http://192.168.4.1/api/device/save \
 - `poll_interval_ms`: 100-10000
 - `timeout_ms`: 100-5000
 - `retry_count`: 0-10
-- `meter_profile`: 0 or 1 only
+- `meter_profile`: 0 = Schneider EM6400 / PM2xxx, 1 = Generic float32
 
 ### Protection Config
 

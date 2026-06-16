@@ -70,6 +70,12 @@ Additional WiFi recovery behavior in the current firmware:
 
 The same lightweight Web UI is intentionally reused in Config Mode and Normal Mode for the current MVP. The UI is split into `/` for Home/status and `/network` for WiFi scan and credential editing. Home includes measured progress bars for RAM usage, firmware slot usage, and WiFi signal quality.
 
+Implementation note:
+
+- The UI is still string-rendered.
+- Page rendering helpers are kept in `firmware/src/WebUiPages.inc` to keep `main.cpp` focused on firmware behavior.
+- A LittleFS-backed UI was tested and then rolled back because the string-render version was lighter and easier to keep responsive on this board.
+
 Current RTC baseline:
 
 ```text

@@ -135,6 +135,13 @@ Runtime config entry
   -> user can reboot from Web UI
 ```
 
+Implementation note:
+
+- The current UI is string-rendered.
+- Page rendering helpers are split into `firmware/src/WebUiPages.inc` so `main.cpp` stays focused on firmware flow.
+- A LittleFS-backed UI was tested during the refactor and then rolled back because the string-render path was simpler and felt lighter on this ESP32 board.
+- The adapted Web UI now includes a Meter page for Schneider EM6400 / PM2xxx bootstrap status and live register proof-of-life.
+
 Recommended AP defaults:
 
 ```text

@@ -5,8 +5,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <U8g2lib.h>
-#include <SPI.h>
-#include <Ethernet.h>
 #include <cmath>
 #include <time.h>
 #include "AppMode.h"
@@ -64,10 +62,7 @@ uint32_t mqttLastReconnectAttemptMs = 0;
 uint32_t mqttLastPublishMs = 0;
 WiFiClient mqttTransport;
 WiFiClientSecure mqttSecureTransport;
-EthernetClient ethernetMqttTransport;
 PubSubClient mqttClient(mqttTransport);
-bool ethernetReady = false;
-uint32_t ethernetLastCheckMs = 0;
 bool relayRequestedState = false;
 bool relayActualState = false;
 bool relayLockedOut = false;
@@ -76,10 +71,8 @@ uint32_t relayOvercurrentSinceMs = 0;
 bool displayReady = false;
 uint32_t displayLastUpdateMs = 0;
 uint8_t displayPage = 0;
-// Both display types use hardware I2C (SDA=GPIO21, SCL=GPIO22 — PCB I2C header)
-// type 0 = SSD1306 at 0x3C, type 1 = SSD1306 at 0x3D
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C displaySt7567(U8G2_R0, U8X8_PIN_NONE, PinMap::kDisplayScl, PinMap::kDisplaySda);
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C displaySsd1306(U8G2_R0, U8X8_PIN_NONE, PinMap::kDisplayScl, PinMap::kDisplaySda);
+U8G2_ST7567_ENH_DG128064_F_4W_HW_SPI displaySt7567(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI displaySsd1306(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
 
 struct HistoryRuntime {
   bool loaded = false;
@@ -654,9 +647,6 @@ void configureMqttClient() {
   if (currentMqttConfig.port == 8883) {
     mqttSecureTransport.setInsecure();
     mqttClient.setClient(mqttSecureTransport);
-  } else if (ethernetReady) {
-    // Prefer wired Ethernet for MQTT when available
-    mqttClient.setClient(ethernetMqttTransport);
   } else {
     mqttClient.setClient(mqttTransport);
   }
@@ -668,8 +658,7 @@ void configureMqttClient() {
 }
 
 bool connectMqtt(uint32_t nowMs) {
-  const bool networkReady = ethernetReady || WiFi.status() == WL_CONNECTED;
-  if (!currentMqttConfig.enabled || !networkReady || currentMqttConfig.host[0] == '\0') {
+  if (!currentMqttConfig.enabled || WiFi.status() != WL_CONNECTED || currentMqttConfig.host[0] == '\0') {
     mqttConnected = false;
     return false;
   }
@@ -1124,7 +1113,7 @@ void pollModbusMeter(uint32_t nowMs) {
   currentModbusConfig = cfg;
   currentModbusConfigLoaded = true;
 
-  if (currentMode != AppMode::Normal) {
+  if (currentMode != AppMode::Normal || WiFi.status() != WL_CONNECTED) {
     resetMeterSnapshot();
     return;
   }
@@ -1230,74 +1219,6 @@ void checkNtpSync() {
       Serial.println(getRtcString());
     }
   }
-}
-
-// ─── W5500 Ethernet ──────────────────────────────────────────────────────────
-
-void initEthernet() {
-  // Hardware reset W5500
-  pinMode(PinMap::kEthernetRst, OUTPUT);
-  digitalWrite(PinMap::kEthernetRst, LOW);
-  delay(10);
-  digitalWrite(PinMap::kEthernetRst, HIGH);
-  delay(200);
-
-  // Derive MAC from ESP32 WiFi base MAC (set bit 1 of first byte for locally administered)
-  uint8_t baseMac[6];
-  esp_read_mac(baseMac, ESP_MAC_WIFI_STA);
-  baseMac[0] |= 0x02;
-
-  Ethernet.init(PinMap::kEthernetCs);
-  Serial.print("Ethernet init MAC: ");
-  for (int i = 0; i < 6; i++) {
-    if (i) Serial.print(':');
-    if (baseMac[i] < 0x10) Serial.print('0');
-    Serial.print(baseMac[i], HEX);
-  }
-  Serial.println();
-
-  if (Ethernet.begin(baseMac, 8000) == 0) {
-    Serial.println("Ethernet DHCP failed — no link or no lease");
-    ethernetReady = false;
-    return;
-  }
-
-  ethernetReady = true;
-  Serial.print("Ethernet IP: ");
-  Serial.println(Ethernet.localIP());
-}
-
-void updateEthernetRuntime(uint32_t nowMs) {
-  constexpr uint32_t kEthernetCheckIntervalMs = 10000;
-  if (nowMs - ethernetLastCheckMs < kEthernetCheckIntervalMs) {
-    return;
-  }
-  ethernetLastCheckMs = nowMs;
-
-  const int linkStatus = Ethernet.linkStatus();
-  if (linkStatus == LinkOFF) {
-    if (ethernetReady) {
-      ethernetReady = false;
-      mqttClientConfigured = false;
-      Serial.println("Ethernet link down");
-    }
-    return;
-  }
-
-  if (!ethernetReady) {
-    Serial.println("Ethernet link up — requesting DHCP");
-    uint8_t mac[6];
-    Ethernet.MACAddress(mac);
-    if (Ethernet.begin(mac, 8000) != 0) {
-      ethernetReady = true;
-      mqttClientConfigured = false;
-      Serial.print("Ethernet IP: ");
-      Serial.println(Ethernet.localIP());
-    }
-    return;
-  }
-
-  Ethernet.maintain();
 }
 
 const char* wifiStatusToString(wl_status_t status) {
@@ -2542,7 +2463,6 @@ void setup() {
   printBootBanner();
   printChipInfo();
   printButtonInfo();
-  initEthernet();
   currentDeviceConfig = ConfigManager::loadDeviceConfig();
   currentMqttConfig = ConfigManager::loadMqttConfig();
   loadWifiConfig();
@@ -2568,7 +2488,6 @@ void setup() {
 void loop() {
   const uint32_t nowMs = millis();
   updateStatusLed(nowMs);
-  updateEthernetRuntime(nowMs);
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
   pollModbusMeter(nowMs);

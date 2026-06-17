@@ -128,6 +128,10 @@ String buildMeterPage() {
 
 String buildNetworkPage() {
   String page = buildPageHeader(F("Network"));
+  page += F("<section class=\"panel\"><div class=\"muted\">🔌 Ethernet (W5500)</div>");
+  page += F("<div id=\"ethStatus\" class=\"muted\">Loading...</div>");
+  page += F("</section>");
+  page += F("<script>fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).then(d=>{const el=document.getElementById('ethStatus');el.textContent=d.eth_link?'Link UP — IP: '+d.eth_ip:'Link DOWN (no cable or DHCP failed)';el.style.color=d.eth_link?'#4caf50':'#f44336';});</script>");
   page += F("<section class=\"panel\"><div class=\"muted\">📶 WiFi setup</div>");
   page += F("<div class=\"actions\"><button type=\"button\" onclick=\"scanWifi()\">Scan WiFi</button><button type=\"button\" onclick=\"loadCurrentWifi()\">Load Saved</button></div>");
   page += F("<div id=\"wifiStatus\" class=\"muted\" style=\"margin-top:10px\">Ready to scan.</div>");

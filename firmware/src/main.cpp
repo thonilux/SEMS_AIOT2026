@@ -1,9 +1,11 @@
 #include <Arduino.h>
+#include <Ethernet.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <U8g2lib.h>
+#include <Wire.h>
 #include <cmath>
 #include <time.h>
 #include "AppMode.h"
@@ -59,8 +61,9 @@ bool mqttConnected = false;
 bool mqttClientConfigured = false;
 uint32_t mqttLastReconnectAttemptMs = 0;
 uint32_t mqttLastPublishMs = 0;
-WiFiClient mqttTransport;
-PubSubClient mqttClient(mqttTransport);
+WiFiClient mqttWifiTransport;
+// mqttEthTransport declared below after EthernetClient is available
+PubSubClient mqttWifiClient(mqttWifiTransport);
 bool relayRequestedState = false;
 bool relayActualState = false;
 bool relayLockedOut = false;
@@ -69,8 +72,14 @@ uint32_t relayOvercurrentSinceMs = 0;
 bool displayReady = false;
 uint32_t displayLastUpdateMs = 0;
 uint8_t displayPage = 0;
-U8G2_ST7567_ENH_DG128064_F_4W_HW_SPI displaySt7567(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
-U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI displaySsd1306(U8G2_R0, PinMap::kDisplayCs, PinMap::kDisplayDc, PinMap::kDisplayReset);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, /* reset= */ U8X8_PIN_NONE);
+
+bool ethLinkUp = false;
+bool ethConfigured = false;
+EthernetClient mqttEthTransport;
+PubSubClient mqttEthClient(mqttEthTransport);
+PubSubClient* activeMqttClient = &mqttWifiClient;
+uint32_t ethLastCheckMs = 0;
 
 struct HistoryRuntime {
   bool loaded = false;
@@ -383,6 +392,7 @@ void setRelayOutput(bool on) {
 
 void loadHistoryRuntime() {
   Preferences prefs;
+  historyRuntime.loaded = true;  // mark loaded regardless — NVS missing = fresh start
   if (!prefs.begin("history_rt", true)) {
     return;
   }
@@ -621,24 +631,33 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void configureMqttClient() {
-  mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
-  mqttClient.setBufferSize(1024);
-  mqttClient.setKeepAlive(30);
-  mqttClient.setCallback(mqttMessageCallback);
+  (*activeMqttClient).setServer(currentMqttConfig.host, currentMqttConfig.port);
+  (*activeMqttClient).setBufferSize(1024);
+  (*activeMqttClient).setKeepAlive(30);
+  (*activeMqttClient).setCallback(mqttMessageCallback);
   mqttClientConfigured = true;
 }
 
 bool connectMqtt(uint32_t nowMs) {
-  if (!currentMqttConfig.enabled || WiFi.status() != WL_CONNECTED || currentMqttConfig.host[0] == '\0') {
+  const bool networkAvailable = ethLinkUp || (WiFi.status() == WL_CONNECTED);
+  if (!currentMqttConfig.enabled || !networkAvailable || currentMqttConfig.host[0] == '\0') {
     mqttConnected = false;
     return false;
+  }
+
+  // Select transport: Ethernet preferred, fallback WiFi
+  PubSubClient* preferred = ethLinkUp ? &mqttEthClient : &mqttWifiClient;
+  if (activeMqttClient != preferred) {
+    if ((*activeMqttClient).connected()) (*activeMqttClient).disconnect();
+    activeMqttClient = preferred;
+    mqttClientConfigured = false;
   }
 
   if (!mqttClientConfigured) {
     configureMqttClient();
   }
 
-  if (mqttClient.connected()) {
+  if ((*activeMqttClient).connected()) {
     mqttConnected = true;
     return true;
   }
@@ -654,7 +673,7 @@ bool connectMqtt(uint32_t nowMs) {
 
   bool ok = false;
   if (currentMqttConfig.username[0] != '\0' || currentMqttConfig.password[0] != '\0') {
-    ok = mqttClient.connect(clientId.c_str(),
+    ok = (*activeMqttClient).connect(clientId.c_str(),
                             currentMqttConfig.username,
                             currentMqttConfig.password,
                             willTopic.c_str(),
@@ -662,7 +681,7 @@ bool connectMqtt(uint32_t nowMs) {
                             true,
                             willPayload.c_str());
   } else {
-    ok = mqttClient.connect(clientId.c_str(),
+    ok = (*activeMqttClient).connect(clientId.c_str(),
                             willTopic.c_str(),
                             0,
                             true,
@@ -672,12 +691,12 @@ bool connectMqtt(uint32_t nowMs) {
   if (!ok) {
     mqttConnected = false;
     Serial.print("MQTT connect failed, rc=");
-    Serial.println(mqttClient.state());
+    Serial.println((*activeMqttClient).state());
     return false;
   }
 
-  mqttClient.subscribe(mqttCommandTopic().c_str());
-  mqttClient.subscribe((getMqttBaseTopic() + "/relay/set").c_str());
+  (*activeMqttClient).subscribe(mqttCommandTopic().c_str());
+  (*activeMqttClient).subscribe((getMqttBaseTopic() + "/relay/set").c_str());
   mqttConnected = true;
   Serial.println("MQTT connected");
   publishMqttState();
@@ -716,25 +735,25 @@ String buildMqttPayload() {
 }
 
 void publishMqttState() {
-  if (!mqttClient.connected()) {
+  if (!(*activeMqttClient).connected()) {
     return;
   }
 
   const String payload = buildMqttPayload();
-  mqttClient.publish(mqttStateTopic().c_str(), payload.c_str(), true);
-  mqttClient.publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
+  (*activeMqttClient).publish(mqttStateTopic().c_str(), payload.c_str(), true);
+  (*activeMqttClient).publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
 }
 
 void updateMqttRuntime(uint32_t nowMs) {
   if (!currentMqttConfig.enabled) {
     mqttConnected = false;
-    if (mqttClient.connected()) {
-      mqttClient.disconnect();
+    if ((*activeMqttClient).connected()) {
+      (*activeMqttClient).disconnect();
     }
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!ethLinkUp && WiFi.status() != WL_CONNECTED) {
     mqttConnected = false;
     return;
   }
@@ -742,27 +761,20 @@ void updateMqttRuntime(uint32_t nowMs) {
   if (!mqttClientConfigured) {
     configureMqttClient();
   } else {
-    mqttClient.setServer(currentMqttConfig.host, currentMqttConfig.port);
+    (*activeMqttClient).setServer(currentMqttConfig.host, currentMqttConfig.port);
   }
 
-  if (!mqttClient.connected()) {
+  if (!(*activeMqttClient).connected()) {
     connectMqtt(nowMs);
   } else {
-    mqttClient.loop();
+    (*activeMqttClient).loop();
     mqttConnected = true;
   }
 
-  if (mqttClient.connected() && nowMs - mqttLastPublishMs >= static_cast<uint32_t>(currentMqttConfig.publish_interval_sec) * 1000UL) {
+  if ((*activeMqttClient).connected() && nowMs - mqttLastPublishMs >= static_cast<uint32_t>(currentMqttConfig.publish_interval_sec) * 1000UL) {
     mqttLastPublishMs = nowMs;
     publishMqttState();
   }
-}
-
-U8G2* getActiveDisplayDriver() {
-  if (currentDisplayConfig.type == 1) {
-    return &displaySsd1306;
-  }
-  return &displaySt7567;
 }
 
 void initDisplayRuntime() {
@@ -771,14 +783,8 @@ void initDisplayRuntime() {
     return;
   }
 
-  U8G2* driver = getActiveDisplayDriver();
-  if (driver == nullptr) {
-    displayReady = false;
-    return;
-  }
-
-  driver->begin();
-  driver->setContrast(currentDisplayConfig.brightness);
+  display.begin();
+  display.setContrast(currentDisplayConfig.brightness);
   displayReady = true;
   Serial.println("LCD display ready");
 }
@@ -800,12 +806,25 @@ void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
       driver->drawStr(0, 42, formatFloatValue(meterSnapshot.frequency, 1, "Hz").c_str());
       driver->drawStr(0, 56, formatFloatValue(meterSnapshot.pf, 2, "PF").c_str());
       break;
-    case 2:
+    case 2: {
       driver->drawStr(0, 12, "Network / MQTT");
-      driver->drawStr(0, 28, wifiConnected ? "STA connected" : "STA offline");
-      driver->drawStr(0, 42, mqttConnected ? "MQTT connected" : "MQTT offline");
+      // Show best available IP
+      String ipStr;
+      if (ethLinkUp) {
+        ipStr = "ETH:" + Ethernet.localIP().toString();
+      } else if (wifiConnected) {
+        ipStr = "WiFi:" + WiFi.localIP().toString();
+      } else if (configApStarted) {
+        ipStr = "AP:192.168.4.1";
+      } else {
+        ipStr = "no network";
+      }
+      driver->drawStr(0, 28, ipStr.c_str());
+      String netStatus = String(wifiConnected ? "W+" : "W-") + " " + String(mqttConnected ? "MQTT+" : "MQTT-");
+      driver->drawStr(0, 42, netStatus.c_str());
       driver->drawStr(0, 56, getMqttBaseTopic().c_str());
       break;
+    }
     default:
       driver->drawStr(0, 12, "Relay / Fault");
       driver->drawStr(0, 28, buildRelayStateText().c_str());
@@ -836,10 +855,7 @@ void updateDisplayRuntime(uint32_t nowMs) {
 
   displayLastUpdateMs = nowMs;
   displayPage = (displayPage + 1) % 4;
-  U8G2* driver = getActiveDisplayDriver();
-  if (driver != nullptr) {
-    drawDisplayPage(driver, displayPage);
-  }
+  drawDisplayPage(&display, displayPage);
 }
 
 void loadFeatureRuntime() {
@@ -1030,7 +1046,7 @@ void pollModbusMeter(uint32_t nowMs) {
   currentModbusConfig = cfg;
   currentModbusConfigLoaded = true;
 
-  if (currentMode != AppMode::Normal || WiFi.status() != WL_CONNECTED) {
+  if (currentMode != AppMode::Normal) {
     resetMeterSnapshot();
     return;
   }
@@ -1569,7 +1585,7 @@ String buildSystemConfigPage() {
 // CONFIG PAGE HANDLERS
 // ============================================================================
 bool requireConfigMode() {
-  if (currentMode == AppMode::Config || configApStarted) {
+  if (currentMode == AppMode::Config || configApStarted || ethLinkUp) {
     return true;
   }
 
@@ -1689,8 +1705,8 @@ void handleMqttConfigSaveApi() {
   if (ok) {
     currentMqttConfig = cfg;
     mqttClientConfigured = false;
-    if (mqttClient.connected()) {
-      mqttClient.disconnect();
+    if ((*activeMqttClient).connected()) {
+      (*activeMqttClient).disconnect();
     }
     mqttConnected = false;
   }
@@ -1936,6 +1952,10 @@ void handleStatusApi() {
   body += buildEnergyHistoryJson();
   body += F(",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  body += F("\",\"eth_link\":");
+  body += ethLinkUp ? F("true") : F("false");
+  body += F(",\"eth_ip\":\"");
+  body += ethLinkUp ? Ethernet.localIP().toString() : "";
   body += F("\",\"rtc\":\"");
   body += jsonEscape(getRtcString());
   body += F("\",\"time_synced\":");
@@ -2048,7 +2068,7 @@ void handleWifiScanApi() {
   const int count = WiFi.scanNetworks(false, true);
   String body;
   body.reserve(512 + (count > 0 ? count * 96 : 0));
-  body += F("{\"count\":");
+  body += F("{\"ok\":true,\"count\":");
   body += String(count > 0 ? count : 0);
   body += F(",\"networks\":[");
 
@@ -2063,7 +2083,7 @@ void handleWifiScanApi() {
     body += String(WiFi.RSSI(i));
     body += F(",\"channel\":");
     body += String(WiFi.channel(i));
-    body += F(",\"encryption\":\"");
+    body += F(",\"security\":\"");
     body += WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? F("open") : F("secured");
     body += F("\"}");
   }
@@ -2241,6 +2261,67 @@ void handleConfigButton(uint32_t nowMs) {
     enterConfigMode();
   }
 }
+void initEthernet() {
+  pinMode(PinMap::kEthRst, OUTPUT);
+  digitalWrite(PinMap::kEthRst, LOW);
+  delay(20);
+  digitalWrite(PinMap::kEthRst, HIGH);
+  delay(50);
+
+  // Derive MAC from ESP32 chip ID (last 3 bytes), prefix locally-administered
+  uint64_t chipId = ESP.getEfuseMac();
+  uint8_t mac[6] = {
+    0x02,
+    0x00,
+    (uint8_t)((chipId >> 32) & 0xFF),
+    (uint8_t)((chipId >> 24) & 0xFF),
+    (uint8_t)((chipId >> 16) & 0xFF),
+    (uint8_t)((chipId >>  8) & 0xFF),
+  };
+
+  Ethernet.init(PinMap::kEthCs);
+  if (Ethernet.begin(mac, 8000) == 0) {
+    Serial.println("ETH: DHCP failed, link may be down");
+    ethLinkUp = false;
+  } else {
+    ethLinkUp = true;
+    ethConfigured = true;
+    Serial.print("ETH: IP=");
+    Serial.println(Ethernet.localIP());
+    startConfigWebServer();
+    Serial.print("Open ETH Web UI: http://");
+    Serial.println(Ethernet.localIP());
+  }
+}
+
+void updateEthernetRuntime(uint32_t nowMs) {
+  if (nowMs - ethLastCheckMs < 5000) return;
+  ethLastCheckMs = nowMs;
+
+  EthernetLinkStatus linkStatus = Ethernet.linkStatus();
+  if (linkStatus == LinkOFF) {
+    if (ethLinkUp) {
+      ethLinkUp = false;
+      Serial.println("ETH: link down");
+    }
+    return;
+  }
+
+  if (!ethLinkUp) {
+    Serial.println("ETH: link up, requesting DHCP...");
+    if (Ethernet.begin(nullptr, 8000) != 0) {
+      ethLinkUp = true;
+      ethConfigured = true;
+      Serial.print("ETH: IP=");
+      Serial.println(Ethernet.localIP());
+      startConfigWebServer();
+      Serial.print("Open ETH Web UI: http://");
+      Serial.println(Ethernet.localIP());
+    }
+  } else {
+    Ethernet.maintain();
+  }
+}
 }  // namespace
 
 void setup() {
@@ -2275,12 +2356,14 @@ void setup() {
     Serial.println("No saved WiFi configuration. Entering CONFIG_MODE.");
     enterConfigMode();
   }
+  initEthernet();
   printModeInfo();
 }
 
 void loop() {
   const uint32_t nowMs = millis();
   updateStatusLed(nowMs);
+  updateEthernetRuntime(nowMs);
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
   pollModbusMeter(nowMs);

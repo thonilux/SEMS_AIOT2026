@@ -378,22 +378,45 @@ void beginStaConnect() {
   staStartMs = millis();
 }
 
-void handleStaLifecycle(uint32_t now) {
-  if (!staConnecting) return;
+void restoreAp() {
+  if (apStarted) return;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  const String apSsid = getApSsid();
+  WiFi.softAP(apSsid.c_str(), kApPassword);
+  apStarted = true;
+  Serial.println("AP restored");
+}
 
-  if (WiFi.status() == WL_CONNECTED) {
-    staConnecting = false;
-    staConnected  = true;
-    Serial.printf("STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
-    oledShow("WiFi Connected", WiFi.localIP().toString().c_str(), savedSsid.c_str(), 6000);
+void handleStaLifecycle(uint32_t now) {
+  if (staConnecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      staConnecting = false;
+      staConnected  = true;
+      Serial.printf("STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      apStarted = false;
+      Serial.println("AP stopped");
+      oledShow("WiFi Connected", WiFi.localIP().toString().c_str(), savedSsid.c_str(), 6000);
+      return;
+    }
+    if (now - staStartMs >= kStaTimeoutMs) {
+      staConnecting = false;
+      staConnected  = false;
+      Serial.println("STA timeout — AP only");
+      oledShow("WiFi Failed", savedSsid.c_str(), "Using AP only", 6000);
+    }
     return;
   }
 
-  if (now - staStartMs >= kStaTimeoutMs) {
-    staConnecting = false;
-    staConnected  = false;
-    Serial.println("STA timeout — staying on AP");
-    oledShow("WiFi Failed", savedSsid.c_str(), "Using AP only", 6000);
+  // Monitor STA drop — restore AP and reconnect
+  if (staConnected && WiFi.status() != WL_CONNECTED) {
+    staConnected = false;
+    Serial.println("STA dropped — restoring AP, reconnecting");
+    restoreAp();
+    oledShow("WiFi Lost", "Reconnecting...", savedSsid.c_str(), 5000);
+    beginStaConnect();
   }
 }
 

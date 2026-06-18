@@ -203,7 +203,7 @@ void updateOled(uint32_t now) {
   if (now < oledUntilMs) return;
   if (now - oledPageMs < kPageIntervalMs) return;
   oledPageMs = now;
-  oledPage = (oledPage + 1) % 2;
+  oledPage = (oledPage + 1) % 3;
   oledDrawPage(oledPage);
 }
 

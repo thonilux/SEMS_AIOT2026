@@ -390,120 +390,149 @@ int pickBestWifi(uint8_t skipMask = 0, bool silent = false) {
 }
 
 // ============================================================
+// Shared HTML helpers
+// ============================================================
+static const char kSharedStyle[] PROGMEM =
+  "<!doctype html><html><head><meta charset=utf-8>"
+  "<meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<style>"
+  "*{box-sizing:border-box;margin:0;padding:0}"
+  "body{font-family:system-ui,sans-serif;background:#f1f5f9;min-height:100vh;padding:16px}"
+  ".wrap{max-width:480px;margin:0 auto}"
+  "h1{font-size:18px;font-weight:700;color:#0f172a;margin-bottom:16px}"
+  ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
+  ".card-title{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;"
+    "letter-spacing:.05em;margin-bottom:10px}"
+  ".row{display:flex;justify-content:space-between;align-items:center;padding:4px 0}"
+  ".label{font-size:13px;color:#64748b}"
+  ".val{font-size:13px;font-weight:600;color:#0f172a;text-align:right;word-break:break-all}"
+  ".badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;"
+    "padding:3px 10px;border-radius:99px}"
+  ".up{background:#dcfce7;color:#15803d}"
+  ".down{background:#fee2e2;color:#b91c1c}"
+  ".connecting{background:#fef9c3;color:#92400e}"
+  ".dot{width:7px;height:7px;border-radius:50%;background:currentColor}"
+  ".sep{height:1px;background:#f1f5f9;margin:6px 0}"
+  ".nav{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}"
+  ".nav a{font-size:13px;color:#0f766e;text-decoration:none;padding:6px 12px;"
+    "border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
+  ".nav a:hover{background:#f0fdf4}"
+  "label{display:block;font-size:13px;color:#64748b;margin:10px 0 4px}"
+  "input[type=text],input[type=password]{"
+    "width:100%;padding:9px 12px;border:1px solid #e2e8f0;border-radius:8px;"
+    "font-size:14px;color:#0f172a;outline:none}"
+  "input:focus{border-color:#0f766e;box-shadow:0 0 0 2px rgba(15,118,110,.15)}"
+  ".btn{display:inline-block;background:#0f766e;color:#fff;border:0;border-radius:8px;"
+    "padding:9px 16px;font-size:14px;font-weight:600;cursor:pointer;margin:4px 4px 0 0}"
+  ".btn-sm{padding:5px 12px;font-size:12px}"
+  ".btn-danger{background:#b91c1c}"
+  ".btn-ghost{background:#e2e8f0;color:#0f172a}"
+  ".net-item{display:flex;justify-content:space-between;align-items:center;"
+    "padding:10px 0;border-top:1px solid #f1f5f9}"
+  ".net-ssid{font-size:13px;font-weight:600;color:#0f172a}"
+  ".net-tag{font-size:11px;color:#94a3b8;margin-top:2px}"
+  "#msg{margin-top:10px;font-size:13px;min-height:18px}"
+  ".ok{color:#15803d}.err{color:#b91c1c}"
+  "</style>";
+
+static const char kNavLinks[] PROGMEM =
+  "<div class=nav>"
+  "<a href=/>&#9881; Setup</a>"
+  "<a href=/network>&#127760; Network</a>"
+  "<a href=/mqtt>&#128236; MQTT</a>"
+  "</div>";
+
+static const char kScanScript[] PROGMEM =
+  "function eh(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+  "async function scanWifi(targetSsidId){"
+    "const msg=document.getElementById('msg');"
+    "msg.className='err';msg.textContent='Scanning...';"
+    "document.getElementById('scanList').innerHTML='';"
+    "await fetch('/api/scan',{method:'POST'});"
+    "pollScan(20,targetSsidId);"
+  "}"
+  "async function pollScan(n,tid){"
+    "const msg=document.getElementById('msg');"
+    "if(n<=0){msg.textContent='Scan timeout';return;}"
+    "const r=await fetch('/api/scan/result').then(x=>x.json());"
+    "if(r.status==='scanning'){setTimeout(()=>pollScan(n-1,tid),1500);return;}"
+    "msg.className='ok';msg.textContent='Ditemukan '+r.networks.length+' jaringan.';"
+    "document.getElementById('scanList').innerHTML=r.networks.map(n=>"
+      "'<div class=net-item>"
+        "<div><div class=net-ssid>'+eh(n.ssid||'(hidden)')+'</div>"
+        "<div class=net-tag>'+eh(n.security)+' &bull; ch'+n.ch+' &bull; '+n.rssi+' dBm</div></div>"
+        "<button class=\"btn btn-sm btn-ghost\" type=button data-s=\"'+eh(n.ssid||'')+'\">Pilih</button>"
+      "</div>'"
+    ").join('');"
+    "document.querySelectorAll('[data-s]').forEach(b=>b.onclick=()=>{"
+      "document.getElementById(tid).value=b.dataset.s;"
+      "document.getElementById('pass').focus();"
+    "});"
+  "}";
+
+// ============================================================
 // Web handlers
 // ============================================================
 void handleRoot() {
-  // Build saved WiFi list HTML
-  String savedInfo;
+  String html = FPSTR(kSharedStyle);
+  html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
+    "<h1>SEMS AIoT &mdash; Setup</h1>");
+  html += FPSTR(kNavLinks);
+
+  // Saved WiFi card
+  html += F("<div class=card><div class=card-title>Saved WiFi Networks</div>");
   if (wifiCount == 0) {
-    savedInfo = "<p style='color:#666'>No saved WiFi.</p>";
+    html += F("<p style='font-size:13px;color:#94a3b8'>Belum ada jaringan tersimpan.</p>");
   } else {
-    savedInfo = "<div id=savedList>";
     for (uint8_t i = 0; i < wifiCount; i++) {
       String s = wifiList[i].ssid;
-      // basic HTML escape
       s.replace("&","&amp;"); s.replace("<","&lt;"); s.replace(">","&gt;");
-      String connected = (staConnected && wifiList[i].ssid == savedSsid)
-        ? " <span style='color:#0f766e'>&#10003; " + WiFi.localIP().toString() + "</span>" : "";
-      savedInfo += "<div class=net><div><b>" + s + "</b>" + connected + "</div>"
-        "<button type=button class=danger data-d=\"" + s + "\">&#10005;</button></div>";
+      bool active = staConnected && wifiList[i].ssid == savedSsid;
+      html += "<div class=net-item><div><div class=net-ssid>" + s;
+      if (active) html += " <span class=ok>&#10003; " + WiFi.localIP().toString() + "</span>";
+      html += "</div></div>";
+      html += "<button class='btn btn-sm btn-danger' type=button data-d=\"" + s + "\">&#10005;</button></div>";
     }
-    savedInfo += "</div>";
   }
+  html += F("</div>");
 
-  // LAN status card
-  String lanCard = "<div class=card>";
-  if (ethReady) {
-    lanCard += "<b>LAN</b> <span class=ok>&#9679; Connected</span><br>"
-               "<span class=tag>IP: " + Ethernet.localIP().toString() + " &nbsp; W5500</span>";
-  } else {
-    String linkStr = Ethernet.linkStatus() == LinkON ? "Cable OK, no DHCP" : "No cable";
-    lanCard += "<b>LAN</b> <span class=err>&#9679; " + linkStr + "</span><br>"
-               "<span class=tag>W5500 — MQTT transport</span>";
-  }
-  lanCard += "</div>";
+  // Add WiFi card
+  html += F("<div class=card><div class=card-title>Tambah / Ubah WiFi</div>"
+    "<div id=msg></div>"
+    "<button class='btn btn-sm' type=button onclick=\"scanWifi('ssid')\">&#128268; Scan</button>"
+    "<div id=scanList></div>"
+    "<label>SSID</label><input type=text id=ssid placeholder='Nama jaringan'>"
+    "<label>Password</label><input type=password id=pass placeholder='Password'>"
+    "<button class=btn style='width:100%;margin-top:12px' onclick=saveWifi()>Simpan &amp; Reboot</button>"
+    "<button class='btn btn-danger btn-sm' style='width:100%;margin-top:6px' onclick=clearWifi()>Hapus Semua</button>"
+    "</div>");
 
-  String html;
-  html +=
-    F("<!doctype html><html><head><meta charset=utf-8>"
-      "<meta name=viewport content='width=device-width,initial-scale=1'>"
-      "<title>SEMS Setup</title>"
-      "<style>"
-      "body{font-family:sans-serif;max-width:480px;margin:20px auto;padding:0 16px}"
-      "h2{color:#0f766e}"
-      "input{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 14px;"
-        "border:1px solid #ccc;border-radius:6px;font-size:15px}"
-      "button{background:#0f766e;color:#fff;border:0;border-radius:6px;"
-        "padding:10px 16px;font-size:15px;cursor:pointer;margin:4px 2px}"
-      ".danger{background:#b91c1c}"
-      ".net{border-top:1px solid #eee;padding:10px 0;"
-        "display:flex;justify-content:space-between;align-items:center}"
-      ".ssid{font-weight:700}.tag{font-size:12px;color:#666}"
-      ".card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;"
-        "padding:12px 14px;margin:12px 0}"
-      ".ok{color:#0f766e}.err{color:#b91c1c}"
-      "#msg{margin:12px 0;color:#0f766e}"
-      "</style></head><body>"
-      "<h2>SEMS AIoT &mdash; Setup</h2>");
-  html += lanCard;
-  html += savedInfo;
-  html += F("<p id=msg>Ready.</p>"
-      "<button onclick=scanWifi()>Scan WiFi</button> "
-      "<button class=danger onclick=clearWifi()>Clear Saved</button>"
-      "<div id=list></div>"
-      "<form id=form>"
-        "<label>SSID<input id=ssid name=ssid required></label>"
-        "<label>Password<input id=pass name=pass type=password></label>"
-        "<button type=submit>Save &amp; Reboot</button>"
-      "</form>"
-      "<script>"
-      "function eh(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+  html += F("<script>");
+  html += FPSTR(kScanScript);
+  html += F(
+    "document.querySelectorAll('[data-d]').forEach(b=>b.onclick=async()=>{"
+      "await fetch('/api/wifi/delete',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:b.dataset.d})});"
+      "location.reload();"
+    "});"
+    "async function saveWifi(){"
       "const msg=document.getElementById('msg');"
-      "async function scanWifi(){"
-        "msg.textContent='Scanning...';"
-        "document.getElementById('list').innerHTML='';"
-        "await fetch('/api/scan',{method:'POST'});"
-        "pollScan(20);"
-      "}"
-      "async function pollScan(n){"
-        "if(n<=0){msg.textContent='Scan timeout — coba lagi';return;}"
-        "const r=await fetch('/api/scan/result').then(x=>x.json());"
-        "if(r.status==='scanning'){setTimeout(()=>pollScan(n-1),1500);return;}"
-        "msg.textContent='Found '+r.networks.length+' network(s).';"
-        "document.getElementById('list').innerHTML=r.networks.map(n=>"
-          "'<div class=net>"
-            "<div><div class=ssid>'+eh(n.ssid||'(hidden)')+'</div>"
-            "<div class=tag>'+eh(n.security)+' | ch'+n.ch+' | '+n.rssi+' dBm</div></div>"
-            "<button type=button data-s=\"'+eh(n.ssid||'')+'\">Use</button>"
-          "</div>'"
-        ").join('');"
-        "document.querySelectorAll('[data-s]').forEach(b=>b.onclick=()=>{"
-          "document.getElementById('ssid').value=b.dataset.s;"
-          "document.getElementById('pass').focus();"
-        "});"
-      "}"
-      "async function clearWifi(){"
-        "if(!confirm('Hapus semua WiFi?'))return;"
-        "await fetch('/api/wifi/clear',{method:'POST'});"
-        "location.reload();"
-      "}"
-      "async function deleteWifi(ssid){"
-        "await fetch('/api/wifi/delete',{method:'POST',"
-          "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid})});"
-        "location.reload();"
-      "}"
-      "document.querySelectorAll('[data-d]').forEach(b=>b.onclick=()=>deleteWifi(b.dataset.d));"
-      "document.getElementById('form').onsubmit=async function(e){"
-        "e.preventDefault();"
-        "msg.textContent='Saving...';"
-        "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
-          "pass:document.getElementById('pass').value});"
-        "const r=await fetch('/api/wifi/save',{method:'POST',"
-          "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
-        "if(r.ok){msg.textContent='Saved! Rebooting...';setTimeout(()=>fetch('/api/reboot',{method:'POST'}),800);}"
-        "else msg.textContent='Error: '+(r.error||'unknown');"
-      "};"
-      "</script></body></html>");
+      "msg.className='';msg.textContent='Menyimpan...';"
+      "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
+        "pass:document.getElementById('pass').value});"
+      "const r=await fetch('/api/wifi/save',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
+      "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Rebooting...';"
+        "setTimeout(()=>fetch('/api/reboot',{method:'POST'}),800);}"
+      "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}"
+    "}"
+    "async function clearWifi(){"
+      "if(!confirm('Hapus semua WiFi tersimpan?'))return;"
+      "await fetch('/api/wifi/clear',{method:'POST'});"
+      "location.reload();"
+    "}"
+    "</script></div></body></html>");
   server.send(200, "text/html", html);
 }
 
@@ -655,53 +684,25 @@ void handleMqttConfigSave() {
 }
 
 void handleMqttPage() {
-  String html;
-  html += F("<!doctype html><html><head><meta charset=utf-8>"
-    "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>SEMS MQTT</title>"
+  String html = FPSTR(kSharedStyle);
+  html += F("<title>SEMS MQTT</title>"
     "<style>"
-    "*{box-sizing:border-box;margin:0;padding:0}"
-    "body{font-family:system-ui,sans-serif;background:#f1f5f9;min-height:100vh;padding:16px}"
-    ".wrap{max-width:480px;margin:0 auto}"
-    "h1{font-size:18px;font-weight:700;color:#0f172a;margin-bottom:16px}"
-    ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
-      "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
-    ".card-title{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;"
-      "letter-spacing:.05em;margin-bottom:12px}"
-    "label{display:block;font-size:13px;color:#64748b;margin-bottom:4px;margin-top:10px}"
-    "label:first-of-type{margin-top:0}"
-    "input[type=text],input[type=password],input[type=number]{"
-      "width:100%;padding:9px 12px;border:1px solid #e2e8f0;border-radius:8px;"
-      "font-size:14px;color:#0f172a;outline:none}"
-    "input:focus{border-color:#0f766e;box-shadow:0 0 0 2px rgba(15,118,110,.15)}"
-    ".toggle{display:flex;align-items:center;gap:10px;margin-bottom:4px}"
-    ".toggle input{width:auto}"
+    "input[type=number]{width:100%;padding:9px 12px;border:1px solid #e2e8f0;"
+      "border-radius:8px;font-size:14px;color:#0f172a;outline:none}"
+    ".toggle{display:flex;align-items:center;gap:10px;margin-bottom:8px}"
+    ".toggle input{width:auto;margin:0}"
     ".toggle span{font-size:14px;color:#0f172a;font-weight:500}"
-    "button{width:100%;background:#0f766e;color:#fff;border:0;border-radius:8px;"
-      "padding:11px;font-size:15px;font-weight:600;cursor:pointer;margin-top:14px}"
-    "button:hover{background:#0d6b63}"
-    ".badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;"
-      "padding:3px 10px;border-radius:99px}"
-    ".up{background:#dcfce7;color:#15803d}"
-    ".down{background:#fee2e2;color:#b91c1c}"
-    ".dot{width:7px;height:7px;border-radius:50%;background:currentColor}"
-    "#msg{margin-top:12px;font-size:13px;min-height:20px;color:#0f766e}"
-    ".nav{display:flex;gap:8px;margin-bottom:16px}"
-    ".nav a{font-size:13px;color:#0f766e;text-decoration:none;padding:6px 12px;"
-      "border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
-    "</style></head><body><div class=wrap>"
-    "<h1>SEMS AIoT &mdash; MQTT</h1>"
-    "<div class=nav><a href=/>&#9881; Setup</a><a href=/network>&#127760; Network</a></div>"
-    "<div class=card>"
+    "</style>"
+    "</head><body><div class=wrap>"
+    "<h1>SEMS AIoT &mdash; MQTT</h1>");
+  html += FPSTR(kNavLinks);
+  html += F("<div class=card>"
     "<div class=card-title>Status</div>"
     "<div id=status>Loading...</div>"
     "</div>"
     "<div class=card>"
     "<div class=card-title>Konfigurasi Broker</div>"
-    "<div class=toggle>"
-      "<input type=checkbox id=enabled>"
-      "<span>MQTT Aktif</span>"
-    "</div>"
+    "<div class=toggle><input type=checkbox id=enabled><span>MQTT Aktif</span></div>"
     "<label>Host / IP Broker</label>"
     "<input type=text id=host placeholder='128.199.x.x'>"
     "<label>Port</label>"
@@ -712,8 +713,8 @@ void handleMqttPage() {
     "<input type=password id=pass placeholder='kosong = tidak berubah'>"
     "<label>Topic Prefix</label>"
     "<input type=text id=topic placeholder='sems'>"
-    "<button onclick=save()>Simpan</button>"
-    "<div id=msg></div>"
+    "<button class=btn style='width:100%;margin-top:14px' onclick=save()>Simpan</button>"
+    "<div id=msg style='margin-top:10px;font-size:13px'></div>"
     "</div>"
     "<script>"
     "async function load(){"
@@ -727,12 +728,12 @@ void handleMqttPage() {
       "document.getElementById('status').innerHTML="
         "'<span class=\"badge '+(ok?'up':'down')+'\">"
           "<span class=dot></span>'+(ok?'Connected':'Disconnected')+'</span> '+"
-        "'<span style=\"font-size:12px;color:#64748b;margin-left:6px\">'+"
+        "'<span style=\"font-size:12px;color:#64748b;margin-left:8px\">'+"
           "(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';"
     "}"
     "async function save(){"
       "const msg=document.getElementById('msg');"
-      "msg.textContent='Menyimpan...';"
+      "msg.className='';msg.textContent='Menyimpan...';"
       "const b={enabled:document.getElementById('enabled').checked,"
         "host:document.getElementById('host').value,"
         "port:parseInt(document.getElementById('port').value)||1883,"
@@ -741,8 +742,8 @@ void handleMqttPage() {
         "topic:document.getElementById('topic').value||'sems'};"
       "const r=await fetch('/api/mqtt/save',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(x=>x.json());"
-      "if(r.ok){msg.style.color='#0f766e';msg.textContent='Tersimpan! Reconnecting...';setTimeout(load,2000);}"
-      "else{msg.style.color='#b91c1c';msg.textContent='Error: '+(r.error||'unknown');}"
+      "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Reconnecting...';setTimeout(load,2000);}"
+      "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}"
     "}"
     "load();setInterval(load,5000);"
     "</script></div></body></html>");
@@ -799,39 +800,26 @@ void handleNetworkApi() {
 }
 
 void handleNetworkPage() {
-  String html;
-  html += F("<!doctype html><html><head><meta charset=utf-8>"
-    "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>SEMS Network</title>"
-    "<style>"
-    "*{box-sizing:border-box;margin:0;padding:0}"
-    "body{font-family:system-ui,sans-serif;background:#f1f5f9;min-height:100vh;padding:16px}"
-    ".wrap{max-width:480px;margin:0 auto}"
-    "h1{font-size:18px;font-weight:700;color:#0f172a;margin-bottom:16px}"
-    ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
-      "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
-    ".card-title{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;"
-      "letter-spacing:.05em;margin-bottom:10px}"
-    ".row{display:flex;justify-content:space-between;align-items:center;padding:4px 0}"
-    ".label{font-size:13px;color:#64748b}"
-    ".val{font-size:13px;font-weight:600;color:#0f172a;text-align:right}"
-    ".badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;"
-      "padding:3px 10px;border-radius:99px}"
-    ".up{background:#dcfce7;color:#15803d}"
-    ".down{background:#fee2e2;color:#b91c1c}"
-    ".connecting{background:#fef9c3;color:#92400e}"
-    ".dot{width:7px;height:7px;border-radius:50%;background:currentColor}"
-    ".sep{height:1px;background:#f1f5f9;margin:6px 0}"
-    ".nav{display:flex;gap:8px;margin-bottom:16px}"
-    ".nav a{font-size:13px;color:#0f766e;text-decoration:none;padding:6px 12px;"
-      "border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
-    ".nav a:hover{background:#f0fdf4}"
-    ".refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:8px}"
-    "</style></head><body><div class=wrap>"
-    "<h1>SEMS AIoT &mdash; Network</h1>"
-    "<div class=nav><a href=/>&#9881; Setup</a><a href=/mqtt>&#128236; MQTT</a><a href=/network>&#9654; Refresh</a></div>"
-    "<div id=root><p style='color:#94a3b8;font-size:13px'>Loading...</p></div>"
+  String html = FPSTR(kSharedStyle);
+  html += F("<title>SEMS Network</title>"
+    "<style>.refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:4px}</style>"
+    "</head><body><div class=wrap>"
+    "<h1>SEMS AIoT &mdash; Network</h1>");
+  html += FPSTR(kNavLinks);
+  html += F("<div id=root><p style='color:#94a3b8;font-size:13px'>Loading...</p></div>"
     "<div class=refresh id=ts></div>"
+    // Scan section
+    "<div class=card style='margin-top:12px'>"
+    "<div class=card-title>Scan WiFi</div>"
+    "<button class='btn btn-sm' type=button onclick=\"scanWifi('ssid')\">&#128268; Scan Sekarang</button>"
+    "<div id=msg style='margin-top:8px;font-size:13px'></div>"
+    "<div id=scanList></div>"
+    "<div id=addForm style='display:none'>"
+    "<label>SSID</label><input type=text id=ssid readonly>"
+    "<label>Password</label><input type=password id=pass placeholder='Password'>"
+    "<button class=btn style='width:100%;margin-top:10px' onclick=saveWifi()>Simpan &amp; Reboot</button>"
+    "</div>"
+    "</div>"
     "<script>"
     "function badge(ok,yes,no,mid){"
       "const s=ok===null?'connecting':ok?'up':'down';"
@@ -845,29 +833,25 @@ void handleNetworkPage() {
         "const d=await fetch('/api/network').then(r=>r.json());"
         "const w=d.wifi,a=d.ap,l=d.lan,dv=d.device;"
         "let h='';"
-        // WiFi card
         "h+='<div class=card><div class=card-title>WiFi STA</div>';"
         "const wok=w.connected?true:w.connecting?null:false;"
         "h+=row('Status',badge(wok,'Connected','Disconnected','Connecting...'));"
-        "if(w.ssid)h+=row('SSID','<span style=\"font-family:monospace\">'+w.ssid+'</span>');"
+        "if(w.ssid)h+=row('SSID','<code>'+w.ssid+'</code>');"
         "if(w.ip)h+=row('IP Address',w.ip);"
         "if(w.rssi!=null)h+=row('Signal',w.rssi+' dBm');"
         "h+='</div>';"
-        // AP card
         "h+='<div class=card><div class=card-title>Access Point</div>';"
         "h+=row('Status',badge(a.active,'Active','Off'));"
-        "if(a.ssid){h+=sep();h+=row('SSID','<span style=\"font-family:monospace\">'+a.ssid+'</span>');}"
+        "if(a.ssid){h+=sep();h+=row('SSID','<code>'+a.ssid+'</code>');}"
         "if(a.ip)h+=row('IP',a.ip);"
         "if(a.active)h+=row('Clients',a.clients);"
         "h+='</div>';"
-        // LAN card
         "h+='<div class=card><div class=card-title>LAN &mdash; W5500</div>';"
         "h+=row('Status',badge(l.ready,'Connected','No DHCP / No cable'));"
         "h+=row('Link',badge(l.link,'Up','Down'));"
         "if(l.ip)h+=row('IP Address',l.ip);"
         "h+=row('Role','MQTT transport');"
         "h+='</div>';"
-        // Device card
         "h+='<div class=card><div class=card-title>Device</div>';"
         "h+=row('Firmware','v'+dv.fw);"
         "h+=row('Uptime',dv.uptime);"
@@ -877,7 +861,31 @@ void handleNetworkPage() {
         "document.getElementById('ts').textContent='Updated '+new Date().toLocaleTimeString();"
       "}catch(e){document.getElementById('root').innerHTML='<p style=color:#b91c1c>Error: '+e+'</p>';}"
     "}"
-    "load();setInterval(load,5000);"
+    "load();setInterval(load,5000);");
+  html += FPSTR(kScanScript);
+  html += F(
+    // Override data-s handler to show addForm
+    "const _orig=pollScan;"
+    "const _scanWifi=scanWifi;"
+    "document.querySelectorAll&&(window.addEventListener('click',e=>{"
+      "if(e.target.dataset.s!==undefined){"
+        "document.getElementById('ssid').value=e.target.dataset.s;"
+        "document.getElementById('pass').value='';"
+        "document.getElementById('addForm').style.display='block';"
+        "document.getElementById('pass').focus();"
+      "}"
+    "}));"
+    "async function saveWifi(){"
+      "const msg=document.getElementById('msg');"
+      "msg.className='err';msg.textContent='Menyimpan...';"
+      "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
+        "pass:document.getElementById('pass').value});"
+      "const r=await fetch('/api/wifi/save',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
+      "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Rebooting...';"
+        "setTimeout(()=>fetch('/api/reboot',{method:'POST'}),800);}"
+      "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}"
+    "}"
     "</script></div></body></html>");
   server.send(200, "text/html", html);
 }

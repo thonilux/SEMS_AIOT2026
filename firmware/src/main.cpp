@@ -35,6 +35,7 @@ static bool apStarted    = false;
 static bool staConnected = false;
 static bool staConnecting = false;
 static uint32_t staStartMs = 0;
+static uint8_t triedMask = 0;  // bitmask of wifiList indices tried this round
 
 static WebServer server(80);
 
@@ -228,13 +229,13 @@ void clearAllWifi() {
   prefs.end();
 }
 
-// Scan visible networks, pick saved entry with strongest RSSI.
+// Scan visible networks, pick saved entry with strongest RSSI, skipping triedMask.
 // Returns index into wifiList, or -1 if none found.
-int pickBestWifi() {
+int pickBestWifi(uint8_t skipMask = 0) {
   oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
   Serial.println("Scanning for best saved WiFi...");
-  const int found = WiFi.scanNetworks(false, false);  // blocking, no hidden
-  if (found <= 0) { Serial.println("Scan: nothing found"); return -1; }
+  const int found = WiFi.scanNetworks(false, false);
+  if (found <= 0) { Serial.println("Scan: nothing found"); WiFi.scanDelete(); return -1; }
 
   int bestIdx = -1;
   int bestRssi = -999;
@@ -242,6 +243,7 @@ int pickBestWifi() {
     const String scannedSsid = WiFi.SSID(s);
     const int rssi = WiFi.RSSI(s);
     for (uint8_t w = 0; w < wifiCount; w++) {
+      if (skipMask & (1 << w)) continue;  // already tried
       if (wifiList[w].ssid == scannedSsid && rssi > bestRssi) {
         bestRssi = rssi;
         bestIdx  = w;
@@ -252,7 +254,7 @@ int pickBestWifi() {
   if (bestIdx >= 0)
     Serial.printf("Best: [%d] %s (%d dBm)\n", bestIdx, wifiList[bestIdx].ssid.c_str(), bestRssi);
   else
-    Serial.println("No saved network visible");
+    Serial.printf("No untried saved network visible (tried: 0x%02X)\n", skipMask);
   return bestIdx;
 }
 
@@ -489,19 +491,29 @@ void startWebServer() {
 // ============================================================
 // WiFi STA lifecycle
 // ============================================================
-void beginStaConnect() {
-  // Scan and pick strongest visible saved network
-  const int best = pickBestWifi();
-  if (best < 0) {
-    oledShow("No WiFi Found", "Check saved list", "AP: 192.168.4.1", 8000);
-    return;
-  }
+// Try connecting to best visible network not yet tried this round.
+// Returns false if all saved networks have been tried.
+bool tryNextWifi() {
+  const int best = pickBestWifi(triedMask);
+  if (best < 0) return false;
+  triedMask |= (1 << best);
   savedSsid = wifiList[best].ssid;
-  Serial.printf("STA connecting to: %s\n", savedSsid.c_str());
-  oledShow("WiFi Connecting", savedSsid.c_str(), "", 15000);
+  char attempt[24];
+  snprintf(attempt, sizeof(attempt), "(%d/%d)", __builtin_popcount(triedMask), wifiCount);
+  Serial.printf("STA connecting to: %s %s\n", savedSsid.c_str(), attempt);
+  oledShow("WiFi Connecting", savedSsid.c_str(), attempt, 15000);
+  WiFi.disconnect(false);
   WiFi.begin(wifiList[best].ssid.c_str(), wifiList[best].pass.c_str());
   staConnecting = true;
   staStartMs = millis();
+  return true;
+}
+
+void beginStaConnect() {
+  triedMask = 0;  // fresh round
+  if (!tryNextWifi()) {
+    oledShow("No WiFi Found", "Check saved list", "AP: 192.168.4.1", 8000);
+  }
 }
 
 void restoreAp() {
@@ -529,19 +541,22 @@ void handleStaLifecycle(uint32_t now) {
     }
     if (now - staStartMs >= kStaTimeoutMs) {
       staConnecting = false;
-      staConnected  = false;
-      Serial.println("STA timeout — AP only");
-      oledShow("WiFi Failed", savedSsid.c_str(), "Using AP only", 6000);
+      Serial.printf("STA timeout: %s\n", savedSsid.c_str());
+      // Try next saved network before giving up
+      if (!tryNextWifi()) {
+        Serial.println("All networks tried — AP only");
+        oledShow("No WiFi", "All networks tried", "AP: 192.168.4.1", 8000);
+      }
     }
     return;
   }
 
-  // Monitor STA drop — restore AP and reconnect
+  // Monitor STA drop — restore AP and start fresh round
   if (staConnected && WiFi.status() != WL_CONNECTED) {
     staConnected = false;
-    Serial.println("STA dropped — restoring AP, reconnecting");
+    Serial.println("STA dropped — restoring AP, trying all networks");
     restoreAp();
-    oledShow("WiFi Lost", "Reconnecting...", savedSsid.c_str(), 5000);
+    oledShow("WiFi Lost", "Reconnecting...", "", 3000);
     beginStaConnect();
   }
 }

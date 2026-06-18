@@ -16,6 +16,11 @@ static constexpr char kNvsNamespace[]  = "wifi";
 static constexpr uint32_t kStaTimeoutMs = 15000;
 static constexpr uint8_t kMaxSavedWifi = 5;
 
+// RTC memory survives reboot but NOT power-off
+// Used to signal "this reboot was triggered by WiFi failure — start AP"
+RTC_DATA_ATTR static uint32_t rtcWifiFailMagic = 0;
+static constexpr uint32_t kWifiFailMagic = 0xDEADF17E;
+
 // --- OLED ---
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R2, U8X8_PIN_NONE);
 static bool oledReady = false;
@@ -513,8 +518,9 @@ bool tryNextWifi() {
 
 void scheduleReboot() {
   if (rebootAtMs != 0) return;  // already scheduled
+  rtcWifiFailMagic = kWifiFailMagic;  // signal next boot to start AP
   rebootAtMs = millis() + 60000;
-  Serial.println("No WiFi — rebooting in 60s");
+  Serial.println("No WiFi — rebooting in 60s (AP will start on next boot)");
 }
 
 void beginStaConnect() {
@@ -589,15 +595,25 @@ void setup() {
 
   loadWifiList();
 
-  // Always start AP — web UI always accessible
-  WiFi.mode(WIFI_AP_STA);
-  startAp();
-  startWebServer();
+  const bool wifiFailReboot = (rtcWifiFailMagic == kWifiFailMagic);
+  rtcWifiFailMagic = 0;  // clear — next reboot is treated as cold boot unless set again
 
-  if (wifiCount > 0) {
-    beginStaConnect();
+  if (wifiCount == 0 || wifiFailReboot) {
+    // No credentials, or previous boot failed all networks — start AP for config access
+    WiFi.mode(WIFI_AP_STA);
+    startAp();
+    startWebServer();
+    if (wifiCount == 0) {
+      oledShow("No saved WiFi", "Open 192.168.4.1", "to configure", 8000);
+    } else {
+      // Still try STA in background even with AP on
+      beginStaConnect();
+    }
   } else {
-    oledShow("No saved WiFi", "Open 192.168.4.1", "to configure", 8000);
+    // Cold boot with credentials — STA only, no AP until needed
+    WiFi.mode(WIFI_STA);
+    startWebServer();  // server ready but only reachable after STA connects
+    beginStaConnect();
   }
 }
 

@@ -508,6 +508,139 @@ void handleReboot() {
   ESP.restart();
 }
 
+void handleNetworkApi() {
+  uint32_t s = millis() / 1000;
+  uint32_t m = s / 60; s %= 60;
+  uint32_t h = m / 60; m %= 60;
+  char uptime[16]; snprintf(uptime, sizeof(uptime), "%02luh%02lum%02lus", h, m, s);
+
+  String body = "{";
+  // WiFi STA
+  body += "\"wifi\":{";
+  body += "\"connected\":"; body += staConnected ? "true" : "false";
+  body += ",\"connecting\":"; body += staConnecting ? "true" : "false";
+  if (staConnected) {
+    String ip = WiFi.localIP().toString();
+    String ssid = savedSsid; ssid.replace("\\","\\\\"); ssid.replace("\"","\\\"");
+    body += ",\"ip\":\""; body += ip; body += "\"";
+    body += ",\"ssid\":\""; body += ssid; body += "\"";
+    body += ",\"rssi\":"; body += WiFi.RSSI();
+  } else if (staConnecting) {
+    String ssid = savedSsid; ssid.replace("\\","\\\\"); ssid.replace("\"","\\\"");
+    body += ",\"ssid\":\""; body += ssid; body += "\"";
+  }
+  body += "}";
+  // AP
+  body += ",\"ap\":{";
+  body += "\"active\":"; body += apStarted ? "true" : "false";
+  if (apStarted) {
+    body += ",\"ssid\":\""; body += WiFi.softAPSSID(); body += "\"";
+    body += ",\"ip\":\"192.168.4.1\"";
+    body += ",\"clients\":"; body += WiFi.softAPgetStationNum();
+  }
+  body += "}";
+  // LAN
+  body += ",\"lan\":{";
+  body += "\"ready\":"; body += ethReady ? "true" : "false";
+  body += ",\"link\":"; body += (Ethernet.linkStatus() == LinkON) ? "true" : "false";
+  if (ethReady) {
+    body += ",\"ip\":\""; body += Ethernet.localIP().toString(); body += "\"";
+  }
+  body += "}";
+  // Device
+  body += ",\"device\":{";
+  body += "\"uptime\":\""; body += uptime; body += "\"";
+  body += ",\"heap\":"; body += ESP.getFreeHeap();
+  body += ",\"fw\":\"" FW_VERSION "\"";
+  body += "}";
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
+void handleNetworkPage() {
+  String html;
+  html += F("<!doctype html><html><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>SEMS Network</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:system-ui,sans-serif;background:#f1f5f9;min-height:100vh;padding:16px}"
+    ".wrap{max-width:480px;margin:0 auto}"
+    "h1{font-size:18px;font-weight:700;color:#0f172a;margin-bottom:16px}"
+    ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
+      "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
+    ".card-title{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;"
+      "letter-spacing:.05em;margin-bottom:10px}"
+    ".row{display:flex;justify-content:space-between;align-items:center;padding:4px 0}"
+    ".label{font-size:13px;color:#64748b}"
+    ".val{font-size:13px;font-weight:600;color:#0f172a;text-align:right}"
+    ".badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;"
+      "padding:3px 10px;border-radius:99px}"
+    ".up{background:#dcfce7;color:#15803d}"
+    ".down{background:#fee2e2;color:#b91c1c}"
+    ".connecting{background:#fef9c3;color:#92400e}"
+    ".dot{width:7px;height:7px;border-radius:50%;background:currentColor}"
+    ".sep{height:1px;background:#f1f5f9;margin:6px 0}"
+    ".nav{display:flex;gap:8px;margin-bottom:16px}"
+    ".nav a{font-size:13px;color:#0f766e;text-decoration:none;padding:6px 12px;"
+      "border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
+    ".nav a:hover{background:#f0fdf4}"
+    ".refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:8px}"
+    "</style></head><body><div class=wrap>"
+    "<h1>SEMS AIoT &mdash; Network</h1>"
+    "<div class=nav><a href=/>&#9881; Setup</a><a href=/network>&#9654; Refresh</a></div>"
+    "<div id=root><p style='color:#94a3b8;font-size:13px'>Loading...</p></div>"
+    "<div class=refresh id=ts></div>"
+    "<script>"
+    "function badge(ok,yes,no,mid){"
+      "const s=ok===null?'connecting':ok?'up':'down';"
+      "const t=ok===null?mid:ok?yes:no;"
+      "return'<span class=\"badge '+s+'\"><span class=dot></span>'+t+'</span>';"
+    "}"
+    "function row(l,v){return'<div class=row><span class=label>'+l+'</span><span class=val>'+v+'</span></div>';}"
+    "function sep(){return'<div class=sep></div>';}"
+    "async function load(){"
+      "try{"
+        "const d=await fetch('/api/network').then(r=>r.json());"
+        "const w=d.wifi,a=d.ap,l=d.lan,dv=d.device;"
+        "let h='';"
+        // WiFi card
+        "h+='<div class=card><div class=card-title>WiFi STA</div>';"
+        "const wok=w.connected?true:w.connecting?null:false;"
+        "h+=row('Status',badge(wok,'Connected','Disconnected','Connecting...'));"
+        "if(w.ssid)h+=row('SSID','<span style=\"font-family:monospace\">'+w.ssid+'</span>');"
+        "if(w.ip)h+=row('IP Address',w.ip);"
+        "if(w.rssi!=null)h+=row('Signal',w.rssi+' dBm');"
+        "h+='</div>';"
+        // AP card
+        "h+='<div class=card><div class=card-title>Access Point</div>';"
+        "h+=row('Status',badge(a.active,'Active','Off'));"
+        "if(a.ssid){h+=sep();h+=row('SSID','<span style=\"font-family:monospace\">'+a.ssid+'</span>');}"
+        "if(a.ip)h+=row('IP',a.ip);"
+        "if(a.active)h+=row('Clients',a.clients);"
+        "h+='</div>';"
+        // LAN card
+        "h+='<div class=card><div class=card-title>LAN &mdash; W5500</div>';"
+        "h+=row('Status',badge(l.ready,'Connected','No DHCP / No cable'));"
+        "h+=row('Link',badge(l.link,'Up','Down'));"
+        "if(l.ip)h+=row('IP Address',l.ip);"
+        "h+=row('Role','MQTT transport');"
+        "h+='</div>';"
+        // Device card
+        "h+='<div class=card><div class=card-title>Device</div>';"
+        "h+=row('Firmware','v'+dv.fw);"
+        "h+=row('Uptime',dv.uptime);"
+        "h+=row('Free Heap',Math.round(dv.heap/1024)+' kB');"
+        "h+='</div>';"
+        "document.getElementById('root').innerHTML=h;"
+        "document.getElementById('ts').textContent='Updated '+new Date().toLocaleTimeString();"
+      "}catch(e){document.getElementById('root').innerHTML='<p style=color:#b91c1c>Error: '+e+'</p>';}"
+    "}"
+    "load();setInterval(load,5000);"
+    "</script></div></body></html>");
+  server.send(200, "text/html", html);
+}
+
 // ============================================================
 // AP
 // ============================================================
@@ -528,6 +661,8 @@ void startAp() {
 
 void startWebServer() {
   server.on("/",                  HTTP_GET,  handleRoot);
+  server.on("/network",           HTTP_GET,  handleNetworkPage);
+  server.on("/api/network",       HTTP_GET,  handleNetworkApi);
   server.on("/api/scan",          HTTP_POST, handleScanStart);
   server.on("/api/scan/result",   HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",     HTTP_POST, handleWifiSave);

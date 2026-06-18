@@ -56,7 +56,9 @@ static bool oledReady = false;
 static uint32_t oledUntilMs = 0;
 static uint8_t oledPage = 0;
 static uint32_t oledPageMs = 0;
-static constexpr uint32_t kPageIntervalMs = 4000;
+static constexpr uint32_t kPageIntervalMs = 3000;
+static uint32_t oledHeartbeatMs = 0;
+static uint8_t  oledHeartTick = 0;
 
 // --- WiFi credentials list ---
 struct WifiEntry { String ssid; String pass; };
@@ -218,9 +220,26 @@ void oledDrawPage(uint8_t page) {
   oled.sendBuffer();
 }
 
+// Draw/erase heartbeat dot at bottom-right corner
+static void oledHeartbeat(uint32_t now) {
+  if (!oledReady) return;
+  if (now < oledUntilMs) return;  // overlay active — skip
+  if (now - oledHeartbeatMs < 500) return;
+  oledHeartbeatMs = now;
+  oledHeartTick++;
+  // Erase previous dot area (5x5 px at 123,59)
+  oled.setDrawColor(0);
+  oled.drawBox(123, 59, 5, 5);
+  oled.setDrawColor(1);
+  // Draw dot on odd ticks
+  if (oledHeartTick & 1) oled.drawBox(124, 60, 3, 3);
+  oled.sendBuffer();
+}
+
 void updateOled(uint32_t now) {
   if (!oledReady) return;
   if (now < oledUntilMs) return;
+  oledHeartbeat(now);
   if (now - oledPageMs < kPageIntervalMs) return;
   oledPageMs = now;
   oledPage = (oledPage + 1) % 3;

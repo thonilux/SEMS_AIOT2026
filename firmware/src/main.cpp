@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 
 // --- pins ---
@@ -476,6 +477,12 @@ void startWebServer() {
   server.on("/api/wifi/list",     HTTP_GET,  handleWifiList);
   server.on("/api/reboot",        HTTP_POST, handleReboot);
   server.begin();
+  if (MDNS.begin("sems")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS: http://sems.local");
+  } else {
+    Serial.println("mDNS failed");
+  }
   Serial.println("WebServer started");
 }
 

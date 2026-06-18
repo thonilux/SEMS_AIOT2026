@@ -167,9 +167,8 @@ static void drawPageLan() {
   oled.drawStr(0, 10, "LAN");
   oledHLine(13);
 
-  // Ethernet plug icon: open_iconic_www_2x_t \x47 = cloud/globe, use embedded \x50 = plug
   oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
-  oled.drawGlyph(0, 36, 0x50);  // plug icon
+  oled.drawGlyph(0, 36, ethReady ? 0x71 : 0x70);  // link-intact / link-broken
 
   oled.setFont(u8g2_font_6x12_tf);
   if (ethReady) {

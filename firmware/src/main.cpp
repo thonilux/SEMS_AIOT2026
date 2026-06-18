@@ -5,9 +5,18 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <SPI.h>
+#include <Ethernet_Generic.h>
 
 // --- pins ---
-static constexpr uint8_t kLedPin = 2;
+static constexpr uint8_t kLedPin   = 2;
+static constexpr uint8_t kEthCs    = 5;
+static constexpr uint8_t kEthInt   = 27;
+static constexpr uint8_t kEthRst   = 26;
+
+// --- W5500 state ---
+static bool ethReady = false;
+static byte ethMac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
 // --- AP config ---
 static constexpr char kApSsidPrefix[]  = "SEMS-SETUP";
@@ -145,10 +154,13 @@ static void drawPageNetwork() {
     oled.drawStr(22, 26, "No WiFi STA");
   }
 
-  // AP status bar at bottom
+  // Bottom bar: LAN IP if available, else AP status
   oledHLine(53);
   oled.setFont(u8g2_font_5x7_tf);
-  if (apStarted) {
+  if (ethReady) {
+    String lanLine = "LAN " + Ethernet.localIP().toString();
+    oled.drawStr(0, 63, lanLine.c_str());
+  } else if (apStarted) {
     String apLine = "AP " + WiFi.softAPSSID() + " 192.168.4.1";
     oled.drawStr(0, 63, apLine.c_str());
   } else {
@@ -597,6 +609,46 @@ void handleStaLifecycle(uint32_t now) {
 }
 
 // ============================================================
+// W5500 Ethernet
+// ============================================================
+void initEthernet() {
+  // Hardware reset W5500
+  pinMode(kEthRst, OUTPUT);
+  digitalWrite(kEthRst, LOW);
+  delay(10);
+  digitalWrite(kEthRst, HIGH);
+  delay(200);
+
+  Ethernet.init(kEthCs);
+  oledShow("LAN", "Requesting DHCP...", "", 8000);
+  Serial.println("W5500: DHCP...");
+
+  if (Ethernet.begin(ethMac, 5000) == 0) {
+    Serial.println("W5500: DHCP failed");
+    // Try link detection to distinguish no-cable vs no-DHCP
+    if (Ethernet.linkStatus() == LinkOFF) {
+      Serial.println("W5500: no cable");
+      oledShow("LAN", "No cable", "", 3000);
+    } else {
+      Serial.println("W5500: no DHCP response");
+      oledShow("LAN", "DHCP timeout", "", 3000);
+    }
+    ethReady = false;
+    return;
+  }
+
+  ethReady = true;
+  Serial.printf("W5500 IP: %s\n", Ethernet.localIP().toString().c_str());
+  oledShow("LAN Ready", Ethernet.localIP().toString().c_str(), "", 5000);
+}
+
+// Call periodically to renew DHCP lease
+void maintainEthernet() {
+  if (!ethReady) return;
+  Ethernet.maintain();
+}
+
+// ============================================================
 // Arduino
 // ============================================================
 void setup() {
@@ -613,6 +665,8 @@ void setup() {
 
   Serial.println("\n=== SEMS AIoT " FW_VERSION " ===");
   oledShow("SEMS AIoT", "FW: " FW_VERSION, "Booting...", 2000);
+
+  initEthernet();
 
   loadWifiList();
 
@@ -681,6 +735,7 @@ void loop() {
   server.handleClient();
   handleStaLifecycle(now);
   handleRebootCountdown(now);
+  maintainEthernet();
   if (now - lastBlinkMs >= 500) { lastBlinkMs = now; ledState = !ledState; digitalWrite(kLedPin, ledState); }
   updateOled(now);
 }

@@ -33,42 +33,119 @@ static uint32_t staStartMs = 0;
 static WebServer server(80);
 
 // ============================================================
-// OLED
+// OLED helpers
+// ============================================================
+// Draw a horizontal divider line
+static void oledHLine(uint8_t y) {
+  oled.drawHLine(0, y, 128);
+}
+
+// Right-align a string within [x, 128)
+static void oledDrawRight(const String& s, uint8_t y) {
+  uint8_t w = oled.getStrWidth(s.c_str());
+  oled.drawStr(128 - w, y, s.c_str());
+}
+
+// ============================================================
+// OLED status overlay  — call oledShow() for transient events
 // ============================================================
 void oledShow(const char* l1, const char* l2 = "", const char* l3 = "", uint32_t durationMs = 4000) {
   oledUntilMs = millis() + durationMs;
   if (!oledReady) return;
   oled.clearBuffer();
+
+  // Large icon left, title right — use open_iconic_embedded 2x (16px)
+  // \x4e = chip/cpu icon in open_iconic_embedded_2x_t
+  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
+  oled.drawGlyph(0, 20, 0x4e);
+
+  oled.setFont(u8g2_font_helvB08_tf);
+  oled.drawStr(22, 14, l1);
+
   oled.setFont(u8g2_font_6x12_tf);
-  oled.drawStr(0, 12, l1);
-  if (l2[0]) oled.drawStr(0, 28, l2);
-  if (l3[0]) oled.drawStr(0, 44, l3);
+  if (l2[0]) oled.drawStr(22, 28, l2);
+
+  oledHLine(34);
+  if (l3[0]) oled.drawStr(0, 48, l3);
+
   oled.sendBuffer();
+}
+
+// ============================================================
+// OLED page rotation
+// ============================================================
+
+// Page 0: Device info
+static void drawPageDevice() {
+  // Header bar
+  oled.setFont(u8g2_font_helvB08_tf);
+  oled.drawStr(0, 10, "SEMS AIoT");
+  oledDrawRight("v" FW_VERSION, 10);
+  oledHLine(13);
+
+  // Icon: chip
+  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
+  oled.drawGlyph(0, 56, 0x4e);  // cpu/chip
+
+  // Uptime
+  oled.setFont(u8g2_font_6x12_tf);
+  uint32_t s = millis() / 1000;
+  uint32_t m = s / 60; s %= 60;
+  uint32_t h = m / 60; m %= 60;
+  char uptime[16]; snprintf(uptime, sizeof(uptime), "%02luh%02lum%02lus", h, m, s);
+  oled.drawStr(22, 30, "Uptime:");
+  oled.drawStr(22, 44, uptime);
+
+  // Free heap
+  char heap[16]; snprintf(heap, sizeof(heap), "Heap:%lukB", ESP.getFreeHeap() / 1024);
+  oled.drawStr(22, 58, heap);
+}
+
+// Page 1: Network
+static void drawPageNetwork() {
+  // Header
+  oled.setFont(u8g2_font_helvB08_tf);
+  oled.drawStr(0, 10, "Network");
+  oledHLine(13);
+
+  // WiFi icon (open_iconic_www_2x_t \x51 = wifi signal)
+  oled.setFont(u8g2_font_open_iconic_www_2x_t);
+  oled.drawGlyph(0, 36, 0x51);
+
+  oled.setFont(u8g2_font_6x12_tf);
+  if (staConnected) {
+    oled.setFont(u8g2_font_helvB08_tf);
+    oled.drawStr(22, 26, WiFi.localIP().toString().c_str());
+    oled.setFont(u8g2_font_6x12_tf);
+    // Truncate SSID to fit
+    String ssidStr = savedSsid.length() > 17 ? savedSsid.substring(0, 16) + "~" : savedSsid;
+    oled.drawStr(22, 38, ssidStr.c_str());
+    char rssi[12]; snprintf(rssi, sizeof(rssi), "RSSI:%ddBm", WiFi.RSSI());
+    oled.drawStr(22, 50, rssi);
+  } else if (staConnecting) {
+    oled.drawStr(22, 26, "Connecting...");
+    String ssidStr = savedSsid.length() > 17 ? savedSsid.substring(0, 16) + "~" : savedSsid;
+    oled.drawStr(22, 38, ssidStr.c_str());
+  } else {
+    oled.drawStr(22, 26, "No WiFi STA");
+  }
+
+  // AP status bar at bottom
+  oledHLine(53);
+  oled.setFont(u8g2_font_5x7_tf);
+  if (apStarted) {
+    String apLine = "AP " + WiFi.softAPSSID() + " 192.168.4.1";
+    oled.drawStr(0, 63, apLine.c_str());
+  } else {
+    oled.drawStr(0, 63, "AP: off");
+  }
 }
 
 void oledDrawPage(uint8_t page) {
   oled.clearBuffer();
-  oled.setFont(u8g2_font_6x12_tf);
   switch (page % 2) {
-    case 0:
-      oled.drawStr(0, 12, "SEMS AIoT " FW_VERSION);
-      oled.drawStr(0, 28, (String("Up: ") + String(millis() / 1000) + "s").c_str());
-      oled.drawStr(0, 44, staConnected ? "STA: connected" : (staConnecting ? "STA: connecting" : "STA: --"));
-      break;
-    case 1: {
-      oled.drawStr(0, 12, "Network");
-      if (staConnected) {
-        oled.drawStr(0, 28, ("STA: " + WiFi.localIP().toString()).c_str());
-        oled.drawStr(0, 44, savedSsid.c_str());
-      } else if (staConnecting) {
-        oled.drawStr(0, 28, "Connecting...");
-        oled.drawStr(0, 44, savedSsid.c_str());
-      } else {
-        oled.drawStr(0, 28, "No STA");
-      }
-      oled.drawStr(0, 56, apStarted ? "AP: 192.168.4.1" : "AP: off");
-      break;
-    }
+    case 0: drawPageDevice();  break;
+    case 1: drawPageNetwork(); break;
   }
   oled.sendBuffer();
 }

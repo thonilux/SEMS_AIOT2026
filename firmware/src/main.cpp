@@ -220,18 +220,15 @@ void oledDrawPage(uint8_t page) {
   oled.sendBuffer();
 }
 
-// Draw/erase heartbeat dot at bottom-right corner
+// Draw/erase heartbeat dot at bottom-right corner — always runs, even during overlay
 static void oledHeartbeat(uint32_t now) {
   if (!oledReady) return;
-  if (now < oledUntilMs) return;  // overlay active — skip
   if (now - oledHeartbeatMs < 500) return;
   oledHeartbeatMs = now;
   oledHeartTick++;
-  // Erase previous dot area (5x5 px at 123,59)
   oled.setDrawColor(0);
   oled.drawBox(123, 59, 5, 5);
   oled.setDrawColor(1);
-  // Draw dot on odd ticks
   if (oledHeartTick & 1) oled.drawBox(124, 60, 3, 3);
   oled.sendBuffer();
 }
@@ -1071,19 +1068,21 @@ void initEthernet() {
   delay(200);
 
   Ethernet.init(kEthCs);
+
+  // Skip DHCP if no cable — saves 5s blocking wait
+  if (Ethernet.linkStatus() == LinkOFF) {
+    Serial.println("W5500: no cable, skip DHCP");
+    oledShow("LAN", "No cable", "", 2000);
+    ethReady = false;
+    return;
+  }
+
   oledShow("LAN", "Requesting DHCP...", "", 8000);
   Serial.println("W5500: DHCP...");
 
-  if (Ethernet.begin(ethMac, 5000) == 0) {
+  if (Ethernet.begin(ethMac, 4000) == 0) {
     Serial.println("W5500: DHCP failed");
-    // Try link detection to distinguish no-cable vs no-DHCP
-    if (Ethernet.linkStatus() == LinkOFF) {
-      Serial.println("W5500: no cable");
-      oledShow("LAN", "No cable", "", 3000);
-    } else {
-      Serial.println("W5500: no DHCP response");
-      oledShow("LAN", "DHCP timeout", "", 3000);
-    }
+    oledShow("LAN", "DHCP timeout", "", 2000);
     ethReady = false;
     return;
   }

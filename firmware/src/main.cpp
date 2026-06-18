@@ -511,10 +511,17 @@ bool tryNextWifi() {
   return true;
 }
 
+void scheduleReboot() {
+  if (rebootAtMs != 0) return;  // already scheduled
+  rebootAtMs = millis() + 60000;
+  Serial.println("No WiFi — rebooting in 60s");
+}
+
 void beginStaConnect() {
-  triedMask = 0;  // fresh round
+  triedMask = 0;
+  rebootAtMs = 0;  // cancel any pending reboot
   if (!tryNextWifi()) {
-    oledShow("No WiFi Found", "Check saved list", "AP: 192.168.4.1", 8000);
+    scheduleReboot();
   }
 }
 
@@ -546,8 +553,7 @@ void handleStaLifecycle(uint32_t now) {
       Serial.printf("STA timeout: %s\n", savedSsid.c_str());
       // Try next saved network before giving up
       if (!tryNextWifi()) {
-        Serial.println("All networks tried — rebooting in 60s");
-        rebootAtMs = millis() + 60000;
+        scheduleReboot();
       }
     }
     return;

@@ -234,6 +234,7 @@ void clearAllWifi() {
 int pickBestWifi(uint8_t skipMask = 0) {
   oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
   Serial.println("Scanning for best saved WiFi...");
+  delay(500);  // let radio settle after mode switch
   const int found = WiFi.scanNetworks(false, false);
   if (found <= 0) { Serial.println("Scan: nothing found"); WiFi.scanDelete(); return -1; }
 

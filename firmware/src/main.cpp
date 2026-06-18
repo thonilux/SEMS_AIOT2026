@@ -475,10 +475,30 @@ static const char kScanScript[] PROGMEM =
 // Web handlers
 // ============================================================
 void handleRoot() {
+  // Hardware info
+  uint32_t sec = millis() / 1000;
+  uint32_t mn = sec / 60; sec %= 60;
+  uint32_t hr = mn / 60; mn %= 60;
+  char uptime[16]; snprintf(uptime, sizeof(uptime), "%02luh%02lum%02lus", hr, mn, sec);
+  char mac[18]; uint8_t m[6]; WiFi.macAddress(m);
+  snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
+
   String html = FPSTR(kSharedStyle);
   html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
     "<h1>SEMS AIoT &mdash; Setup</h1>");
   html += FPSTR(kNavLinks);
+
+  // Hardware info card
+  html += F("<div class=card><div class=card-title>Hardware</div>");
+  html += "<div class=row><span class=label>Chip</span><span class=val>ESP32 " + String(ESP.getChipModel()) + " rev" + String(ESP.getChipRevision()) + "</span></div>";
+  html += "<div class=sep></div>";
+  html += "<div class=row><span class=label>Flash</span><span class=val>" + String(ESP.getFlashChipSize()/1024) + " kB</span></div>";
+  html += "<div class=row><span class=label>Free Heap</span><span class=val>" + String(ESP.getFreeHeap()/1024) + " kB</span></div>";
+  html += "<div class=sep></div>";
+  html += "<div class=row><span class=label>MAC Address</span><span class=val style='font-family:monospace;font-size:12px'>" + String(mac) + "</span></div>";
+  html += "<div class=row><span class=label>Firmware</span><span class=val>v" FW_VERSION "</span></div>";
+  html += "<div class=row><span class=label>Uptime</span><span class=val>" + String(uptime) + "</span></div>";
+  html += F("</div>");
 
   // Saved WiFi card
   html += F("<div class=card><div class=card-title>Saved WiFi Networks</div>");

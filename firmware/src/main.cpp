@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <Ethernet_Generic.h>
+#include <PubSubClient.h>
 
 // --- pins ---
 static constexpr uint8_t kLedPin   = 2;
@@ -17,6 +18,25 @@ static constexpr uint8_t kEthRst   = 26;
 // --- W5500 state ---
 static bool ethReady = false;
 static byte ethMac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+
+// --- MQTT config ---
+struct MqttConfig {
+  String host;
+  uint16_t port = 1883;
+  String user;
+  String pass;
+  String topicPrefix;  // e.g. "sems/device1"
+  bool enabled = false;
+};
+static MqttConfig mqttCfg;
+static constexpr char kMqttNs[] = "mqtt";
+
+// --- MQTT state ---
+static WiFiClient    mqttWifiClient;
+static PubSubClient  mqttClient(mqttWifiClient);
+static bool mqttConnected   = false;
+static uint32_t mqttLastTryMs = 0;
+static constexpr uint32_t kMqttRetryMs = 5000;
 
 // --- AP config ---
 static constexpr char kApSsidPrefix[]  = "SEMS-SETUP";
@@ -269,6 +289,76 @@ void clearAllWifi() {
   prefs.end();
 }
 
+// ============================================================
+// MQTT NVS + lifecycle
+// ============================================================
+void loadMqttConfig() {
+  Preferences prefs;
+  prefs.begin(kMqttNs, true);
+  mqttCfg.enabled     = prefs.getBool("en", false);
+  mqttCfg.host        = prefs.getString("host", "");
+  mqttCfg.port        = prefs.getUShort("port", 1883);
+  mqttCfg.user        = prefs.getString("user", "");
+  mqttCfg.pass        = prefs.getString("pass", "");
+  mqttCfg.topicPrefix = prefs.getString("topic", "sems");
+  prefs.end();
+  Serial.printf("MQTT config: %s:%d en=%d\n", mqttCfg.host.c_str(), mqttCfg.port, mqttCfg.enabled);
+}
+
+void saveMqttConfig() {
+  Preferences prefs;
+  prefs.begin(kMqttNs, false);
+  prefs.putBool("en",      mqttCfg.enabled);
+  prefs.putString("host",  mqttCfg.host);
+  prefs.putUShort("port",  mqttCfg.port);
+  prefs.putString("user",  mqttCfg.user);
+  prefs.putString("pass",  mqttCfg.pass);
+  prefs.putString("topic", mqttCfg.topicPrefix);
+  prefs.end();
+}
+
+void mqttPublish(const char* subtopic, const String& payload) {
+  if (!mqttConnected) return;
+  String topic = mqttCfg.topicPrefix + "/" + subtopic;
+  mqttClient.publish(topic.c_str(), payload.c_str());
+}
+
+void handleMqttLifecycle(uint32_t now) {
+  if (!mqttCfg.enabled || mqttCfg.host.isEmpty()) return;
+  if (!staConnected) return;  // need WiFi STA
+
+  if (mqttClient.connected()) {
+    mqttConnected = true;
+    mqttClient.loop();
+    return;
+  }
+
+  mqttConnected = false;
+  if (now - mqttLastTryMs < kMqttRetryMs) return;
+  mqttLastTryMs = now;
+
+  mqttClient.setServer(mqttCfg.host.c_str(), mqttCfg.port);
+  String clientId = "sems-" + WiFi.macAddress();
+  clientId.replace(":", "");
+
+  bool ok;
+  if (mqttCfg.user.isEmpty()) {
+    ok = mqttClient.connect(clientId.c_str());
+  } else {
+    ok = mqttClient.connect(clientId.c_str(), mqttCfg.user.c_str(), mqttCfg.pass.c_str());
+  }
+
+  if (ok) {
+    mqttConnected = true;
+    Serial.println("MQTT connected");
+    oledShow("MQTT", "Connected", mqttCfg.host.c_str(), 3000);
+    mqttPublish("status", "{\"online\":true,\"fw\":\"" FW_VERSION "\"}");
+  } else {
+    Serial.printf("MQTT failed rc=%d\n", mqttClient.state());
+  }
+}
+
+// ============================================================
 // Scan visible networks, pick saved entry with strongest RSSI, skipping triedMask.
 // Returns index into wifiList, or -1 if none found.
 int pickBestWifi(uint8_t skipMask = 0, bool silent = false) {
@@ -508,6 +598,157 @@ void handleReboot() {
   ESP.restart();
 }
 
+void handleMqttConfigGet() {
+  String body = "{\"ok\":true";
+  body += ",\"enabled\":";   body += mqttCfg.enabled ? "true" : "false";
+  body += ",\"host\":\"";    body += mqttCfg.host; body += "\"";
+  body += ",\"port\":";      body += mqttCfg.port;
+  body += ",\"user\":\"";    body += mqttCfg.user; body += "\"";
+  body += ",\"topic\":\"";   body += mqttCfg.topicPrefix; body += "\"";
+  body += ",\"connected\":"; body += mqttConnected ? "true" : "false";
+  body += ",\"state\":";     body += mqttClient.state();
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
+void handleMqttConfigSave() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}"); return;
+  }
+  String body = server.arg("plain");
+  auto get = [&](const char* key) -> String {
+    String k = String("\"") + key + "\":\"";
+    int s = body.indexOf(k); if (s < 0) return "";
+    s += k.length();
+    int e = body.indexOf('"', s); return e < 0 ? "" : body.substring(s, e);
+  };
+  auto getBool = [&](const char* key) -> bool {
+    String k = String("\"") + key + "\":";
+    int s = body.indexOf(k); if (s < 0) return false;
+    s += k.length();
+    return body.substring(s, s + 4) == "true";
+  };
+  auto getInt = [&](const char* key, int def) -> int {
+    String k = String("\"") + key + "\":";
+    int s = body.indexOf(k); if (s < 0) return def;
+    s += k.length();
+    return body.substring(s).toInt();
+  };
+
+  mqttCfg.enabled     = getBool("enabled");
+  mqttCfg.host        = get("host");
+  mqttCfg.port        = (uint16_t)getInt("port", 1883);
+  mqttCfg.user        = get("user");
+  String newPass      = get("pass");
+  if (!newPass.isEmpty()) mqttCfg.pass = newPass;  // blank = keep existing
+  mqttCfg.topicPrefix = get("topic");
+  if (mqttCfg.topicPrefix.isEmpty()) mqttCfg.topicPrefix = "sems";
+
+  saveMqttConfig();
+  // Force reconnect
+  mqttClient.disconnect();
+  mqttConnected = false;
+  mqttLastTryMs = 0;
+
+  Serial.printf("MQTT config saved: %s:%d en=%d\n", mqttCfg.host.c_str(), mqttCfg.port, mqttCfg.enabled);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleMqttPage() {
+  String html;
+  html += F("<!doctype html><html><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>SEMS MQTT</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:system-ui,sans-serif;background:#f1f5f9;min-height:100vh;padding:16px}"
+    ".wrap{max-width:480px;margin:0 auto}"
+    "h1{font-size:18px;font-weight:700;color:#0f172a;margin-bottom:16px}"
+    ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
+      "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
+    ".card-title{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;"
+      "letter-spacing:.05em;margin-bottom:12px}"
+    "label{display:block;font-size:13px;color:#64748b;margin-bottom:4px;margin-top:10px}"
+    "label:first-of-type{margin-top:0}"
+    "input[type=text],input[type=password],input[type=number]{"
+      "width:100%;padding:9px 12px;border:1px solid #e2e8f0;border-radius:8px;"
+      "font-size:14px;color:#0f172a;outline:none}"
+    "input:focus{border-color:#0f766e;box-shadow:0 0 0 2px rgba(15,118,110,.15)}"
+    ".toggle{display:flex;align-items:center;gap:10px;margin-bottom:4px}"
+    ".toggle input{width:auto}"
+    ".toggle span{font-size:14px;color:#0f172a;font-weight:500}"
+    "button{width:100%;background:#0f766e;color:#fff;border:0;border-radius:8px;"
+      "padding:11px;font-size:15px;font-weight:600;cursor:pointer;margin-top:14px}"
+    "button:hover{background:#0d6b63}"
+    ".badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;"
+      "padding:3px 10px;border-radius:99px}"
+    ".up{background:#dcfce7;color:#15803d}"
+    ".down{background:#fee2e2;color:#b91c1c}"
+    ".dot{width:7px;height:7px;border-radius:50%;background:currentColor}"
+    "#msg{margin-top:12px;font-size:13px;min-height:20px;color:#0f766e}"
+    ".nav{display:flex;gap:8px;margin-bottom:16px}"
+    ".nav a{font-size:13px;color:#0f766e;text-decoration:none;padding:6px 12px;"
+      "border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
+    "</style></head><body><div class=wrap>"
+    "<h1>SEMS AIoT &mdash; MQTT</h1>"
+    "<div class=nav><a href=/>&#9881; Setup</a><a href=/network>&#127760; Network</a></div>"
+    "<div class=card>"
+    "<div class=card-title>Status</div>"
+    "<div id=status>Loading...</div>"
+    "</div>"
+    "<div class=card>"
+    "<div class=card-title>Konfigurasi Broker</div>"
+    "<div class=toggle>"
+      "<input type=checkbox id=enabled>"
+      "<span>MQTT Aktif</span>"
+    "</div>"
+    "<label>Host / IP Broker</label>"
+    "<input type=text id=host placeholder='128.199.x.x'>"
+    "<label>Port</label>"
+    "<input type=number id=port value=1883 min=1 max=65535>"
+    "<label>Username</label>"
+    "<input type=text id=user placeholder='user_1'>"
+    "<label>Password</label>"
+    "<input type=password id=pass placeholder='kosong = tidak berubah'>"
+    "<label>Topic Prefix</label>"
+    "<input type=text id=topic placeholder='sems'>"
+    "<button onclick=save()>Simpan</button>"
+    "<div id=msg></div>"
+    "</div>"
+    "<script>"
+    "async function load(){"
+      "const d=await fetch('/api/mqtt').then(r=>r.json());"
+      "document.getElementById('enabled').checked=d.enabled;"
+      "document.getElementById('host').value=d.host||'';"
+      "document.getElementById('port').value=d.port||1883;"
+      "document.getElementById('user').value=d.user||'';"
+      "document.getElementById('topic').value=d.topic||'sems';"
+      "const ok=d.connected;"
+      "document.getElementById('status').innerHTML="
+        "'<span class=\"badge '+(ok?'up':'down')+'\">"
+          "<span class=dot></span>'+(ok?'Connected':'Disconnected')+'</span> '+"
+        "'<span style=\"font-size:12px;color:#64748b;margin-left:6px\">'+"
+          "(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';"
+    "}"
+    "async function save(){"
+      "const msg=document.getElementById('msg');"
+      "msg.textContent='Menyimpan...';"
+      "const b={enabled:document.getElementById('enabled').checked,"
+        "host:document.getElementById('host').value,"
+        "port:parseInt(document.getElementById('port').value)||1883,"
+        "user:document.getElementById('user').value,"
+        "pass:document.getElementById('pass').value,"
+        "topic:document.getElementById('topic').value||'sems'};"
+      "const r=await fetch('/api/mqtt/save',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(x=>x.json());"
+      "if(r.ok){msg.style.color='#0f766e';msg.textContent='Tersimpan! Reconnecting...';setTimeout(load,2000);}"
+      "else{msg.style.color='#b91c1c';msg.textContent='Error: '+(r.error||'unknown');}"
+    "}"
+    "load();setInterval(load,5000);"
+    "</script></div></body></html>");
+  server.send(200, "text/html", html);
+}
+
 void handleNetworkApi() {
   uint32_t s = millis() / 1000;
   uint32_t m = s / 60; s %= 60;
@@ -588,7 +829,7 @@ void handleNetworkPage() {
     ".refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:8px}"
     "</style></head><body><div class=wrap>"
     "<h1>SEMS AIoT &mdash; Network</h1>"
-    "<div class=nav><a href=/>&#9881; Setup</a><a href=/network>&#9654; Refresh</a></div>"
+    "<div class=nav><a href=/>&#9881; Setup</a><a href=/mqtt>&#128236; MQTT</a><a href=/network>&#9654; Refresh</a></div>"
     "<div id=root><p style='color:#94a3b8;font-size:13px'>Loading...</p></div>"
     "<div class=refresh id=ts></div>"
     "<script>"
@@ -662,7 +903,10 @@ void startAp() {
 void startWebServer() {
   server.on("/",                  HTTP_GET,  handleRoot);
   server.on("/network",           HTTP_GET,  handleNetworkPage);
+  server.on("/mqtt",              HTTP_GET,  handleMqttPage);
   server.on("/api/network",       HTTP_GET,  handleNetworkApi);
+  server.on("/api/mqtt",          HTTP_GET,  handleMqttConfigGet);
+  server.on("/api/mqtt/save",     HTTP_POST, handleMqttConfigSave);
   server.on("/api/scan",          HTTP_POST, handleScanStart);
   server.on("/api/scan/result",   HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",     HTTP_POST, handleWifiSave);
@@ -840,6 +1084,7 @@ void setup() {
   initEthernet();
 
   loadWifiList();
+  loadMqttConfig();
 
   const bool wifiFailReboot = (rtcWifiFailMagic == kWifiFailMagic);
   rtcWifiFailMagic = 0;  // clear — next reboot is treated as cold boot unless set again
@@ -907,6 +1152,7 @@ void loop() {
   handleStaLifecycle(now);
   handleRebootCountdown(now);
   maintainEthernet();
+  handleMqttLifecycle(now);
   if (now - lastBlinkMs >= 500) { lastBlinkMs = now; ledState = !ledState; digitalWrite(kLedPin, ledState); }
   updateOled(now);
 }

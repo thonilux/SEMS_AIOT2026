@@ -71,8 +71,9 @@ static bool staConnecting = false;
 static uint32_t staStartMs = 0;
 static uint8_t triedMask = 0;   // bitmask of wifiList indices tried this round
 static uint32_t rebootAtMs = 0; // 0 = no reboot scheduled
-static uint8_t scanRetryCount = 0;  // how many times scan came back empty this round
+static uint8_t scanRetryCount = 0;
 static constexpr uint8_t kMaxScanRetry = 3;
+static bool scanPending = false;  // async scan kicked, waiting for result
 
 static WebServer server(80);
 
@@ -361,23 +362,29 @@ void handleMqttLifecycle(uint32_t now) {
 // ============================================================
 // Scan visible networks, pick saved entry with strongest RSSI, skipping triedMask.
 // Returns index into wifiList, or -1 if none found.
-int pickBestWifi(uint8_t skipMask = 0, bool silent = false) {
-  if (!silent) oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
-  Serial.println("Scanning for best saved WiFi...");
-  delay(500);  // let radio settle after mode switch
-  const int found = WiFi.scanNetworks(false, false);
-  if (found <= 0) { Serial.println("Scan: nothing found"); WiFi.scanDelete(); return -1; }
+// Kick async scan. Results readable via pickBestFromLastScan() once complete.
+void kickBackgroundScan(bool showOled = true) {
+  int st = WiFi.scanComplete();
+  if (st == WIFI_SCAN_RUNNING) return;  // already scanning
+  WiFi.scanDelete();
+  if (showOled) oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
+  Serial.println("Scanning (async)...");
+  WiFi.scanNetworks(true, false);  // async, no hidden
+}
 
-  int bestIdx = -1;
-  int bestRssi = -999;
+// Pick best saved network from last completed scan. Returns wifiList index or -1.
+// Returns -2 if scan still running.
+int pickBestFromLastScan(uint8_t skipMask = 0) {
+  const int found = WiFi.scanComplete();
+  if (found == WIFI_SCAN_RUNNING) return -2;
+  if (found <= 0) { WiFi.scanDelete(); return -1; }
+
+  int bestIdx = -1, bestRssi = -999;
   for (int s = 0; s < found; s++) {
-    const String scannedSsid = WiFi.SSID(s);
-    const int rssi = WiFi.RSSI(s);
     for (uint8_t w = 0; w < wifiCount; w++) {
-      if (skipMask & (1 << w)) continue;  // already tried
-      if (wifiList[w].ssid == scannedSsid && rssi > bestRssi) {
-        bestRssi = rssi;
-        bestIdx  = w;
+      if (skipMask & (1 << w)) continue;
+      if (wifiList[w].ssid == WiFi.SSID(s) && WiFi.RSSI(s) > bestRssi) {
+        bestRssi = WiFi.RSSI(s); bestIdx = w;
       }
     }
   }
@@ -385,7 +392,7 @@ int pickBestWifi(uint8_t skipMask = 0, bool silent = false) {
   if (bestIdx >= 0)
     Serial.printf("Best: [%d] %s (%d dBm)\n", bestIdx, wifiList[bestIdx].ssid.c_str(), bestRssi);
   else
-    Serial.printf("No untried saved network visible (tried: 0x%02X)\n", skipMask);
+    Serial.printf("No untried network visible (tried: 0x%02X)\n", skipMask);
   return bestIdx;
 }
 
@@ -517,41 +524,18 @@ void handleRoot() {
   }
   html += F("</div>");
 
-  // Add WiFi card
-  html += F("<div class=card><div class=card-title>Tambah / Ubah WiFi</div>"
-    "<div id=msg></div>"
-    "<button class='btn btn-sm' type=button onclick=\"scanWifi('ssid')\">&#128268; Scan</button>"
-    "<div id=scanList></div>"
-    "<label>SSID</label><input type=text id=ssid placeholder='Nama jaringan'>"
-    "<label>Password</label><input type=password id=pass placeholder='Password'>"
-    "<button class=btn style='width:100%;margin-top:12px' onclick=saveWifi()>Simpan &amp; Reboot</button>"
-    "<button class='btn btn-danger btn-sm' style='width:100%;margin-top:6px' onclick=clearWifi()>Hapus Semua</button>"
+  // Quick links card
+  html += F("<div class=card><div class=card-title>Konfigurasi</div>"
+    "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
+    "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a>"
     "</div>");
 
-  html += F("<script>");
-  html += FPSTR(kScanScript);
-  html += F(
+  html += F("<script>"
     "document.querySelectorAll('[data-d]').forEach(b=>b.onclick=async()=>{"
       "await fetch('/api/wifi/delete',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:b.dataset.d})});"
       "location.reload();"
     "});"
-    "async function saveWifi(){"
-      "const msg=document.getElementById('msg');"
-      "msg.className='';msg.textContent='Menyimpan...';"
-      "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
-        "pass:document.getElementById('pass').value});"
-      "const r=await fetch('/api/wifi/save',{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
-      "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Rebooting...';"
-        "setTimeout(()=>fetch('/api/reboot',{method:'POST'}),800);}"
-      "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}"
-    "}"
-    "async function clearWifi(){"
-      "if(!confirm('Hapus semua WiFi tersimpan?'))return;"
-      "await fetch('/api/wifi/clear',{method:'POST'});"
-      "location.reload();"
-    "}"
     "</script></div></body></html>");
   server.send(200, "text/html", html);
 }
@@ -957,52 +941,58 @@ void startWebServer() {
 // ============================================================
 // Try connecting to best visible network not yet tried this round.
 // Returns false if all saved networks have been tried.
-bool tryNextWifi() {
-  const int best = pickBestWifi(triedMask);
-  if (best < 0) {
-    // Scan found nothing untried — could be scan miss or all tried
-    if (__builtin_popcount(triedMask) == 0) {
-      // Scan empty, no network tried yet — retry scan up to kMaxScanRetry times
-      scanRetryCount++;
-      Serial.printf("Scan empty, retry %d/%d\n", scanRetryCount, kMaxScanRetry);
-      if (scanRetryCount < kMaxScanRetry) {
-        // Schedule retry via staStartMs trick: set staConnecting so timeout fires
-        // Actually: just return false here, caller (beginStaConnect / timeout handler)
-        // will call scheduleReboot — but we override: reschedule beginStaConnect instead
-        staConnecting = true;
-        staStartMs = millis();  // will timeout in kStaTimeoutMs and call tryNextWifi again
-        oledShow("Scan empty", "Retrying...", "", kStaTimeoutMs);
-        return true;  // tell caller we're still trying
-      }
-    }
-    return false;
-  }
+// Connect to specific wifiList entry — never blocks.
+void connectToEntry(uint8_t idx) {
   scanRetryCount = 0;
-  triedMask |= (1 << best);
-  savedSsid = wifiList[best].ssid;
+  triedMask |= (1 << idx);
+  savedSsid = wifiList[idx].ssid;
   char attempt[24];
   snprintf(attempt, sizeof(attempt), "(%d/%d)", __builtin_popcount(triedMask), wifiCount);
   Serial.printf("STA connecting to: %s %s\n", savedSsid.c_str(), attempt);
   oledShow("WiFi Connecting", savedSsid.c_str(), attempt, 15000);
   WiFi.disconnect(false);
-  WiFi.begin(wifiList[best].ssid.c_str(), wifiList[best].pass.c_str());
+  WiFi.begin(wifiList[idx].ssid.c_str(), wifiList[idx].pass.c_str());
   staConnecting = true;
   staStartMs = millis();
-  return true;
+  scanPending = false;
 }
 
 void scheduleReboot() {
-  if (rebootAtMs != 0) return;  // already scheduled
-  rtcWifiFailMagic = kWifiFailMagic;  // signal next boot to start AP
+  if (rebootAtMs != 0) return;
+  rtcWifiFailMagic = kWifiFailMagic;
   rebootAtMs = millis() + 60000;
-  Serial.println("No WiFi — rebooting in 60s (AP will start on next boot)");
+  Serial.println("No WiFi — rebooting in 60s");
 }
 
+// Kick async scan then call handleScanResult in loop to pick & connect.
 void beginStaConnect() {
   triedMask = 0;
   scanRetryCount = 0;
-  rebootAtMs = 0;  // cancel any pending reboot
-  if (!tryNextWifi()) {
+  rebootAtMs = 0;
+  scanPending = false;
+  WiFi.disconnect(false);
+  kickBackgroundScan(true);
+  scanPending = true;
+}
+
+// Called from loop — reads completed async scan and connects or retries.
+void processScanResult(uint32_t now) {
+  if (!scanPending) return;
+  const int best = pickBestFromLastScan(triedMask);
+  if (best == -2) return;  // still scanning — check next loop
+  scanPending = false;
+  if (best >= 0) {
+    connectToEntry((uint8_t)best);
+    return;
+  }
+  // Nothing found
+  if (scanRetryCount < kMaxScanRetry) {
+    scanRetryCount++;
+    Serial.printf("Scan empty, retry %d/%d\n", scanRetryCount, kMaxScanRetry);
+    oledShow("Scan empty", "Retrying...", "", 5000);
+    kickBackgroundScan(false);
+    scanPending = true;
+  } else {
     scheduleReboot();
   }
 }
@@ -1033,10 +1023,9 @@ void handleStaLifecycle(uint32_t now) {
     if (now - staStartMs >= kStaTimeoutMs) {
       staConnecting = false;
       Serial.printf("STA timeout: %s\n", savedSsid.c_str());
-      // Try next saved network before giving up
-      if (!tryNextWifi()) {
-        scheduleReboot();
-      }
+      // Scan for next untried network
+      kickBackgroundScan(false);
+      scanPending = true;
     }
     return;
   }
@@ -1147,20 +1136,30 @@ void handleRebootCountdown(uint32_t now) {
     ESP.restart();
   }
 
-  // Every 10s during countdown, check if any saved network is now visible.
-  // If found, cancel reboot and reconnect.
+  // Every 10s during countdown, kick async scan to check if WiFi appeared.
   static uint32_t lastRetryMs = 0;
   if (now - lastRetryMs >= 10000) {
     lastRetryMs = now;
-    Serial.println("Countdown: checking if any saved WiFi visible...");
-    const int best = pickBestWifi(0, true);  // silent scan, fresh round
-    if (best >= 0) {
+    if (!scanPending) {
+      Serial.println("Countdown: kicking scan...");
+      kickBackgroundScan(false);
+      scanPending = true;
+    }
+  }
+  // If scan completed and found something, cancel reboot
+  if (scanPending) {
+    const int best = pickBestFromLastScan(0);
+    if (best == -2) { /* still scanning */ }
+    else if (best >= 0) {
       Serial.printf("WiFi appeared: %s — cancelling reboot\n", wifiList[best].ssid.c_str());
       rebootAtMs = 0;
       rtcWifiFailMagic = 0;
       lastRetryMs = 0;
+      scanPending = false;
       beginStaConnect();
       return;
+    } else {
+      scanPending = false;  // scan done, nothing found
     }
   }
 
@@ -1181,6 +1180,7 @@ void loop() {
   handleRebootCountdown(now);
   maintainEthernet();
   handleMqttLifecycle(now);
+  processScanResult(now);
   if (now - lastBlinkMs >= 500) { lastBlinkMs = now; ledState = !ledState; digitalWrite(kLedPin, ledState); }
   updateOled(now);
 }

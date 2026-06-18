@@ -237,8 +237,8 @@ void clearAllWifi() {
 
 // Scan visible networks, pick saved entry with strongest RSSI, skipping triedMask.
 // Returns index into wifiList, or -1 if none found.
-int pickBestWifi(uint8_t skipMask = 0) {
-  oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
+int pickBestWifi(uint8_t skipMask = 0, bool silent = false) {
+  if (!silent) oledShow("Scanning WiFi", "Finding best AP...", "", 10000);
   Serial.println("Scanning for best saved WiFi...");
   delay(500);  // let radio settle after mode switch
   const int found = WiFi.scanNetworks(false, false);
@@ -627,6 +627,24 @@ void handleRebootCountdown(uint32_t now) {
     Serial.println("Countdown done — rebooting");
     ESP.restart();
   }
+
+  // Every 10s during countdown, check if any saved network is now visible.
+  // If found, cancel reboot and reconnect.
+  static uint32_t lastRetryMs = 0;
+  if (now - lastRetryMs >= 10000) {
+    lastRetryMs = now;
+    Serial.println("Countdown: checking if any saved WiFi visible...");
+    const int best = pickBestWifi(0, true);  // silent scan, fresh round
+    if (best >= 0) {
+      Serial.printf("WiFi appeared: %s — cancelling reboot\n", wifiList[best].ssid.c_str());
+      rebootAtMs = 0;
+      rtcWifiFailMagic = 0;
+      lastRetryMs = 0;
+      beginStaConnect();
+      return;
+    }
+  }
+
   // Update OLED every second with countdown
   static int32_t lastSec = -1;
   if (secsLeft != lastSec) {

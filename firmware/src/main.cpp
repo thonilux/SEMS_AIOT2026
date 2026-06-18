@@ -35,7 +35,8 @@ static bool apStarted    = false;
 static bool staConnected = false;
 static bool staConnecting = false;
 static uint32_t staStartMs = 0;
-static uint8_t triedMask = 0;  // bitmask of wifiList indices tried this round
+static uint8_t triedMask = 0;   // bitmask of wifiList indices tried this round
+static uint32_t rebootAtMs = 0; // 0 = no reboot scheduled
 
 static WebServer server(80);
 
@@ -545,8 +546,8 @@ void handleStaLifecycle(uint32_t now) {
       Serial.printf("STA timeout: %s\n", savedSsid.c_str());
       // Try next saved network before giving up
       if (!tryNextWifi()) {
-        Serial.println("All networks tried — AP only");
-        oledShow("No WiFi", "All networks tried", "AP: 192.168.4.1", 8000);
+        Serial.println("All networks tried — rebooting in 60s");
+        rebootAtMs = millis() + 60000;
       }
     }
     return;
@@ -597,10 +598,28 @@ void setup() {
 static uint32_t lastBlinkMs = 0;
 static bool ledState = false;
 
+void handleRebootCountdown(uint32_t now) {
+  if (rebootAtMs == 0) return;
+  const int32_t secsLeft = (int32_t)(rebootAtMs - now) / 1000;
+  if (secsLeft <= 0) {
+    Serial.println("Countdown done — rebooting");
+    ESP.restart();
+  }
+  // Update OLED every second with countdown
+  static int32_t lastSec = -1;
+  if (secsLeft != lastSec) {
+    lastSec = secsLeft;
+    char buf[16]; snprintf(buf, sizeof(buf), "Reboot in %ds", secsLeft);
+    oledShow("No WiFi Found", buf, "AP: 192.168.4.1", 1100);
+    Serial.printf("Reboot in %ds\n", secsLeft);
+  }
+}
+
 void loop() {
   const uint32_t now = millis();
   server.handleClient();
   handleStaLifecycle(now);
+  handleRebootCountdown(now);
   if (now - lastBlinkMs >= 500) { lastBlinkMs = now; ledState = !ledState; digitalWrite(kLedPin, ledState); }
   updateOled(now);
 }

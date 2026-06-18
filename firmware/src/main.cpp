@@ -125,14 +125,12 @@ static void drawPageDevice() {
   oled.drawStr(22, 58, heap);
 }
 
-// Page 1: Network
+// Page 1: WiFi status
 static void drawPageNetwork() {
-  // Header
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(0, 10, "Network");
+  oled.drawStr(0, 10, "WiFi");
   oledHLine(13);
 
-  // WiFi icon (open_iconic_www_2x_t \x51 = wifi signal)
   oled.setFont(u8g2_font_open_iconic_www_2x_t);
   oled.drawGlyph(0, 36, 0x51);
 
@@ -141,7 +139,6 @@ static void drawPageNetwork() {
     oled.setFont(u8g2_font_helvB08_tf);
     oled.drawStr(22, 26, WiFi.localIP().toString().c_str());
     oled.setFont(u8g2_font_6x12_tf);
-    // Truncate SSID to fit
     String ssidStr = savedSsid.length() > 17 ? savedSsid.substring(0, 16) + "~" : savedSsid;
     oled.drawStr(22, 38, ssidStr.c_str());
     char rssi[12]; snprintf(rssi, sizeof(rssi), "RSSI:%ddBm", WiFi.RSSI());
@@ -154,25 +151,49 @@ static void drawPageNetwork() {
     oled.drawStr(22, 26, "No WiFi STA");
   }
 
-  // Bottom bar: LAN IP if available, else AP status
   oledHLine(53);
   oled.setFont(u8g2_font_5x7_tf);
-  if (ethReady) {
-    String lanLine = "LAN " + Ethernet.localIP().toString();
-    oled.drawStr(0, 63, lanLine.c_str());
-  } else if (apStarted) {
-    String apLine = "AP " + WiFi.softAPSSID() + " 192.168.4.1";
+  if (apStarted) {
+    String apLine = "AP " + WiFi.softAPSSID();
     oled.drawStr(0, 63, apLine.c_str());
   } else {
     oled.drawStr(0, 63, "AP: off");
   }
 }
 
+// Page 2: LAN (W5500) status
+static void drawPageLan() {
+  oled.setFont(u8g2_font_helvB08_tf);
+  oled.drawStr(0, 10, "LAN");
+  oledHLine(13);
+
+  // Ethernet plug icon: open_iconic_www_2x_t \x47 = cloud/globe, use embedded \x50 = plug
+  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
+  oled.drawGlyph(0, 36, 0x50);  // plug icon
+
+  oled.setFont(u8g2_font_6x12_tf);
+  if (ethReady) {
+    oled.setFont(u8g2_font_helvB08_tf);
+    oled.drawStr(22, 26, Ethernet.localIP().toString().c_str());
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(22, 38, "W5500");
+    oled.drawStr(22, 50, Ethernet.linkStatus() == LinkON ? "Link: UP" : "Link: DOWN");
+  } else {
+    oled.drawStr(22, 26, "No LAN");
+    oled.drawStr(22, 38, Ethernet.linkStatus() == LinkON ? "Cable OK" : "No cable");
+  }
+
+  oledHLine(53);
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(0, 63, "MQTT transport");
+}
+
 void oledDrawPage(uint8_t page) {
   oled.clearBuffer();
-  switch (page % 2) {
+  switch (page % 3) {
     case 0: drawPageDevice();  break;
     case 1: drawPageNetwork(); break;
+    case 2: drawPageLan();     break;
   }
   oled.sendBuffer();
 }
@@ -301,6 +322,18 @@ void handleRoot() {
     savedInfo += "</div>";
   }
 
+  // LAN status card
+  String lanCard = "<div class=card>";
+  if (ethReady) {
+    lanCard += "<b>LAN</b> <span class=ok>&#9679; Connected</span><br>"
+               "<span class=tag>IP: " + Ethernet.localIP().toString() + " &nbsp; W5500</span>";
+  } else {
+    String linkStr = Ethernet.linkStatus() == LinkON ? "Cable OK, no DHCP" : "No cable";
+    lanCard += "<b>LAN</b> <span class=err>&#9679; " + linkStr + "</span><br>"
+               "<span class=tag>W5500 — MQTT transport</span>";
+  }
+  lanCard += "</div>";
+
   String html;
   html +=
     F("<!doctype html><html><head><meta charset=utf-8>"
@@ -317,9 +350,13 @@ void handleRoot() {
       ".net{border-top:1px solid #eee;padding:10px 0;"
         "display:flex;justify-content:space-between;align-items:center}"
       ".ssid{font-weight:700}.tag{font-size:12px;color:#666}"
+      ".card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;"
+        "padding:12px 14px;margin:12px 0}"
+      ".ok{color:#0f766e}.err{color:#b91c1c}"
       "#msg{margin:12px 0;color:#0f766e}"
       "</style></head><body>"
-      "<h2>SEMS AIoT &mdash; WiFi Setup</h2>");
+      "<h2>SEMS AIoT &mdash; Setup</h2>");
+  html += lanCard;
   html += savedInfo;
   html += F("<p id=msg>Ready.</p>"
       "<button onclick=scanWifi()>Scan WiFi</button> "

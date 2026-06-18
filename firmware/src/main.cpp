@@ -42,6 +42,8 @@ static bool staConnecting = false;
 static uint32_t staStartMs = 0;
 static uint8_t triedMask = 0;   // bitmask of wifiList indices tried this round
 static uint32_t rebootAtMs = 0; // 0 = no reboot scheduled
+static uint8_t scanRetryCount = 0;  // how many times scan came back empty this round
+static constexpr uint8_t kMaxScanRetry = 3;
 
 static WebServer server(80);
 
@@ -502,7 +504,25 @@ void startWebServer() {
 // Returns false if all saved networks have been tried.
 bool tryNextWifi() {
   const int best = pickBestWifi(triedMask);
-  if (best < 0) return false;
+  if (best < 0) {
+    // Scan found nothing untried — could be scan miss or all tried
+    if (__builtin_popcount(triedMask) == 0) {
+      // Scan empty, no network tried yet — retry scan up to kMaxScanRetry times
+      scanRetryCount++;
+      Serial.printf("Scan empty, retry %d/%d\n", scanRetryCount, kMaxScanRetry);
+      if (scanRetryCount < kMaxScanRetry) {
+        // Schedule retry via staStartMs trick: set staConnecting so timeout fires
+        // Actually: just return false here, caller (beginStaConnect / timeout handler)
+        // will call scheduleReboot — but we override: reschedule beginStaConnect instead
+        staConnecting = true;
+        staStartMs = millis();  // will timeout in kStaTimeoutMs and call tryNextWifi again
+        oledShow("Scan empty", "Retrying...", "", kStaTimeoutMs);
+        return true;  // tell caller we're still trying
+      }
+    }
+    return false;
+  }
+  scanRetryCount = 0;
   triedMask |= (1 << best);
   savedSsid = wifiList[best].ssid;
   char attempt[24];
@@ -525,6 +545,7 @@ void scheduleReboot() {
 
 void beginStaConnect() {
   triedMask = 0;
+  scanRetryCount = 0;
   rebootAtMs = 0;  // cancel any pending reboot
   if (!tryNextWifi()) {
     scheduleReboot();

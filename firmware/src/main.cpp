@@ -50,6 +50,14 @@ static constexpr uint8_t kMaxSavedWifi = 5;
 RTC_DATA_ATTR static uint32_t rtcWifiFailMagic = 0;
 static constexpr uint32_t kWifiFailMagic = 0xDEADF17E;
 
+// Config mode button (GPIO 0 = BOOT button, active LOW)
+static constexpr uint8_t kBtnPin = 0;
+static constexpr uint32_t kBtnHoldMs = 3000;
+RTC_DATA_ATTR static uint32_t rtcConfigMagic = 0;
+RTC_DATA_ATTR static uint32_t rtcWifiFailCount = 0;
+static constexpr uint32_t kConfigMagic = 0xC0FEF00D;
+static uint32_t btnPressedMs = 0;
+
 // --- OLED ---
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R2, U8X8_PIN_NONE);
 static bool oledReady = false;
@@ -498,7 +506,7 @@ static const char kScanScript[] PROGMEM =
 // Web handlers
 // ============================================================
 void handleRoot() {
-  // Hardware info
+  oledShow("Web UI", "Setup dibuka", server.client().remoteIP().toString().c_str(), 3000);
   uint32_t sec = millis() / 1000;
   uint32_t mn = sec / 60; sec %= 60;
   uint32_t hr = mn / 60; mn %= 60;
@@ -511,7 +519,6 @@ void handleRoot() {
     "<h1>SEMS AIoT &mdash; Setup</h1>");
   html += FPSTR(kNavLinks);
 
-  // Hardware info card
   html += F("<div class=card><div class=card-title>Hardware</div>");
   html += "<div class=row><span class=label>Chip</span><span class=val>ESP32 " + String(ESP.getChipModel()) + " rev" + String(ESP.getChipRevision()) + "</span></div>";
   html += "<div class=sep></div>";
@@ -523,7 +530,6 @@ void handleRoot() {
   html += "<div class=row><span class=label>Uptime</span><span class=val>" + String(uptime) + "</span></div>";
   html += F("</div>");
 
-  // Saved WiFi card
   html += F("<div class=card><div class=card-title>Saved WiFi Networks</div>");
   if (wifiCount == 0) {
     html += F("<p style='font-size:13px;color:#94a3b8'>Belum ada jaringan tersimpan.</p>");
@@ -540,10 +546,14 @@ void handleRoot() {
   }
   html += F("</div>");
 
-  // Quick links card
   html += F("<div class=card><div class=card-title>Konfigurasi</div>"
     "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
     "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a>"
+    "</div>");
+
+  html += F("<div class=card><div class=card-title>Sistem</div>"
+    "<button class='btn btn-sm' id=btnCfg type=button>&#128268; Config Mode (AP)</button> "
+    "<button class='btn btn-sm btn-danger' id=btnRbt type=button>&#8635; Reboot</button>"
     "</div>");
 
   html += F("<script>"
@@ -552,6 +562,15 @@ void handleRoot() {
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:b.dataset.d})});"
       "location.reload();"
     "});"
+    "document.getElementById('btnCfg').onclick=async()=>{"
+      "if(!confirm('Masuk Config Mode? Device akan restart dan broadcast AP.'))return;"
+      "await fetch('/api/config-mode',{method:'POST'});"
+      "document.body.innerHTML='<div class=wrap><div class=card><p>Restarting... Hubungkan ke AP SEMS-SETUP-xx</p></div></div>';"
+    "};"
+    "document.getElementById('btnRbt').onclick=async()=>{"
+      "if(!confirm('Reboot device?'))return;"
+      "await fetch('/api/reboot',{method:'POST'});"
+    "};"
     "</script></div></body></html>");
   server.send(200, "text/html", html);
 }
@@ -564,60 +583,41 @@ void handleScanStart() {
 
 void handleScanResult() {
   const int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) {
-    server.send(200, "application/json", "{\"status\":\"scanning\"}");
-    return;
-  }
+  if (n == WIFI_SCAN_RUNNING) { server.send(200, "application/json", "{\"status\":\"scanning\"}"); return; }
   String body = "{\"status\":\"done\",\"networks\":[";
   for (int i = 0; i < n; i++) {
     if (i) body += ',';
-    String s = WiFi.SSID(i);
-    s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
+    String s = WiFi.SSID(i); s.replace("\\","\\\\"); s.replace("\"","\\\"");
     body += "{\"ssid\":\""; body += s;
     body += "\",\"rssi\":"; body += WiFi.RSSI(i);
-    body += ",\"ch\":";     body += WiFi.channel(i);
+    body += ",\"ch\":"; body += WiFi.channel(i);
     body += ",\"security\":\"";
     body += WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "secured";
     body += "\"}";
   }
-  body += "]}";
-  WiFi.scanDelete();
+  body += "]}"; WiFi.scanDelete();
   server.send(200, "application/json", body);
 }
 
+static String jsonExtract(const String& body, const char* key) {
+  String k = String("\"") + key + "\":\"";
+  int s = body.indexOf(k); if (s < 0) return "";
+  s += k.length(); int e = body.indexOf('"', s); return e < 0 ? "" : body.substring(s, e);
+}
+
 void handleWifiSave() {
-  if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}"); return;
-  }
   String body = server.arg("plain");
-  auto extract = [&](const char* key) -> String {
-    String k = String("\"") + key + "\":\"";
-    int s = body.indexOf(k); if (s < 0) return "";
-    s += k.length();
-    int e = body.indexOf('"', s); return e < 0 ? "" : body.substring(s, e);
-  };
-  String ssid = extract("ssid");
-  String pass = extract("pass");
-  if (ssid.isEmpty()) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}"); return;
-  }
-  if (!addOrUpdateWifi(ssid, pass)) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"list_full\"}"); return;
-  }
+  String ssid = jsonExtract(body, "ssid"), pass = jsonExtract(body, "pass");
+  if (ssid.isEmpty()) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}"); return; }
+  if (!addOrUpdateWifi(ssid, pass)) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"list_full\"}"); return; }
   Serial.printf("WiFi saved: %s (total: %d)\n", ssid.c_str(), wifiCount);
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleWifiDelete() {
-  if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}"); return;
-  }
   String body = server.arg("plain");
-  String k = String("\"ssid\":\"");
-  int s = body.indexOf(k); if (s < 0) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}"); return; }
-  s += k.length();
-  int e = body.indexOf('"', s);
-  String ssid = e < 0 ? "" : body.substring(s, e);
+  String ssid = jsonExtract(body, "ssid");
+  if (ssid.isEmpty()) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}"); return; }
   removeWifi(ssid);
   Serial.printf("WiFi removed: %s (total: %d)\n", ssid.c_str(), wifiCount);
   server.send(200, "application/json", "{\"ok\":true}");
@@ -629,9 +629,7 @@ void handleWifiClear() {
 }
 
 void handleWifiList() {
-  String body = "{\"ok\":true,\"count\":";
-  body += wifiCount;
-  body += ",\"networks\":[";
+  String body = "{\"ok\":true,\"count\":"; body += wifiCount; body += ",\"networks\":[";
   for (uint8_t i = 0; i < wifiCount; i++) {
     if (i) body += ',';
     String s = wifiList[i].ssid; s.replace("\\","\\\\"); s.replace("\"","\\\"");
@@ -643,8 +641,7 @@ void handleWifiList() {
 
 void handleReboot() {
   server.send(200, "application/json", "{\"ok\":true}");
-  delay(300);
-  ESP.restart();
+  delay(300); ESP.restart();
 }
 
 void handleMqttConfigGet() {
@@ -661,49 +658,34 @@ void handleMqttConfigGet() {
 }
 
 void handleMqttConfigSave() {
-  if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}"); return;
-  }
   String body = server.arg("plain");
-  auto get = [&](const char* key) -> String {
-    String k = String("\"") + key + "\":\"";
-    int s = body.indexOf(k); if (s < 0) return "";
-    s += k.length();
-    int e = body.indexOf('"', s); return e < 0 ? "" : body.substring(s, e);
-  };
+  auto get = [&](const char* key) -> String { return jsonExtract(body, key); };
   auto getBool = [&](const char* key) -> bool {
     String k = String("\"") + key + "\":";
     int s = body.indexOf(k); if (s < 0) return false;
-    s += k.length();
-    return body.substring(s, s + 4) == "true";
+    s += k.length(); return body.substring(s, s+4) == "true";
   };
   auto getInt = [&](const char* key, int def) -> int {
     String k = String("\"") + key + "\":";
     int s = body.indexOf(k); if (s < 0) return def;
-    s += k.length();
-    return body.substring(s).toInt();
+    s += k.length(); return body.substring(s).toInt();
   };
-
-  mqttCfg.enabled     = getBool("enabled");
-  mqttCfg.host        = get("host");
-  mqttCfg.port        = (uint16_t)getInt("port", 1883);
-  mqttCfg.user        = get("user");
-  String newPass      = get("pass");
-  if (!newPass.isEmpty()) mqttCfg.pass = newPass;  // blank = keep existing
+  mqttCfg.enabled = getBool("enabled");
+  mqttCfg.host = get("host");
+  mqttCfg.port = (uint16_t)getInt("port", 1883);
+  mqttCfg.user = get("user");
+  String newPass = get("pass");
+  if (!newPass.isEmpty()) mqttCfg.pass = newPass;
   mqttCfg.topicPrefix = get("topic");
   if (mqttCfg.topicPrefix.isEmpty()) mqttCfg.topicPrefix = "sems";
-
   saveMqttConfig();
-  // Force reconnect
-  mqttClient.disconnect();
-  mqttConnected = false;
-  mqttLastTryMs = 0;
-
+  mqttClient.disconnect(); mqttConnected = false; mqttLastTryMs = 0;
   Serial.printf("MQTT config saved: %s:%d en=%d\n", mqttCfg.host.c_str(), mqttCfg.port, mqttCfg.enabled);
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleMqttPage() {
+  oledShow("Web UI", "MQTT dibuka", server.client().remoteIP().toString().c_str(), 3000);
   String html = FPSTR(kSharedStyle);
   html += F("<title>SEMS MQTT</title>"
     "<style>"
@@ -820,6 +802,7 @@ void handleNetworkApi() {
 }
 
 void handleNetworkPage() {
+  oledShow("Web UI", "Network dibuka", server.client().remoteIP().toString().c_str(), 3000);
   String html = FPSTR(kSharedStyle);
   html += F("<title>SEMS Network</title>"
     "<style>.refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:4px}</style>"
@@ -928,20 +911,27 @@ void startAp() {
   oledShow("AP Ready", apSsid.c_str(), "192.168.4.1", 6000);
 }
 
+void enterConfigMode();  // forward declaration
+void restoreAp();        // forward declaration
+
 void startWebServer() {
-  server.on("/",                  HTTP_GET,  handleRoot);
-  server.on("/network",           HTTP_GET,  handleNetworkPage);
-  server.on("/mqtt",              HTTP_GET,  handleMqttPage);
-  server.on("/api/network",       HTTP_GET,  handleNetworkApi);
-  server.on("/api/mqtt",          HTTP_GET,  handleMqttConfigGet);
-  server.on("/api/mqtt/save",     HTTP_POST, handleMqttConfigSave);
-  server.on("/api/scan",          HTTP_POST, handleScanStart);
-  server.on("/api/scan/result",   HTTP_GET,  handleScanResult);
-  server.on("/api/wifi/save",     HTTP_POST, handleWifiSave);
-  server.on("/api/wifi/delete",   HTTP_POST, handleWifiDelete);
-  server.on("/api/wifi/clear",    HTTP_POST, handleWifiClear);
-  server.on("/api/wifi/list",     HTTP_GET,  handleWifiList);
-  server.on("/api/reboot",        HTTP_POST, handleReboot);
+  server.on("/",                handleRoot);
+  server.on("/network",         handleNetworkPage);
+  server.on("/mqtt",            handleMqttPage);
+  server.on("/api/network",     handleNetworkApi);
+  server.on("/api/mqtt",        handleMqttConfigGet);
+  server.on("/api/scan",        handleScanStart);
+  server.on("/api/scan/result", handleScanResult);
+  server.on("/api/wifi/clear",  handleWifiClear);
+  server.on("/api/wifi/list",   handleWifiList);
+  server.on("/api/reboot",      handleReboot);
+  server.on("/api/config-mode", []() {
+    server.send(200, "application/json", "{\"ok\":true}");
+    enterConfigMode();
+  });
+  server.on("/api/mqtt/save",   handleMqttConfigSave);
+  server.on("/api/wifi/save",   handleWifiSave);
+  server.on("/api/wifi/delete", handleWifiDelete);
   server.begin();
   if (MDNS.begin("sems")) {
     MDNS.addService("http", "tcp", 80);
@@ -976,8 +966,13 @@ void connectToEntry(uint8_t idx) {
 void scheduleReboot() {
   if (rebootAtMs != 0) return;
   rtcWifiFailMagic = kWifiFailMagic;
+  rtcWifiFailCount++;
   rebootAtMs = millis() + 60000;
-  Serial.println("No WiFi — rebooting in 60s");
+  Serial.printf("No WiFi — rebooting in 60s (fail #%lu)\n", rtcWifiFailCount);
+  restoreAp();
+  char failLine[20];
+  snprintf(failLine, sizeof(failLine), "Gagal #%lu", rtcWifiFailCount);
+  oledShow("No WiFi Found", "AP: 192.168.4.1", failLine, 6000);
 }
 
 // Kick async scan then call handleScanResult in loop to pick & connect.
@@ -1028,6 +1023,7 @@ void handleStaLifecycle(uint32_t now) {
     if (WiFi.status() == WL_CONNECTED) {
       staConnecting = false;
       staConnected  = true;
+      rtcWifiFailCount = 0;
       Serial.printf("STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
       WiFi.softAPdisconnect(true);
       WiFi.mode(WIFI_STA);
@@ -1060,39 +1056,24 @@ void handleStaLifecycle(uint32_t now) {
 // W5500 Ethernet
 // ============================================================
 void initEthernet() {
-  // Hardware reset W5500
   pinMode(kEthRst, OUTPUT);
-  digitalWrite(kEthRst, LOW);
-  delay(10);
-  digitalWrite(kEthRst, HIGH);
-  delay(200);
-
+  digitalWrite(kEthRst, LOW); delay(10);
+  digitalWrite(kEthRst, HIGH); delay(200);
   Ethernet.init(kEthCs);
-
-  // Skip DHCP if no cable — saves 5s blocking wait
   if (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("W5500: no cable, skip DHCP");
-    oledShow("LAN", "No cable", "", 2000);
-    ethReady = false;
-    return;
+    Serial.println("W5500: no cable");
+    ethReady = false; return;
   }
-
-  oledShow("LAN", "Requesting DHCP...", "", 8000);
   Serial.println("W5500: DHCP...");
-
   if (Ethernet.begin(ethMac, 4000) == 0) {
     Serial.println("W5500: DHCP failed");
-    oledShow("LAN", "DHCP timeout", "", 2000);
-    ethReady = false;
-    return;
+    ethReady = false; return;
   }
-
   ethReady = true;
   Serial.printf("W5500 IP: %s\n", Ethernet.localIP().toString().c_str());
-  oledShow("LAN Ready", Ethernet.localIP().toString().c_str(), "", 5000);
+  oledShow("LAN Ready", Ethernet.localIP().toString().c_str(), "", 3000);
 }
 
-// Call periodically to renew DHCP lease
 void maintainEthernet() {
   if (!ethReady) return;
   Ethernet.maintain();
@@ -1104,6 +1085,7 @@ void maintainEthernet() {
 void setup() {
   Serial.begin(115200);
   pinMode(kLedPin, OUTPUT);
+  pinMode(kBtnPin, INPUT_PULLUP);
 
   Wire.begin(21, 22);
   if (oled.begin()) {
@@ -1121,24 +1103,29 @@ void setup() {
   loadWifiList();
   loadMqttConfig();
 
-  const bool wifiFailReboot = (rtcWifiFailMagic == kWifiFailMagic);
-  rtcWifiFailMagic = 0;  // clear — next reboot is treated as cold boot unless set again
+  const bool wifiFailReboot   = (rtcWifiFailMagic == kWifiFailMagic);
+  const bool configModeReboot = (rtcConfigMagic   == kConfigMagic);
+  rtcWifiFailMagic = 0;
+  rtcConfigMagic   = 0;
 
-  if (wifiCount == 0 || wifiFailReboot) {
-    // No credentials, or previous boot failed all networks — start AP for config access
+  if (configModeReboot) {
+    WiFi.mode(WIFI_AP);
+    startAp();
+    startWebServer();
+    oledShow("Config Mode", "AP: 192.168.4.1", kApPassword, 10000);
+    Serial.println("Config mode: AP only, STA disabled");
+  } else if (wifiCount == 0 || wifiFailReboot) {
     WiFi.mode(WIFI_AP_STA);
     startAp();
     startWebServer();
     if (wifiCount == 0) {
       oledShow("No saved WiFi", "Open 192.168.4.1", "to configure", 8000);
     } else {
-      // Still try STA in background even with AP on
       beginStaConnect();
     }
   } else {
-    // Cold boot with credentials — STA only, no AP until needed
     WiFi.mode(WIFI_STA);
-    startWebServer();  // server ready but only reachable after STA connects
+    startWebServer();
     beginStaConnect();
   }
 }
@@ -1150,6 +1137,13 @@ void handleRebootCountdown(uint32_t now) {
   if (rebootAtMs == 0) return;
   const int32_t secsLeft = (int32_t)(rebootAtMs - now) / 1000;
   if (secsLeft <= 0) {
+    if (WiFi.softAPgetStationNum() > 0) {
+      // Client still connected to AP — postpone reboot
+      rebootAtMs = now + 30000;
+      Serial.println("Countdown: AP client connected, postpone 30s");
+      oledShow("Client terhubung", "Tunda reboot 30s", "AP: 192.168.4.1", 4000);
+      return;
+    }
     Serial.println("Countdown done — rebooting");
     ESP.restart();
   }
@@ -1191,6 +1185,27 @@ void handleRebootCountdown(uint32_t now) {
   }
 }
 
+void enterConfigMode() {
+  rtcConfigMagic = kConfigMagic;
+  oledShow("Config Mode", "Restarting...", "", 2000);
+  Serial.println("Config mode requested — rebooting");
+  delay(500);
+  ESP.restart();
+}
+
+void handleConfigButton(uint32_t now) {
+  const bool pressed = (digitalRead(kBtnPin) == LOW);
+  if (pressed) {
+    if (btnPressedMs == 0) btnPressedMs = now;
+    else if (now - btnPressedMs >= kBtnHoldMs) {
+      btnPressedMs = 0;
+      enterConfigMode();
+    }
+  } else {
+    btnPressedMs = 0;
+  }
+}
+
 void loop() {
   const uint32_t now = millis();
   server.handleClient();
@@ -1199,6 +1214,7 @@ void loop() {
   maintainEthernet();
   handleMqttLifecycle(now);
   processScanResult(now);
+  handleConfigButton(now);
   if (now - lastBlinkMs >= 500) { lastBlinkMs = now; ledState = !ledState; digitalWrite(kLedPin, ledState); }
   updateOled(now);
 }

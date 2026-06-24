@@ -11,6 +11,7 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <SPI.h>
 #include <NetworkClient.h>
 #include <PubSubClient.h>
 
@@ -99,7 +100,7 @@ static WebServer server(80);
 // ============================================================
 // OLED
 // ============================================================
-static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R2, U8X8_PIN_NONE);
+static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, 21, 22);
 static bool     oledReady      = false;
 static uint32_t oledUntilMs   = 0;
 static uint8_t  oledPage       = 0;
@@ -214,86 +215,145 @@ void oledShow(const char* l1, const char* l2, const char* l3, uint32_t ms) {
   oledUntilMs = millis() + ms;
   if (!oledReady) return;
   oled.clearBuffer();
-  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
-  oled.drawGlyph(0, 20, 0x4e);
+  
+  // Header / Title in Yellow Zone
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(22, 14, l1);
+  oled.drawStr(0, 10, l1);
+  oled.drawHLine(0, 14, 128);
+  
+  // Content in Blue Zone
   oled.setFont(u8g2_font_6x12_tf);
-  if (l2 && l2[0]) oled.drawStr(22, 28, l2);
-  oledHLine(34);
-  if (l3 && l3[0]) oled.drawStr(0, 48, l3);
+  if (l2 && l2[0]) oled.drawStr(6, 32, l2);
+  if (l3 && l3[0]) oled.drawStr(6, 48, l3);
+  
+  // Left-edge indicator bar
+  oled.drawBox(0, 18, 2, 42);
+  
   oled.sendBuffer();
 }
 
 static void drawPageDevice() {
   char buf[24];
+  
+  // Yellow Zone Header
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(0, 10, "SEMS AIoT");
+  oled.drawStr(0, 10, "SEMS SYSTEM");
   oledDrawRight("v" FW_VERSION, 10);
-  oledHLine(13);
-  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
-  oled.drawGlyph(0, 56, 0x4e);
+  oled.drawHLine(0, 14, 128);
+  
+  // Blue Zone Content
+  // Stylized Microchip Icon on the Left
+  oled.drawFrame(4, 26, 12, 12);
+  oled.drawBox(7, 29, 6, 6);
+  // Microchip pins
+  oled.drawHLine(0, 29, 4); oled.drawHLine(0, 35, 4);
+  oled.drawHLine(16, 29, 4); oled.drawHLine(16, 35, 4);
+  oled.drawVLine(7, 22, 4); oled.drawVLine(13, 22, 4);
+  oled.drawVLine(7, 38, 4); oled.drawVLine(13, 38, 4);
+
   oled.setFont(u8g2_font_6x12_tf);
   uint32_t s = millis()/1000, m = s/60; s%=60; uint32_t h = m/60; m%=60;
-  snprintf(buf, sizeof(buf), "%02luh%02lum%02lus", h, m, s);
-  oled.drawStr(22, 30, "Uptime:");
-  oled.drawStr(22, 44, buf);
-  snprintf(buf, sizeof(buf), "Heap:%lukB", ESP.getFreeHeap()/1024);
-  oled.drawStr(22, 58, buf);
+  snprintf(buf, sizeof(buf), "%02luh %02lum %02lus", h, m, s);
+  
+  oled.drawStr(24, 26, "Uptime:");
+  oled.drawStr(24, 37, buf);
+  
+  // Dynamic RAM Heap bar graph
+  uint32_t totalHeap = 327680;
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t usedHeap = totalHeap > freeHeap ? totalHeap - freeHeap : 0;
+  uint8_t barWidth = (usedHeap * 80) / totalHeap;
+  if (barWidth > 80) barWidth = 80;
+  
+  oled.drawStr(24, 49, "Heap Usage:");
+  oled.drawFrame(24, 53, 82, 6);
+  oled.drawBox(25, 54, barWidth, 4);
 }
 
 static void drawPageWifi() {
+  // Yellow Zone Header
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(0, 10, "WiFi");
-  oledHLine(13);
-  oled.setFont(u8g2_font_open_iconic_www_2x_t);
-  oled.drawGlyph(0, 36, 0x51);
+  oled.drawStr(0, 10, "WIFI CONNECTION");
+  oled.drawHLine(0, 14, 128);
+  
+  // Blue Zone Content
   oled.setFont(u8g2_font_6x12_tf);
   if (staConnected) {
-    oled.setFont(u8g2_font_helvB08_tf);
-    oled.drawStr(22, 26, WiFi.localIP().toString().c_str());
-    oled.setFont(u8g2_font_6x12_tf);
+    // Wi-Fi bars graph on the left
+    int rssi = WiFi.RSSI();
+    oled.drawBox(2, 42, 2, 4);
+    if (rssi > -80) oled.drawBox(5, 38, 2, 8);
+    else oled.drawFrame(5, 38, 2, 8);
+    
+    if (rssi > -70) oled.drawBox(8, 34, 2, 12);
+    else oled.drawFrame(8, 34, 2, 12);
+    
+    if (rssi > -60) oled.drawBox(11, 30, 2, 16);
+    else oled.drawFrame(11, 30, 2, 16);
+    
+    oled.drawStr(20, 26, WiFi.localIP().toString().c_str());
     String ss = savedSsid.length() > 17 ? savedSsid.substring(0,16)+"~" : savedSsid;
-    oled.drawStr(22, 38, ss.c_str());
-    char rssi[14]; snprintf(rssi, sizeof(rssi), "RSSI:%ddBm", WiFi.RSSI());
-    oled.drawStr(22, 50, rssi);
+    oled.drawStr(20, 37, ss.c_str());
+    char rssiBuf[16]; snprintf(rssiBuf, sizeof(rssiBuf), "Signal: %d dBm", rssi);
+    oled.drawStr(20, 48, rssiBuf);
   } else if (staConnecting) {
-    oled.drawStr(22, 26, "Connecting...");
+    // Blinking scanning/connecting animation
+    uint8_t anim = (millis() / 400) % 4;
+    oled.drawBox(2, 42, 2, 4);
+    if (anim >= 1) oled.drawBox(5, 38, 2, 8);
+    if (anim >= 2) oled.drawBox(8, 34, 2, 12);
+    if (anim >= 3) oled.drawBox(11, 30, 2, 16);
+    
+    oled.drawStr(20, 28, "Connecting...");
     String ss = savedSsid.length() > 17 ? savedSsid.substring(0,16)+"~" : savedSsid;
-    oled.drawStr(22, 38, ss.c_str());
+    oled.drawStr(20, 42, ss.c_str());
   } else {
-    oled.drawStr(22, 26, "No WiFi STA");
+    // Disconnected icon (Cross)
+    oled.drawLine(2, 30, 14, 42);
+    oled.drawLine(14, 30, 2, 42);
+    
+    oled.drawStr(20, 34, "Disconnected");
   }
-  oledHLine(53);
+  
+  // AP status bar
+  oled.drawHLine(0, 54, 128);
   oled.setFont(u8g2_font_5x7_tf);
   if (apStarted) {
-    String ap = "AP " + WiFi.softAPSSID();
-    oled.drawStr(0, 63, ap.c_str());
+    String ap = "AP: " + WiFi.softAPSSID() + " (192.168.4.1)";
+    oled.drawStr(2, 62, ap.c_str());
   } else {
-    oled.drawStr(0, 63, "AP: off");
+    oled.drawStr(2, 62, "AP Mode: Disabled");
   }
 }
 
 static void drawPageLan() {
+  // Yellow Zone Header
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(0, 10, "LAN");
-  oledHLine(13);
-  oled.setFont(u8g2_font_open_iconic_embedded_2x_t);
-  oled.drawGlyph(0, 36, ethLink ? 0x71 : 0x70);
+  oled.drawStr(0, 10, "ETHERNET LAN");
+  oled.drawHLine(0, 14, 128);
+  
+  // Blue Zone Content
   oled.setFont(u8g2_font_6x12_tf);
+  
+  // Ethernet port icon
+  oled.drawFrame(2, 30, 12, 10);
+  oled.drawBox(5, 40, 6, 2);
+  oled.drawVLine(8, 42, 4);
+  oled.drawHLine(6, 45, 5);
+  
   if (ethReady) {
-    oled.setFont(u8g2_font_helvB08_tf);
-    oled.drawStr(22, 26, ethIp.c_str());
-    oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(22, 38, "W5500");
-    oled.drawStr(22, 50, "Link: UP");
+    oled.drawStr(20, 26, ethIp.c_str());
+    oled.drawStr(20, 37, "Speed: 100 Mbps");
+    oled.drawStr(20, 48, ethLink ? "Link: Connected" : "Link: Disconnected");
   } else {
-    oled.drawStr(22, 26, "No LAN");
-    oled.drawStr(22, 38, ethLink ? "Cable OK" : "No cable");
+    oled.drawStr(20, 28, "LAN Offline");
+    oled.drawStr(20, 42, ethLink ? "Cable Plugged" : "Insert Cable");
   }
-  oledHLine(53);
+  
+  // Routing priority status bar
+  oled.drawHLine(0, 54, 128);
   oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 63, ethReady ? "default route" : "standby");
+  oled.drawStr(2, 62, ethReady ? "Route: Ethernet (Primary)" : "Route: Standby");
 }
 
 static void oledDrawPage(uint8_t page) {
@@ -310,16 +370,19 @@ static void oledHeartbeat(uint32_t now) {
   if (!oledReady || now - oledHbMs < 500) return;
   oledHbMs = now;
   oledHbTick++;
-  oled.setDrawColor(0); oled.drawBox(123,59,5,5);
+  // Heartbeat is placed in the top-right corner of the yellow header zone
+  oled.setDrawColor(0); oled.drawBox(122, 2, 6, 6);
   oled.setDrawColor(1);
-  if (oledHbTick & 1) oled.drawBox(124,60,3,3);
+  if (oledHbTick & 1) {
+    oled.drawBox(123, 3, 4, 4);
+  }
   oled.sendBuffer();
 }
 
 static void updateOled(uint32_t now) {
   if (!oledReady) return;
-  if (now < oledUntilMs) return;
   oledHeartbeat(now);
+  if (now < oledUntilMs) return;
   if (now - oledPageMs < kPageIntervalMs) return;
   oledPageMs = now;
   oledPage = (oledPage + 1) % 3;
@@ -1127,7 +1190,7 @@ void setup() {
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin, INPUT_PULLUP);
 
-  Wire.begin(21, 22);
+  Wire.begin(22, 21);
   if (oled.begin()) {
     oledReady = true;
   } else {
@@ -1148,9 +1211,20 @@ void setup() {
   // Register unified event handler BEFORE any WiFi/ETH init
   WiFi.onEvent(onNetworkEvent);
 
-  // Init W5500 via native ETH.h — SPI2_HOST default pins: SCLK=18, MISO=19, MOSI=23
-  ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst, SPI2_HOST);
-  Serial.println("[ETH] W5500 init");
+  // Manual hardware reset for W5500
+  pinMode(kEthRst, OUTPUT);
+  digitalWrite(kEthRst, LOW);
+  delay(50);
+  digitalWrite(kEthRst, HIGH);
+  delay(100);
+
+  // Init W5500 via native ETH.h using SPIClass in v3.x
+  SPI.begin(18, 19, 23, kEthCs);
+  if (ETH.begin(ETH_PHY_W5500, -1, kEthCs, -1, kEthRst, SPI)) {
+    Serial.println("[ETH] W5500 init success");
+  } else {
+    Serial.println("[ETH] W5500 init FAILED!");
+  }
 
   if (configModeReboot) {
     WiFi.mode(WIFI_AP);

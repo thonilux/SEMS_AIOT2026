@@ -34,18 +34,56 @@ static constexpr int kEthRst = 26;
 // ============================================================
 // RS485 / Modbus
 // ============================================================
-static constexpr int     kRs485Rx       = 16;
-static constexpr int     kRs485Tx       = 17;
-static constexpr int     kRs485Baud     = 19200;
-static constexpr uint8_t kModbusSlaveId = 1;
-static constexpr uint32_t kModbusPollMs = 1000;
+static constexpr int kRs485Rx = 16;
+static constexpr int kRs485Tx = 17;
 
-// PM2230 register map (FC03 holding, FP32 big-endian)
-static constexpr uint16_t kRegVoltage   = 3027;  // V
-static constexpr uint16_t kRegCurrent   = 2999;  // A
-static constexpr uint16_t kRegPower     = 3053;  // kW
-static constexpr uint16_t kRegEnergy    = 2811;  // kWh
-static constexpr uint16_t kRegFreq      = 3109;  // Hz
+static constexpr char kNvsModbus[] = "modbus";
+
+// phase == 1: single-phase, phase == 3: three-phase
+struct ModbusConfig {
+  uint8_t  slaveId   = 1;
+  uint32_t baud      = 19200;
+  uint32_t pollMs    = 1000;
+  uint8_t  phase     = 1;      // 1 or 3
+  // 1-phase register map (FC03, FP32 big-endian, 0-based, PM2230 defaults)
+  uint16_t r1V       = 3027;   // Voltage A-N
+  uint16_t r1A       = 2999;   // Current A
+  uint16_t r1Kw      = 3053;   // Active Power A
+  uint16_t r1Kvar    = 3061;   // Reactive Power A
+  uint16_t r1Kva     = 3069;   // Apparent Power A
+  uint16_t r1Pf      = 3077;   // Power Factor A (4Q_FP_PF)
+  uint16_t r1Kwh     = 2675;   // Active Energy Delivered (permanent)
+  uint16_t r1Hz      = 3109;   // Frequency
+  // 3-phase register map
+  uint16_t r3Va      = 3027;   // Voltage A-N
+  uint16_t r3Vb      = 3029;   // Voltage B-N
+  uint16_t r3Vc      = 3031;   // Voltage C-N
+  uint16_t r3Vll     = 3025;   // Voltage L-L Avg
+  uint16_t r3Vln     = 3035;   // Voltage L-N Avg
+  uint16_t r3Ia      = 2999;   // Current A
+  uint16_t r3Ib      = 3001;   // Current B
+  uint16_t r3Ic      = 3003;   // Current C
+  uint16_t r3Iavg    = 3009;   // Current Avg
+  uint16_t r3Pa      = 3053;   // Active Power A
+  uint16_t r3Pb      = 3055;   // Active Power B
+  uint16_t r3Pc      = 3057;   // Active Power C
+  uint16_t r3Ptot    = 3059;   // Active Power Total
+  uint16_t r3Qa      = 3061;   // Reactive Power A
+  uint16_t r3Qb      = 3063;   // Reactive Power B
+  uint16_t r3Qc      = 3065;   // Reactive Power C
+  uint16_t r3Qtot    = 3067;   // Reactive Power Total
+  uint16_t r3Sa      = 3069;   // Apparent Power A
+  uint16_t r3Sb      = 3071;   // Apparent Power B
+  uint16_t r3Sc      = 3073;   // Apparent Power C
+  uint16_t r3Stot    = 3075;   // Apparent Power Total
+  uint16_t r3Pfa     = 3077;   // Power Factor A (4Q_FP_PF)
+  uint16_t r3Pfb     = 3079;   // Power Factor B (4Q_FP_PF)
+  uint16_t r3Pfc     = 3081;   // Power Factor C (4Q_FP_PF)
+  uint16_t r3Pftot   = 3191;   // Power Factor Total (FLOAT32)
+  uint16_t r3Kwh     = 2675;   // Active Energy Delivered (permanent)
+  uint16_t r3Hz      = 3109;   // Frequency
+};
+static ModbusConfig modbusCfg;
 
 // ============================================================
 // RTC state — survives soft reboot, NOT power-off
@@ -167,19 +205,45 @@ static String        mqttDeviceId;   // "AABBCCDD1122" — set in setup()
 // ============================================================
 // Modbus / Meter data
 // ============================================================
-struct MeterData {
-  float    voltage  = 0;   // V
-  float    current  = 0;   // A
-  float    power    = 0;   // kW
-  float    energy   = 0;   // kWh
-  float    freq     = 0;   // Hz
-  bool     valid    = false;
-  uint32_t lastMs   = 0;
+struct MeterData1Ph {
+  float v    = 0;   // Voltage A-N   V
+  float a    = 0;   // Current A     A
+  float kw   = 0;   // Active Power  kW
+  float kvar = 0;   // Reactive Power kVAR
+  float kva  = 0;   // Apparent Power kVA
+  float pf   = 0;   // Power Factor
+  float kwh  = 0;   // Active Energy Delivered  kWh
+  float hz   = 0;   // Frequency     Hz
+  bool     valid  = false;
+  uint32_t lastMs = 0;
 };
-static MeterData     meter;
+
+struct MeterData3Ph {
+  // Voltage
+  float va = 0, vb = 0, vc = 0;    // V A-N, B-N, C-N
+  float vll = 0, vln = 0;           // L-L avg, L-N avg
+  // Current
+  float ia = 0, ib = 0, ic = 0, iavg = 0;
+  // Active Power
+  float pa = 0, pb = 0, pc = 0, ptot = 0;   // kW
+  // Reactive Power
+  float qa = 0, qb = 0, qc = 0, qtot = 0;   // kVAR
+  // Apparent Power
+  float sa = 0, sb = 0, sc = 0, stot = 0;   // kVA
+  // Power Factor (FLOAT32 total, 4Q per-phase decoded)
+  float pfa = 0, pfb = 0, pfc = 0, pftot = 0;
+  // Energy + Freq
+  float kwh = 0;   // Active Energy Delivered kWh
+  float hz  = 0;   // Frequency Hz
+  bool     valid  = false;
+  uint32_t lastMs = 0;
+};
+
+static MeterData1Ph  meter1;
+static MeterData3Ph  meter3;
 static uint32_t      modbusLastPollMs = 0;
 static uint32_t      mqttMeterLastMs  = 0;
-static constexpr uint32_t kMeterPublishMs = 5000;  // publish meter data setiap 5s
+static constexpr uint32_t kMeterPublishMs = 5000;
 
 // ============================================================
 // Web server
@@ -659,6 +723,101 @@ static void saveMqttConfig() {
 }
 
 // ============================================================
+// NVS — Modbus config
+// ============================================================
+static void loadModbusConfig() {
+  Preferences p; p.begin(kNvsModbus, true);
+  modbusCfg.slaveId = (uint8_t)p.getUChar("slave",  1);
+  modbusCfg.baud    = p.getULong("baud",    19200);
+  modbusCfg.pollMs  = p.getULong("poll",    1000);
+  modbusCfg.phase   = (uint8_t)p.getUChar("phase",  1);
+  // 1-phase
+  modbusCfg.r1V     = p.getUShort("1V",    3027);
+  modbusCfg.r1A     = p.getUShort("1A",    2999);
+  modbusCfg.r1Kw    = p.getUShort("1Kw",   3053);
+  modbusCfg.r1Kvar  = p.getUShort("1Kvar", 3061);
+  modbusCfg.r1Kva   = p.getUShort("1Kva",  3069);
+  modbusCfg.r1Pf    = p.getUShort("1Pf",   3077);
+  modbusCfg.r1Kwh   = p.getUShort("1Kwh",  2675);
+  modbusCfg.r1Hz    = p.getUShort("1Hz",   3109);
+  // 3-phase
+  modbusCfg.r3Va    = p.getUShort("3Va",   3027);
+  modbusCfg.r3Vb    = p.getUShort("3Vb",   3029);
+  modbusCfg.r3Vc    = p.getUShort("3Vc",   3031);
+  modbusCfg.r3Vll   = p.getUShort("3Vll",  3025);
+  modbusCfg.r3Vln   = p.getUShort("3Vln",  3035);
+  modbusCfg.r3Ia    = p.getUShort("3Ia",   2999);
+  modbusCfg.r3Ib    = p.getUShort("3Ib",   3001);
+  modbusCfg.r3Ic    = p.getUShort("3Ic",   3003);
+  modbusCfg.r3Iavg  = p.getUShort("3Iavg", 3009);
+  modbusCfg.r3Pa    = p.getUShort("3Pa",   3053);
+  modbusCfg.r3Pb    = p.getUShort("3Pb",   3055);
+  modbusCfg.r3Pc    = p.getUShort("3Pc",   3057);
+  modbusCfg.r3Ptot  = p.getUShort("3Pt",   3059);
+  modbusCfg.r3Qa    = p.getUShort("3Qa",   3061);
+  modbusCfg.r3Qb    = p.getUShort("3Qb",   3063);
+  modbusCfg.r3Qc    = p.getUShort("3Qc",   3065);
+  modbusCfg.r3Qtot  = p.getUShort("3Qt",   3067);
+  modbusCfg.r3Sa    = p.getUShort("3Sa",   3069);
+  modbusCfg.r3Sb    = p.getUShort("3Sb",   3071);
+  modbusCfg.r3Sc    = p.getUShort("3Sc",   3073);
+  modbusCfg.r3Stot  = p.getUShort("3St",   3075);
+  modbusCfg.r3Pfa   = p.getUShort("3Pfa",  3077);
+  modbusCfg.r3Pfb   = p.getUShort("3Pfb",  3079);
+  modbusCfg.r3Pfc   = p.getUShort("3Pfc",  3081);
+  modbusCfg.r3Pftot = p.getUShort("3Pft",  3191);
+  modbusCfg.r3Kwh   = p.getUShort("3Kwh",  2675);
+  modbusCfg.r3Hz    = p.getUShort("3Hz",   3109);
+  p.end();
+  Serial.printf("[NVS] Modbus slave=%d baud=%lu poll=%lums phase=%d\n",
+    modbusCfg.slaveId, modbusCfg.baud, modbusCfg.pollMs, modbusCfg.phase);
+}
+
+static void saveModbusConfig() {
+  Preferences p; p.begin(kNvsModbus, false);
+  p.putUChar("slave",   modbusCfg.slaveId);
+  p.putULong("baud",    modbusCfg.baud);
+  p.putULong("poll",    modbusCfg.pollMs);
+  p.putUChar("phase",   modbusCfg.phase);
+  p.putUShort("1V",     modbusCfg.r1V);
+  p.putUShort("1A",     modbusCfg.r1A);
+  p.putUShort("1Kw",    modbusCfg.r1Kw);
+  p.putUShort("1Kvar",  modbusCfg.r1Kvar);
+  p.putUShort("1Kva",   modbusCfg.r1Kva);
+  p.putUShort("1Pf",    modbusCfg.r1Pf);
+  p.putUShort("1Kwh",   modbusCfg.r1Kwh);
+  p.putUShort("1Hz",    modbusCfg.r1Hz);
+  p.putUShort("3Va",    modbusCfg.r3Va);
+  p.putUShort("3Vb",    modbusCfg.r3Vb);
+  p.putUShort("3Vc",    modbusCfg.r3Vc);
+  p.putUShort("3Vll",   modbusCfg.r3Vll);
+  p.putUShort("3Vln",   modbusCfg.r3Vln);
+  p.putUShort("3Ia",    modbusCfg.r3Ia);
+  p.putUShort("3Ib",    modbusCfg.r3Ib);
+  p.putUShort("3Ic",    modbusCfg.r3Ic);
+  p.putUShort("3Iavg",  modbusCfg.r3Iavg);
+  p.putUShort("3Pa",    modbusCfg.r3Pa);
+  p.putUShort("3Pb",    modbusCfg.r3Pb);
+  p.putUShort("3Pc",    modbusCfg.r3Pc);
+  p.putUShort("3Pt",    modbusCfg.r3Ptot);
+  p.putUShort("3Qa",    modbusCfg.r3Qa);
+  p.putUShort("3Qb",    modbusCfg.r3Qb);
+  p.putUShort("3Qc",    modbusCfg.r3Qc);
+  p.putUShort("3Qt",    modbusCfg.r3Qtot);
+  p.putUShort("3Sa",    modbusCfg.r3Sa);
+  p.putUShort("3Sb",    modbusCfg.r3Sb);
+  p.putUShort("3Sc",    modbusCfg.r3Sc);
+  p.putUShort("3St",    modbusCfg.r3Stot);
+  p.putUShort("3Pfa",   modbusCfg.r3Pfa);
+  p.putUShort("3Pfb",   modbusCfg.r3Pfb);
+  p.putUShort("3Pfc",   modbusCfg.r3Pfc);
+  p.putUShort("3Pft",   modbusCfg.r3Pftot);
+  p.putUShort("3Kwh",   modbusCfg.r3Kwh);
+  p.putUShort("3Hz",    modbusCfg.r3Hz);
+  p.end();
+}
+
+// ============================================================
 // MQTT lifecycle
 // ============================================================
 // ============================================================
@@ -714,54 +873,143 @@ static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
   return true;
 }
 
+// Decode 4Q Floating Point Power Factor (Schneider PM2xxx format) → signed float -1..1
+static float decode4QFpPf(float reg) {
+  if (reg > 1.0f)       return  2.0f - reg;  // leading
+  else if (reg < -1.0f) return -2.0f - reg;  // leading
+  return reg;                                  // lagging or unity
+}
+
+// Macro: read 2 holding regs into float; on fail set ok=false and skip rest
+#define MB_READ(field, reg) \
+  if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
+    (field) = bytesToFloat(raw); \
+  else ok = false;
+
+#define MB_READ4Q(field, reg) \
+  if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
+    (field) = decode4QFpPf(bytesToFloat(raw)); \
+  else ok = false;
+
 static void handleModbus(uint32_t now) {
-  if (now - modbusLastPollMs < kModbusPollMs) return;
+  if (now - modbusLastPollMs < modbusCfg.pollMs) return;
   modbusLastPollMs = now;
 
   uint8_t raw[4];
   bool ok = true;
+  const uint8_t sl = modbusCfg.slaveId;
 
-  if (modbusRead2Regs(kModbusSlaveId, kRegVoltage, raw))
-    meter.voltage = bytesToFloat(raw);
-  else ok = false;
+  if (modbusCfg.phase == 1) {
+    // ── Single-phase ──────────────────────────────────────
+    MeterData1Ph m;
+    MB_READ(m.v,    modbusCfg.r1V)
+    MB_READ(m.a,    modbusCfg.r1A)
+    MB_READ(m.kw,   modbusCfg.r1Kw)
+    MB_READ(m.kvar, modbusCfg.r1Kvar)
+    MB_READ(m.kva,  modbusCfg.r1Kva)
+    MB_READ4Q(m.pf, modbusCfg.r1Pf)
+    MB_READ(m.kwh,  modbusCfg.r1Kwh)
+    MB_READ(m.hz,   modbusCfg.r1Hz)
+    if (ok) {
+      m.valid = true; m.lastMs = now;
+      meter1 = m;
+      meter3.valid = false;
+      Serial.printf("[MB1] V=%.1f A=%.3f kW=%.3f kVAR=%.3f kVA=%.3f PF=%.3f kWh=%.3f Hz=%.2f\n",
+        m.v, m.a, m.kw, m.kvar, m.kva, m.pf, m.kwh, m.hz);
+    } else {
+      meter1.valid = false;
+      Serial.println("[MB1] Poll failed");
+    }
 
-  if (ok && modbusRead2Regs(kModbusSlaveId, kRegCurrent, raw))
-    meter.current = bytesToFloat(raw);
-  else ok = false;
-
-  if (ok && modbusRead2Regs(kModbusSlaveId, kRegPower, raw))
-    meter.power = bytesToFloat(raw);
-  else ok = false;
-
-  if (ok && modbusRead2Regs(kModbusSlaveId, kRegEnergy, raw))
-    meter.energy = bytesToFloat(raw);
-  else ok = false;
-
-  if (ok && modbusRead2Regs(kModbusSlaveId, kRegFreq, raw))
-    meter.freq = bytesToFloat(raw);
-  else ok = false;
-
-  if (ok) {
-    meter.valid  = true;
-    meter.lastMs = now;
-    Serial.printf("[MB] V=%.1f A=%.3f kW=%.3f kWh=%.3f Hz=%.2f\n",
-      meter.voltage, meter.current, meter.power, meter.energy, meter.freq);
   } else {
-    meter.valid = false;
-    Serial.println("[MB] Poll failed");
+    // ── Three-phase ───────────────────────────────────────
+    MeterData3Ph m;
+    // Voltage
+    MB_READ(m.va,   modbusCfg.r3Va)
+    MB_READ(m.vb,   modbusCfg.r3Vb)
+    MB_READ(m.vc,   modbusCfg.r3Vc)
+    MB_READ(m.vll,  modbusCfg.r3Vll)
+    MB_READ(m.vln,  modbusCfg.r3Vln)
+    // Current
+    MB_READ(m.ia,   modbusCfg.r3Ia)
+    MB_READ(m.ib,   modbusCfg.r3Ib)
+    MB_READ(m.ic,   modbusCfg.r3Ic)
+    MB_READ(m.iavg, modbusCfg.r3Iavg)
+    // Active Power
+    MB_READ(m.pa,   modbusCfg.r3Pa)
+    MB_READ(m.pb,   modbusCfg.r3Pb)
+    MB_READ(m.pc,   modbusCfg.r3Pc)
+    MB_READ(m.ptot, modbusCfg.r3Ptot)
+    // Reactive Power
+    MB_READ(m.qa,   modbusCfg.r3Qa)
+    MB_READ(m.qb,   modbusCfg.r3Qb)
+    MB_READ(m.qc,   modbusCfg.r3Qc)
+    MB_READ(m.qtot, modbusCfg.r3Qtot)
+    // Apparent Power
+    MB_READ(m.sa,   modbusCfg.r3Sa)
+    MB_READ(m.sb,   modbusCfg.r3Sb)
+    MB_READ(m.sc,   modbusCfg.r3Sc)
+    MB_READ(m.stot, modbusCfg.r3Stot)
+    // Power Factor
+    MB_READ4Q(m.pfa,  modbusCfg.r3Pfa)
+    MB_READ4Q(m.pfb,  modbusCfg.r3Pfb)
+    MB_READ4Q(m.pfc,  modbusCfg.r3Pfc)
+    MB_READ(m.pftot,  modbusCfg.r3Pftot)
+    // Energy + Freq
+    MB_READ(m.kwh,  modbusCfg.r3Kwh)
+    MB_READ(m.hz,   modbusCfg.r3Hz)
+    if (ok) {
+      m.valid = true; m.lastMs = now;
+      meter3 = m;
+      meter1.valid = false;
+      Serial.printf("[MB3] Va=%.1f Vb=%.1f Vc=%.1f Ia=%.3f Ib=%.3f Ic=%.3f Ptot=%.3f kWh=%.3f Hz=%.2f\n",
+        m.va, m.vb, m.vc, m.ia, m.ib, m.ic, m.ptot, m.kwh, m.hz);
+    } else {
+      meter3.valid = false;
+      Serial.println("[MB3] Poll failed");
+    }
   }
 }
 
-static void publishMeter(uint32_t now) {
-  if (!mqttConnected || !meter.valid) return;
-  if (now - mqttMeterLastMs < kMeterPublishMs) return;
-  mqttMeterLastMs = now;
+#undef MB_READ
+#undef MB_READ4Q
 
-  char buf[160];
-  snprintf(buf, sizeof(buf),
-    "{\"v\":%.1f,\"a\":%.3f,\"kw\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
-    meter.voltage, meter.current, meter.power, meter.energy, meter.freq);
-  mqttPublish("meter", buf);
+static void publishMeter(uint32_t now) {
+  if (!mqttConnected) return;
+  if (now - mqttMeterLastMs < kMeterPublishMs) return;
+
+  if (modbusCfg.phase == 1 && meter1.valid) {
+    mqttMeterLastMs = now;
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+      "{\"v\":%.1f,\"a\":%.3f,\"kw\":%.3f,\"kvar\":%.3f,\"kva\":%.3f,\"pf\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
+      meter1.v, meter1.a, meter1.kw, meter1.kvar, meter1.kva, meter1.pf, meter1.kwh, meter1.hz);
+    mqttPublish("meter", buf);
+
+  } else if (modbusCfg.phase == 3 && meter3.valid) {
+    mqttMeterLastMs = now;
+    // split into two topics to stay under 256-byte MQTT payload limit
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+      "{\"va\":%.1f,\"vb\":%.1f,\"vc\":%.1f,\"vll\":%.1f,\"vln\":%.1f,"
+       "\"ia\":%.3f,\"ib\":%.3f,\"ic\":%.3f,\"iavg\":%.3f,"
+       "\"pa\":%.3f,\"pb\":%.3f,\"pc\":%.3f,\"ptot\":%.3f}",
+      meter3.va, meter3.vb, meter3.vc, meter3.vll, meter3.vln,
+      meter3.ia, meter3.ib, meter3.ic, meter3.iavg,
+      meter3.pa, meter3.pb, meter3.pc, meter3.ptot);
+    mqttPublish("meter/vi", buf);
+
+    snprintf(buf, sizeof(buf),
+      "{\"qa\":%.3f,\"qb\":%.3f,\"qc\":%.3f,\"qtot\":%.3f,"
+       "\"sa\":%.3f,\"sb\":%.3f,\"sc\":%.3f,\"stot\":%.3f,"
+       "\"pfa\":%.3f,\"pfb\":%.3f,\"pfc\":%.3f,\"pftot\":%.3f,"
+       "\"kwh\":%.3f,\"hz\":%.2f}",
+      meter3.qa, meter3.qb, meter3.qc, meter3.qtot,
+      meter3.sa, meter3.sb, meter3.sc, meter3.stot,
+      meter3.pfa, meter3.pfb, meter3.pfc, meter3.pftot,
+      meter3.kwh, meter3.hz);
+    mqttPublish("meter/pq", buf);
+  }
 }
 
 // ============================================================
@@ -1187,6 +1435,7 @@ static String getNav() {
   }
   nav += "<a href=/network>&#127760; Network</a>";
   nav += "<a href=/mqtt>&#128236; MQTT</a>";
+  nav += "<a href=/modbus>&#128268; Modbus</a>";
   nav += "<a href=/update>&#128229; OTA</a>";
   if (configMode) {
     nav += "<a href='#' onclick='if(confirm(\"Reboot device ke Normal Mode?\"))fetch(\"/api/reboot\",{method:\"POST\"})' style='background:#fee2e2;color:#b91c1c;margin-left:auto'>&#8635; Reboot (Normal Mode)</a>";
@@ -1682,6 +1931,428 @@ static void handleMqttSave() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+static void handleModbusPage() {
+  oledShow("Web UI", "Modbus dibuka", server.client().remoteIP().toString().c_str(), 3000);
+
+  String html;
+  html.reserve(3200);
+  html += FPSTR(kStyle);
+  html += F("<title>SEMS Modbus</title></head><body><div class=wrap>"
+            "<h1>SEMS AIoT &mdash; Modbus</h1>");
+  html += getNav();
+
+  if (!configMode) {
+    html += F("<style>"
+              ".mg{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:8px}"
+              ".mv{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;text-align:center}"
+              ".ml{font-size:11px;color:#64748b;margin-bottom:2px}"
+              ".mn{font-size:22px;font-weight:700;color:#0f766e;line-height:1.1}"
+              ".mu{font-size:11px;color:#94a3b8}"
+              ".msec{font-size:13px;font-weight:600;color:#334155;margin:14px 0 6px;border-bottom:1px solid #e2e8f0;padding-bottom:4px}"
+              ".na{color:#cbd5e1!important}"
+              "</style>"
+              "<div class='card' style='background:#fee2e2;border:1px solid #fca5a5;padding:10px 12px;margin-bottom:12px;"
+                "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px'>"
+              "<div>"
+                "<div style='font-weight:600;color:#991b1b;font-size:13px'>Normal Mode — Konfigurasi terkunci</div>"
+                "<div style='font-size:11px;color:#7f1d1d'>Masuk Config Mode untuk ubah register map / baud rate</div>"
+              "</div>"
+              "<button class='btn btn-sm btn-danger' type=button onclick='goToConfigMode()'>Config Mode</button>"
+              "</div>"
+              "<div class=card>"
+                "<div style='display:flex;align-items:center;justify-content:space-between'>"
+                  "<div class=card-title style='margin:0'>Pembacaan Meter</div>"
+                  "<span id=badge style='font-size:12px'>—</span>"
+                "</div>"
+                "<div id=readings><p style='color:#94a3b8;font-size:13px;margin-top:10px'>Menunggu data...</p></div>"
+              "</div>"
+              "<script>"
+              "function row(label,val,unit,na){"
+                "return '<div class=mv>'+"
+                  "'<div class=ml>'+label+'</div>'+"
+                  "'<div class=\"mn'+(na?' na':'')+'\">'+val+'</div>'+"
+                  "'<div class=\"mu'+(na?' na':'')+'\">'+unit+'</div>'+"
+                  "'</div>';}"
+              "function render(d){"
+                "const badge=document.getElementById('badge');"
+                "const out=document.getElementById('readings');"
+                "const na=!d.valid;"
+                "const fmt1=(v,n)=>na?'&mdash;':v.toFixed(n);"
+                "if(na)badge.innerHTML='<span class=\"badge down\"><span class=dot></span>Tidak Ada Data</span>';"
+                "else badge.innerHTML='<span class=\"badge up\"><span class=dot></span>'+(d.phase===1?'1-Phase':'3-Phase')+'</span>';"
+                "const f1=(k,n)=>fmt1(na?0:(d[k]||0),n);"
+                "let h='';"
+                "if(d.phase!==3){"
+                  "h+='<div class=mg>';"
+                  "h+=row('Voltage',f1('v',1),'V',na);"
+                  "h+=row('Current',f1('a',3),'A',na);"
+                  "h+=row('Active Power',f1('kw',3),'kW',na);"
+                  "h+=row('Reactive Power',f1('kvar',3),'kVAR',na);"
+                  "h+=row('Apparent Power',f1('kva',3),'kVA',na);"
+                  "h+=row('Power Factor',f1('pf',3),'',na);"
+                  "h+=row('Energy',f1('kwh',3),'kWh',na);"
+                  "h+=row('Frequency',f1('hz',2),'Hz',na);"
+                  "h+='</div>';"
+                "}else{"
+                  "h+='<div class=msec>Tegangan</div><div class=mg>';"
+                  "h+=row('V A-N',f1('va',1),'V',na);"
+                  "h+=row('V B-N',f1('vb',1),'V',na);"
+                  "h+=row('V C-N',f1('vc',1),'V',na);"
+                  "h+=row('V L-N Avg',f1('vln',1),'V',na);"
+                  "h+='</div>';"
+                  "h+='<div class=msec>Arus</div><div class=mg>';"
+                  "h+=row('I A',f1('ia',3),'A',na);"
+                  "h+=row('I B',f1('ib',3),'A',na);"
+                  "h+=row('I C',f1('ic',3),'A',na);"
+                  "h+=row('I Avg',f1('iavg',3),'A',na);"
+                  "h+='</div>';"
+                  "h+='<div class=msec>Daya Aktif</div><div class=mg>';"
+                  "h+=row('P A',f1('pa',3),'kW',na);"
+                  "h+=row('P B',f1('pb',3),'kW',na);"
+                  "h+=row('P C',f1('pc',3),'kW',na);"
+                  "h+=row('P Total',f1('ptot',3),'kW',na);"
+                  "h+='</div>';"
+                  "h+='<div class=msec>Daya Reaktif &amp; Semu</div><div class=mg>';"
+                  "h+=row('Q Total',f1('qtot',3),'kVAR',na);"
+                  "h+=row('S Total',f1('stot',3),'kVA',na);"
+                  "h+=row('PF Total',f1('pftot',3),'',na);"
+                  "h+=row('PF A',f1('pfa',3),'',na);"
+                  "h+=row('PF B',f1('pfb',3),'',na);"
+                  "h+=row('PF C',f1('pfc',3),'',na);"
+                  "h+='</div>';"
+                  "h+='<div class=msec>Energi &amp; Frekuensi</div><div class=mg>';"
+                  "h+=row('Energy',f1('kwh',3),'kWh',na);"
+                  "h+=row('Frequency',f1('hz',2),'Hz',na);"
+                  "h+='</div>';"
+                "}"
+                "out.innerHTML=h;}"
+              "async function load(){"
+                "try{const d=await fetch('/api/modbus').then(r=>r.json());render(d);}"
+                "catch(e){document.getElementById('badge').textContent='Error';}"
+              "}"
+              "load();setInterval(load,2000);"
+              "</script></div></body></html>");
+    server.send(200, "text/html", html);
+    return;
+  }
+
+  html += F("<div class='card' style='background:#fef9c3;border:1px solid #fde047;padding:12px;margin-bottom:12px;'>"
+            "<div style='font-weight:600;color:#854d0e;font-size:14px;margin-bottom:4px;'>Config Mode</div>"
+            "<div style='font-size:12px;color:#713f12;'>Perubahan baud rate aktif setelah reboot.</div>"
+            "</div>");
+
+  // ── Status card ──────────────────────────────────────────
+  html += F("<div class=card><div class=card-title>Status Meter</div><div id=status>Loading...</div></div>");
+
+  // ── Preset card ──────────────────────────────────────────
+  html += F("<div class=card><div class=card-title>Preset</div>"
+            "<div style='font-size:12px;color:#64748b;margin-bottom:8px'>Isi register map otomatis. Semua preset: FC03, FP32 big-endian, addr 0-based.</div>"
+            "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
+              "<button class='btn btn-sm' onclick='applyPreset(\"p1_1ph\")'>PM2230 / PM2120 / EM6400 &mdash; 1-Phase</button>"
+              "<button class='btn btn-sm' onclick='applyPreset(\"p1_3ph\")'>PM2230 / EM6400 &mdash; 3-Phase</button>"
+            "</div></div>");
+
+  // ── RS485 connection card ─────────────────────────────────
+  html += F("<div class=card><div class=card-title>Koneksi RS485</div>"
+            "<label>Slave ID (1&ndash;247)</label>"
+            "<input type=number id=slave min=1 max=247>"
+            "<label>Baud Rate</label>"
+            "<select id=baud>"
+              "<option value=1200>1200</option><option value=2400>2400</option>"
+              "<option value=4800>4800</option><option value=9600>9600</option>"
+              "<option value=19200>19200</option><option value=38400>38400</option>"
+              "<option value=115200>115200</option>"
+            "</select>"
+            "<label>Poll Interval (ms)</label>"
+            "<input type=number id=poll min=200 max=60000>"
+            "<label>Mode Fasa</label>"
+            "<div style='display:flex;gap:12px;margin-top:4px'>"
+              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
+                "<input type=radio name=phase id=ph1 value=1> 1-Phase</label>"
+              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
+                "<input type=radio name=phase id=ph3 value=3> 3-Phase</label>"
+            "</div></div>");
+
+  // ── 1-Phase register map ──────────────────────────────────
+  html += F("<div class=card id=card1ph><div class=card-title>Register Map &mdash; 1-Phase</div>"
+            "<div style='display:grid;grid-template-columns:1fr 1fr;gap:0 16px'>"
+            "<div><label>Voltage A-N (V)</label><input type=number class=reg1 id=r1V min=0 max=65535></div>"
+            "<div><label>Current A (A)</label><input type=number class=reg1 id=r1A min=0 max=65535></div>"
+            "<div><label>Active Power (kW)</label><input type=number class=reg1 id=r1Kw min=0 max=65535></div>"
+            "<div><label>Reactive Power (kVAR)</label><input type=number class=reg1 id=r1Kvar min=0 max=65535></div>"
+            "<div><label>Apparent Power (kVA)</label><input type=number class=reg1 id=r1Kva min=0 max=65535></div>"
+            "<div><label>Power Factor (4Q)</label><input type=number class=reg1 id=r1Pf min=0 max=65535></div>"
+            "<div><label>Energy kWh</label><input type=number class=reg1 id=r1Kwh min=0 max=65535></div>"
+            "<div><label>Frequency (Hz)</label><input type=number class=reg1 id=r1Hz min=0 max=65535></div>"
+            "</div></div>");
+
+  // ── 3-Phase register map ──────────────────────────────────
+  html += F("<div class=card id=card3ph><div class=card-title>Register Map &mdash; 3-Phase</div>"
+            "<div style='display:grid;grid-template-columns:1fr 1fr;gap:0 16px'>"
+            "<div><label>Voltage A-N (V)</label><input type=number class=reg3 id=r3Va min=0 max=65535></div>"
+            "<div><label>Voltage B-N (V)</label><input type=number class=reg3 id=r3Vb min=0 max=65535></div>"
+            "<div><label>Voltage C-N (V)</label><input type=number class=reg3 id=r3Vc min=0 max=65535></div>"
+            "<div><label>Voltage L-L Avg (V)</label><input type=number class=reg3 id=r3Vll min=0 max=65535></div>"
+            "<div><label>Voltage L-N Avg (V)</label><input type=number class=reg3 id=r3Vln min=0 max=65535></div>"
+            "<div><label>Current A (A)</label><input type=number class=reg3 id=r3Ia min=0 max=65535></div>"
+            "<div><label>Current B (A)</label><input type=number class=reg3 id=r3Ib min=0 max=65535></div>"
+            "<div><label>Current C (A)</label><input type=number class=reg3 id=r3Ic min=0 max=65535></div>"
+            "<div><label>Current Avg (A)</label><input type=number class=reg3 id=r3Iavg min=0 max=65535></div>"
+            "<div><label>Active Power A (kW)</label><input type=number class=reg3 id=r3Pa min=0 max=65535></div>"
+            "<div><label>Active Power B (kW)</label><input type=number class=reg3 id=r3Pb min=0 max=65535></div>"
+            "<div><label>Active Power C (kW)</label><input type=number class=reg3 id=r3Pc min=0 max=65535></div>"
+            "<div><label>Active Power Total (kW)</label><input type=number class=reg3 id=r3Pt min=0 max=65535></div>"
+            "<div><label>Reactive Power A (kVAR)</label><input type=number class=reg3 id=r3Qa min=0 max=65535></div>"
+            "<div><label>Reactive Power B (kVAR)</label><input type=number class=reg3 id=r3Qb min=0 max=65535></div>"
+            "<div><label>Reactive Power C (kVAR)</label><input type=number class=reg3 id=r3Qc min=0 max=65535></div>"
+            "<div><label>Reactive Power Total (kVAR)</label><input type=number class=reg3 id=r3Qt min=0 max=65535></div>"
+            "<div><label>Apparent Power A (kVA)</label><input type=number class=reg3 id=r3Sa min=0 max=65535></div>"
+            "<div><label>Apparent Power B (kVA)</label><input type=number class=reg3 id=r3Sb min=0 max=65535></div>"
+            "<div><label>Apparent Power C (kVA)</label><input type=number class=reg3 id=r3Sc min=0 max=65535></div>"
+            "<div><label>Apparent Power Total (kVA)</label><input type=number class=reg3 id=r3St min=0 max=65535></div>"
+            "<div><label>PF Phase A (4Q)</label><input type=number class=reg3 id=r3Pfa min=0 max=65535></div>"
+            "<div><label>PF Phase B (4Q)</label><input type=number class=reg3 id=r3Pfb min=0 max=65535></div>"
+            "<div><label>PF Phase C (4Q)</label><input type=number class=reg3 id=r3Pfc min=0 max=65535></div>"
+            "<div><label>PF Total (FLOAT32)</label><input type=number class=reg3 id=r3Pft min=0 max=65535></div>"
+            "<div><label>Energy kWh</label><input type=number class=reg3 id=r3Kwh min=0 max=65535></div>"
+            "<div><label>Frequency (Hz)</label><input type=number class=reg3 id=r3Hz min=0 max=65535></div>"
+            "</div></div>");
+
+  html += F("<div class=card>"
+            "<button class=btn style='width:100%' onclick=save()>Simpan</button>"
+            "<div id=msg></div></div>");
+
+  // ── JavaScript ────────────────────────────────────────────
+  html += F("<script>"
+  // Presets: p1_1ph and p1_3ph fill all respective fields
+  "const P1={'r1V':3027,'r1A':2999,'r1Kw':3053,'r1Kvar':3061,'r1Kva':3069,'r1Pf':3077,'r1Kwh':2675,'r1Hz':3109};"
+  "const P3={'r3Va':3027,'r3Vb':3029,'r3Vc':3031,'r3Vll':3025,'r3Vln':3035,"
+             "'r3Ia':2999,'r3Ib':3001,'r3Ic':3003,'r3Iavg':3009,"
+             "'r3Pa':3053,'r3Pb':3055,'r3Pc':3057,'r3Pt':3059,"
+             "'r3Qa':3061,'r3Qb':3063,'r3Qc':3065,'r3Qt':3067,"
+             "'r3Sa':3069,'r3Sb':3071,'r3Sc':3073,'r3St':3075,"
+             "'r3Pfa':3077,'r3Pfb':3079,'r3Pfc':3081,'r3Pft':3191,"
+             "'r3Kwh':2675,'r3Hz':3109};"
+  "function applyPreset(k){"
+    "const map=k==='p1_1ph'?P1:P3;"
+    "Object.entries(map).forEach(([id,v])=>{"
+      "const el=document.getElementById(id);if(el)el.value=v;});"
+    "if(k==='p1_1ph'){document.getElementById('ph1').checked=true;}"
+    "else{document.getElementById('ph3').checked=true;}"
+    "updatePhaseView();"
+    "dirty=true;"
+    "document.getElementById('msg').className='';"
+    "document.getElementById('msg').textContent='Preset diterapkan — klik Simpan.';}"
+  "function updatePhaseView(){"
+    "const is3=document.getElementById('ph3').checked;"
+    "document.getElementById('card1ph').style.display=is3?'none':'';"
+    "document.getElementById('card3ph').style.display=is3?'':'none';}"
+  "document.getElementById('ph1').addEventListener('change',updatePhaseView);"
+  "document.getElementById('ph3').addEventListener('change',updatePhaseView);"
+  "let dirty=false;"
+  "document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',()=>{dirty=true;}));"
+  "function statusHtml(d){"
+    "if(!d.valid)return '<span class=\"badge down\"><span class=dot></span>Tidak Ada Data</span>';"
+    "if(d.phase===1)return '<span class=\"badge up\"><span class=dot></span>Data Valid (1-Phase)</span> '+"
+      "'V='+d.v.toFixed(1)+' A='+d.a.toFixed(3)+' kW='+d.kw.toFixed(3)+"
+      "' PF='+d.pf.toFixed(3)+' kWh='+d.kwh.toFixed(3)+' Hz='+d.hz.toFixed(2);"
+    "return '<span class=\"badge up\"><span class=dot></span>Data Valid (3-Phase)</span> '+"
+      "'Va='+d.va.toFixed(1)+' Ia='+d.ia.toFixed(3)+' Ptot='+d.ptot.toFixed(3)+"
+      "' PF='+d.pftot.toFixed(3)+' kWh='+d.kwh.toFixed(3)+' Hz='+d.hz.toFixed(2);}"
+  "async function load(force){"
+    "const d=await fetch('/api/modbus').then(r=>r.json());"
+    "document.getElementById('status').innerHTML=statusHtml(d);"
+    "if(dirty&&!force)return;"
+    "document.getElementById('slave').value=d.slave;"
+    "const sel=document.getElementById('baud');"
+    "for(let i=0;i<sel.options.length;i++)if(parseInt(sel.options[i].value)===d.baud)sel.selectedIndex=i;"
+    "document.getElementById('poll').value=d.poll;"
+    "if(d.phase===3)document.getElementById('ph3').checked=true;"
+    "else document.getElementById('ph1').checked=true;"
+    "updatePhaseView();"
+    // 1-phase fields
+    "['r1V','r1A','r1Kw','r1Kvar','r1Kva','r1Pf','r1Kwh','r1Hz'].forEach(id=>{"
+      "const el=document.getElementById(id);if(el&&d[id]!==undefined)el.value=d['1'+id.slice(2)];});"
+    // map API key names (1V,1A,...) to field ids (r1V,r1A,...)
+    "[['1V','r1V'],['1A','r1A'],['1Kw','r1Kw'],['1Kvar','r1Kvar'],['1Kva','r1Kva'],"
+     "['1Pf','r1Pf'],['1Kwh','r1Kwh'],['1Hz','r1Hz'],"
+     "['3Va','r3Va'],['3Vb','r3Vb'],['3Vc','r3Vc'],['3Vll','r3Vll'],['3Vln','r3Vln'],"
+     "['3Ia','r3Ia'],['3Ib','r3Ib'],['3Ic','r3Ic'],['3Iavg','r3Iavg'],"
+     "['3Pa','r3Pa'],['3Pb','r3Pb'],['3Pc','r3Pc'],['3Pt','r3Pt'],"
+     "['3Qa','r3Qa'],['3Qb','r3Qb'],['3Qc','r3Qc'],['3Qt','r3Qt'],"
+     "['3Sa','r3Sa'],['3Sb','r3Sb'],['3Sc','r3Sc'],['3St','r3St'],"
+     "['3Pfa','r3Pfa'],['3Pfb','r3Pfb'],['3Pfc','r3Pfc'],['3Pft','r3Pft'],"
+     "['3Kwh','r3Kwh'],['3Hz','r3Hz']"
+    "].forEach(([k,id])=>{"
+      "const el=document.getElementById(id);if(el&&d[k]!==undefined)el.value=d[k];});"
+    "dirty=false;}"
+  "function gv(id,def){const el=document.getElementById(id);return el?parseInt(el.value)||def:def;}"
+  "async function save(){"
+    "const msg=document.getElementById('msg');"
+    "msg.className='';msg.textContent='Menyimpan...';"
+    "const phase=document.getElementById('ph3').checked?3:1;"
+    "const b={slave:gv('slave',1),baud:parseInt(document.getElementById('baud').value)||19200,"
+      "poll:gv('poll',1000),phase,"
+      "'1V':gv('r1V',3027),'1A':gv('r1A',2999),'1Kw':gv('r1Kw',3053),"
+      "'1Kvar':gv('r1Kvar',3061),'1Kva':gv('r1Kva',3069),'1Pf':gv('r1Pf',3077),"
+      "'1Kwh':gv('r1Kwh',2675),'1Hz':gv('r1Hz',3109),"
+      "'3Va':gv('r3Va',3027),'3Vb':gv('r3Vb',3029),'3Vc':gv('r3Vc',3031),"
+      "'3Vll':gv('r3Vll',3025),'3Vln':gv('r3Vln',3035),"
+      "'3Ia':gv('r3Ia',2999),'3Ib':gv('r3Ib',3001),'3Ic':gv('r3Ic',3003),'3Iavg':gv('r3Iavg',3009),"
+      "'3Pa':gv('r3Pa',3053),'3Pb':gv('r3Pb',3055),'3Pc':gv('r3Pc',3057),'3Pt':gv('r3Pt',3059),"
+      "'3Qa':gv('r3Qa',3061),'3Qb':gv('r3Qb',3063),'3Qc':gv('r3Qc',3065),'3Qt':gv('r3Qt',3067),"
+      "'3Sa':gv('r3Sa',3069),'3Sb':gv('r3Sb',3071),'3Sc':gv('r3Sc',3073),'3St':gv('r3St',3075),"
+      "'3Pfa':gv('r3Pfa',3077),'3Pfb':gv('r3Pfb',3079),'3Pfc':gv('r3Pfc',3081),'3Pft':gv('r3Pft',3191),"
+      "'3Kwh':gv('r3Kwh',2675),'3Hz':gv('r3Hz',3109)};"
+    "const r=await fetch('/api/modbus/save',{method:'POST',"
+      "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(x=>x.json());"
+    "if(r.ok){dirty=false;msg.className='ok';msg.textContent='Tersimpan! Reboot untuk terapkan baud rate baru.';setTimeout(()=>load(true),1500);}"
+    "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}}"
+  "load(true);setInterval(()=>load(false),3000);"
+  "</script></div></body></html>");
+  server.send(200, "text/html", html);
+}
+
+static void handleModbusApi() {
+  String body;
+  body.reserve(512);
+  body  = "{\"ok\":true";
+  body += ",\"slave\":";  body += modbusCfg.slaveId;
+  body += ",\"baud\":";   body += modbusCfg.baud;
+  body += ",\"poll\":";   body += modbusCfg.pollMs;
+  body += ",\"phase\":";  body += modbusCfg.phase;
+  // 1-phase regs
+  body += ",\"1V\":";     body += modbusCfg.r1V;
+  body += ",\"1A\":";     body += modbusCfg.r1A;
+  body += ",\"1Kw\":";    body += modbusCfg.r1Kw;
+  body += ",\"1Kvar\":";  body += modbusCfg.r1Kvar;
+  body += ",\"1Kva\":";   body += modbusCfg.r1Kva;
+  body += ",\"1Pf\":";    body += modbusCfg.r1Pf;
+  body += ",\"1Kwh\":";   body += modbusCfg.r1Kwh;
+  body += ",\"1Hz\":";    body += modbusCfg.r1Hz;
+  // 3-phase regs
+  body += ",\"3Va\":";    body += modbusCfg.r3Va;
+  body += ",\"3Vb\":";    body += modbusCfg.r3Vb;
+  body += ",\"3Vc\":";    body += modbusCfg.r3Vc;
+  body += ",\"3Vll\":";   body += modbusCfg.r3Vll;
+  body += ",\"3Vln\":";   body += modbusCfg.r3Vln;
+  body += ",\"3Ia\":";    body += modbusCfg.r3Ia;
+  body += ",\"3Ib\":";    body += modbusCfg.r3Ib;
+  body += ",\"3Ic\":";    body += modbusCfg.r3Ic;
+  body += ",\"3Iavg\":";  body += modbusCfg.r3Iavg;
+  body += ",\"3Pa\":";    body += modbusCfg.r3Pa;
+  body += ",\"3Pb\":";    body += modbusCfg.r3Pb;
+  body += ",\"3Pc\":";    body += modbusCfg.r3Pc;
+  body += ",\"3Pt\":";    body += modbusCfg.r3Ptot;
+  body += ",\"3Qa\":";    body += modbusCfg.r3Qa;
+  body += ",\"3Qb\":";    body += modbusCfg.r3Qb;
+  body += ",\"3Qc\":";    body += modbusCfg.r3Qc;
+  body += ",\"3Qt\":";    body += modbusCfg.r3Qtot;
+  body += ",\"3Sa\":";    body += modbusCfg.r3Sa;
+  body += ",\"3Sb\":";    body += modbusCfg.r3Sb;
+  body += ",\"3Sc\":";    body += modbusCfg.r3Sc;
+  body += ",\"3St\":";    body += modbusCfg.r3Stot;
+  body += ",\"3Pfa\":";   body += modbusCfg.r3Pfa;
+  body += ",\"3Pfb\":";   body += modbusCfg.r3Pfb;
+  body += ",\"3Pfc\":";   body += modbusCfg.r3Pfc;
+  body += ",\"3Pft\":";   body += modbusCfg.r3Pftot;
+  body += ",\"3Kwh\":";   body += modbusCfg.r3Kwh;
+  body += ",\"3Hz\":";    body += modbusCfg.r3Hz;
+  // live meter data
+  if (modbusCfg.phase == 1 && meter1.valid) {
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+      ",\"valid\":true"
+      ",\"v\":%.1f,\"a\":%.3f,\"kw\":%.3f,\"kvar\":%.3f,\"kva\":%.3f,\"pf\":%.3f,\"kwh\":%.3f,\"hz\":%.2f",
+      meter1.v, meter1.a, meter1.kw, meter1.kvar, meter1.kva, meter1.pf, meter1.kwh, meter1.hz);
+    body += buf;
+  } else if (modbusCfg.phase == 3 && meter3.valid) {
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+      ",\"valid\":true"
+      ",\"va\":%.1f,\"vb\":%.1f,\"vc\":%.1f,\"vln\":%.1f"
+      ",\"ia\":%.3f,\"ib\":%.3f,\"ic\":%.3f,\"iavg\":%.3f"
+      ",\"pa\":%.3f,\"pb\":%.3f,\"pc\":%.3f,\"ptot\":%.3f"
+      ",\"qtot\":%.3f,\"stot\":%.3f"
+      ",\"pfa\":%.3f,\"pfb\":%.3f,\"pfc\":%.3f,\"pftot\":%.3f"
+      ",\"kwh\":%.3f,\"hz\":%.2f",
+      meter3.va, meter3.vb, meter3.vc, meter3.vln,
+      meter3.ia, meter3.ib, meter3.ic, meter3.iavg,
+      meter3.pa, meter3.pb, meter3.pc, meter3.ptot,
+      meter3.qtot, meter3.stot,
+      meter3.pfa, meter3.pfb, meter3.pfc, meter3.pftot,
+      meter3.kwh, meter3.hz);
+    body += buf;
+  } else {
+    body += ",\"valid\":false";
+  }
+  // always include phase so JS can render the correct tile layout
+  body += ",\"phase\":"; body += modbusCfg.phase;
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
+static void handleModbusSave() {
+  String body = server.arg("plain");
+  uint8_t  slave = (uint8_t)jsonInt(body, "slave", 1);
+  uint32_t baud  = (uint32_t)jsonInt(body, "baud",  19200);
+  uint32_t poll  = (uint32_t)jsonInt(body, "poll",  1000);
+  uint8_t  phase = (uint8_t)jsonInt(body, "phase", 1);
+  if (slave < 1 || slave > 247) slave = 1;
+  if (phase != 1 && phase != 3) phase = 1;
+  const uint32_t validBauds[] = {1200,2400,4800,9600,19200,38400,115200};
+  bool baudOk = false;
+  for (uint32_t vb : validBauds) if (baud == vb) { baudOk = true; break; }
+  if (!baudOk) baud = 19200;
+  if (poll < 200) poll = 200;
+
+  modbusCfg.slaveId = slave;
+  modbusCfg.baud    = baud;
+  modbusCfg.pollMs  = poll;
+  modbusCfg.phase   = phase;
+  // 1-phase
+  modbusCfg.r1V     = (uint16_t)jsonInt(body, "1V",    3027);
+  modbusCfg.r1A     = (uint16_t)jsonInt(body, "1A",    2999);
+  modbusCfg.r1Kw    = (uint16_t)jsonInt(body, "1Kw",   3053);
+  modbusCfg.r1Kvar  = (uint16_t)jsonInt(body, "1Kvar", 3061);
+  modbusCfg.r1Kva   = (uint16_t)jsonInt(body, "1Kva",  3069);
+  modbusCfg.r1Pf    = (uint16_t)jsonInt(body, "1Pf",   3077);
+  modbusCfg.r1Kwh   = (uint16_t)jsonInt(body, "1Kwh",  2675);
+  modbusCfg.r1Hz    = (uint16_t)jsonInt(body, "1Hz",   3109);
+  // 3-phase
+  modbusCfg.r3Va    = (uint16_t)jsonInt(body, "3Va",   3027);
+  modbusCfg.r3Vb    = (uint16_t)jsonInt(body, "3Vb",   3029);
+  modbusCfg.r3Vc    = (uint16_t)jsonInt(body, "3Vc",   3031);
+  modbusCfg.r3Vll   = (uint16_t)jsonInt(body, "3Vll",  3025);
+  modbusCfg.r3Vln   = (uint16_t)jsonInt(body, "3Vln",  3035);
+  modbusCfg.r3Ia    = (uint16_t)jsonInt(body, "3Ia",   2999);
+  modbusCfg.r3Ib    = (uint16_t)jsonInt(body, "3Ib",   3001);
+  modbusCfg.r3Ic    = (uint16_t)jsonInt(body, "3Ic",   3003);
+  modbusCfg.r3Iavg  = (uint16_t)jsonInt(body, "3Iavg", 3009);
+  modbusCfg.r3Pa    = (uint16_t)jsonInt(body, "3Pa",   3053);
+  modbusCfg.r3Pb    = (uint16_t)jsonInt(body, "3Pb",   3055);
+  modbusCfg.r3Pc    = (uint16_t)jsonInt(body, "3Pc",   3057);
+  modbusCfg.r3Ptot  = (uint16_t)jsonInt(body, "3Pt",   3059);
+  modbusCfg.r3Qa    = (uint16_t)jsonInt(body, "3Qa",   3061);
+  modbusCfg.r3Qb    = (uint16_t)jsonInt(body, "3Qb",   3063);
+  modbusCfg.r3Qc    = (uint16_t)jsonInt(body, "3Qc",   3065);
+  modbusCfg.r3Qtot  = (uint16_t)jsonInt(body, "3Qt",   3067);
+  modbusCfg.r3Sa    = (uint16_t)jsonInt(body, "3Sa",   3069);
+  modbusCfg.r3Sb    = (uint16_t)jsonInt(body, "3Sb",   3071);
+  modbusCfg.r3Sc    = (uint16_t)jsonInt(body, "3Sc",   3073);
+  modbusCfg.r3Stot  = (uint16_t)jsonInt(body, "3St",   3075);
+  modbusCfg.r3Pfa   = (uint16_t)jsonInt(body, "3Pfa",  3077);
+  modbusCfg.r3Pfb   = (uint16_t)jsonInt(body, "3Pfb",  3079);
+  modbusCfg.r3Pfc   = (uint16_t)jsonInt(body, "3Pfc",  3081);
+  modbusCfg.r3Pftot = (uint16_t)jsonInt(body, "3Pft",  3191);
+  modbusCfg.r3Kwh   = (uint16_t)jsonInt(body, "3Kwh",  2675);
+  modbusCfg.r3Hz    = (uint16_t)jsonInt(body, "3Hz",   3109);
+  saveModbusConfig();
+  Serial.printf("[Modbus] Saved: slave=%d baud=%lu poll=%lums phase=%d\n",
+    modbusCfg.slaveId, modbusCfg.baud, modbusCfg.pollMs, modbusCfg.phase);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static void handleWifiSave() {
   String body = server.arg("plain");
   String ssid = jsonExtract(body, "ssid"), pass = jsonExtract(body, "pass");
@@ -1827,8 +2498,11 @@ static void startWebServer() {
   server.on("/",                HTTP_GET,  handleRoot);
   server.on("/network",         HTTP_GET,  handleNetworkPage);
   server.on("/mqtt",            HTTP_GET,  handleMqttPage);
+  server.on("/modbus",          HTTP_GET,  handleModbusPage);
   server.on("/api/network",     HTTP_GET,  handleNetworkApi);
   server.on("/api/mqtt",        HTTP_GET,  handleMqttApi);
+  server.on("/api/modbus",      HTTP_GET,  handleModbusApi);
+  server.on("/api/modbus/save", HTTP_POST, handleModbusSave);
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",   HTTP_POST, handleWifiSave);
@@ -1883,7 +2557,8 @@ static void handleEthSync(uint32_t now) {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  Serial2.begin(kRs485Baud, SERIAL_8E1, kRs485Rx, kRs485Tx);
+  loadModbusConfig();
+  Serial2.begin(modbusCfg.baud, SERIAL_8E1, kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin,  INPUT_PULLUP);
   pinMode(kBtn2Pin, INPUT_PULLUP);

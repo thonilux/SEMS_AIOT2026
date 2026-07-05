@@ -12,8 +12,12 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <SPI.h>
+#include <Update.h>
 #include <NetworkClient.h>
 #include <PubSubClient.h>
+#include <time.h>
+
+#define FW_VERSION "0.1.0"
 
 // ============================================================
 // Hardware constants
@@ -21,6 +25,7 @@
 static constexpr uint8_t  kLedPin      = 2;
 static constexpr uint8_t  kBtnPin      = 0;   // BOOT button, active LOW
 static constexpr uint32_t kBtnHoldMs   = 3000;
+static constexpr uint8_t  kBtn2Pin     = 13;  // multifungsi: short=next page, long=toggle autoscroll
 
 static constexpr int kEthCs  = 5;
 static constexpr int kEthIrq = 27;
@@ -37,13 +42,13 @@ static constexpr uint32_t kWifiFailMagic = 0xDEADF17E;
 static constexpr uint32_t kConfigMagic   = 0xC0FEF00D;
 
 // ============================================================
-// WiFi credentials (NVS: namespace "wifi", keys n/s0..s4/p0..p4)
+// WiFi credentials (NVS: namespace "wifi")
 // ============================================================
 static constexpr char    kNvsWifi[]     = "wifi";
 static constexpr uint8_t kMaxSavedWifi = 5;
 static constexpr char    kApSsidPfx[]  = "SEMS-SETUP";
 static constexpr char    kApPass[]     = "sems1234";
-static constexpr uint32_t kStaTimeoutMs = 15000;
+static constexpr uint32_t kStaTimeoutMs = 25000;
 
 struct WifiEntry { String ssid; String pass; };
 static WifiEntry wifiList[kMaxSavedWifi];
@@ -82,7 +87,54 @@ static uint8_t  triedMask    = 0;
 static uint8_t  scanRetryCount = 0;
 static constexpr uint8_t kMaxScanRetry = 3;
 static bool     scanPending  = false;
-static uint32_t rebootAtMs   = 0;
+static bool     configMode   = false;  // set at boot, stable for all pages
+static uint8_t  wifiFailCycles = 0;    // full cycles attempted (all SSIDs tried once = 1 cycle)
+static constexpr uint8_t kMaxFailCycles = 3; // activate AP after this many full cycles
+
+// ============================================================
+// FastConnect — cache BSSID+channel of last successful STA
+// ============================================================
+static constexpr char kNvsFast[] = "wfast";
+struct FastConnCache { uint8_t bssid[6]; uint8_t ch; String ssid; };
+static FastConnCache fcCache;
+static bool          fcCacheValid = false;
+
+static void fcLoad() {
+  Preferences p; p.begin(kNvsFast, true);
+  if (p.getBytesLength("bssid") == 6) {
+    p.getBytes("bssid", fcCache.bssid, 6);
+    fcCache.ch   = p.getUChar("ch", 0);
+    fcCache.ssid = p.getString("ssid", "");
+    fcCacheValid = (fcCache.ch > 0 && fcCache.ssid.length() > 0);
+  }
+  p.end();
+  if (fcCacheValid) Serial.printf("[FC] Cache: %s ch%d\n", fcCache.ssid.c_str(), fcCache.ch);
+}
+
+static void fcSave(const uint8_t* bssid, uint8_t ch, const String& ssid) {
+  memcpy(fcCache.bssid, bssid, 6);
+  fcCache.ch   = ch;
+  fcCache.ssid = ssid;
+  fcCacheValid = true;
+  Preferences p; p.begin(kNvsFast, false);
+  p.putBytes("bssid", bssid, 6);
+  p.putUChar("ch", ch);
+  p.putString("ssid", ssid);
+  p.end();
+  Serial.printf("[FC] Saved: %s ch%d\n", ssid.c_str(), ch);
+}
+
+static void fcClear() {
+  fcCacheValid = false;
+  Preferences p; p.begin(kNvsFast, false);
+  p.clear(); p.end();
+  Serial.println("[FC] Cache cleared");
+}
+
+// ============================================================
+// FreeRTOS Scan Task State
+// ============================================================
+static volatile bool scanTaskRunning = false;
 
 // ============================================================
 // MQTT — NetworkClient routes via lwIP best path automatically
@@ -112,7 +164,22 @@ static constexpr uint32_t kPageIntervalMs = 3000;
 // ============================================================
 // Button
 // ============================================================
-static uint32_t btnPressedMs = 0;
+static uint32_t btnPressedMs  = 0;
+static uint32_t btn2PressedMs = 0;
+
+// ============================================================
+// OLED autoscroll
+// ============================================================
+static bool oledAutoScroll = true;
+
+// ============================================================
+// NTP / RTC
+// ============================================================
+static bool     ntpSynced   = false;
+static uint32_t ntpLastSync = 0;
+static constexpr uint32_t kNtpResyncMs = 3600000UL; // resync every 1h
+static constexpr char kNtpServer[] = "pool.ntp.org";
+static constexpr long kTzOffset    = 7 * 3600; // WIB UTC+7
 
 // ============================================================
 // LED blink
@@ -128,6 +195,8 @@ void restoreAp();
 void enterConfigMode();
 void beginStaConnect();
 void oledShow(const char* l1, const char* l2 = "", const char* l3 = "", uint32_t ms = 4000);
+void ntpBeginSync();
+void getTimeStr(char* buf, size_t len);
 
 // ============================================================
 // NETWORK EVENT HANDLER — unified WiFi + ETH events (v3.x)
@@ -175,23 +244,27 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       staConnecting = false;
       staConnected  = true;
+      rtcWifiFailMagic = 0;
       rtcWifiFailCount = 0;
+      wifiFailCycles = 0;   // reset fail counter on success
+      scanPending   = false; // Cancel background scans immediately
+      fcSave(WiFi.BSSID(), WiFi.channel(), savedSsid);  // FastConnect cache
       if (!ethReady) WiFi.STA.setDefault();  // use WiFi only when LAN absent
       Serial.printf("[WiFi] Connected: %s  IP: %s\n",
                     savedSsid.c_str(),
                     WiFi.localIP().toString().c_str());
-      // AP off once STA is up — single interface sufficient
-      WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_STA);
-      apStarted = false;
+      // AP off once STA is up (only when in Normal Mode / STA only)
+      if (!configMode) {
+        WiFi.softAPdisconnect(true);
+        apStarted = false;
+      }
       oledShow("WiFi Connected", WiFi.localIP().toString().c_str(), savedSsid.c_str(), 6000);
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       if (staConnected) {
         staConnected = false;
-        Serial.println("[WiFi] STA dropped — restoring AP");
-        restoreAp();
+        Serial.println("[WiFi] STA disconnected, retrying in background...");
         oledShow("WiFi Lost", "Reconnecting...", "", 3000);
         beginStaConnect();
       }
@@ -236,13 +309,14 @@ static void drawPageDevice() {
   char buf[24];
   
   // Yellow Zone Header
+  char timeBuf[8];
+  getTimeStr(timeBuf, sizeof(timeBuf));
   oled.setFont(u8g2_font_helvB08_tf);
   oled.drawStr(0, 10, "SEMS SYSTEM");
-  oledDrawRight("v" FW_VERSION, 10);
+  oledDrawRight(timeBuf, 10);
   oled.drawHLine(0, 14, 128);
   
   // Blue Zone Content
-  // Stylized Microchip Icon on the Left
   oled.drawFrame(4, 26, 12, 12);
   oled.drawBox(7, 29, 6, 6);
   // Microchip pins
@@ -279,7 +353,6 @@ static void drawPageWifi() {
   // Blue Zone Content
   oled.setFont(u8g2_font_6x12_tf);
   if (staConnected) {
-    // Wi-Fi bars graph on the left
     int rssi = WiFi.RSSI();
     oled.drawBox(2, 42, 2, 4);
     if (rssi > -80) oled.drawBox(5, 38, 2, 8);
@@ -297,7 +370,6 @@ static void drawPageWifi() {
     char rssiBuf[16]; snprintf(rssiBuf, sizeof(rssiBuf), "Signal: %d dBm", rssi);
     oled.drawStr(20, 48, rssiBuf);
   } else if (staConnecting) {
-    // Blinking scanning/connecting animation
     uint8_t anim = (millis() / 400) % 4;
     oled.drawBox(2, 42, 2, 4);
     if (anim >= 1) oled.drawBox(5, 38, 2, 8);
@@ -308,7 +380,6 @@ static void drawPageWifi() {
     String ss = savedSsid.length() > 17 ? savedSsid.substring(0,16)+"~" : savedSsid;
     oled.drawStr(20, 42, ss.c_str());
   } else {
-    // Disconnected icon (Cross)
     oled.drawLine(2, 30, 14, 42);
     oled.drawLine(14, 30, 2, 42);
     
@@ -335,7 +406,6 @@ static void drawPageLan() {
   // Blue Zone Content
   oled.setFont(u8g2_font_6x12_tf);
   
-  // Ethernet port icon
   oled.drawFrame(2, 30, 12, 10);
   oled.drawBox(5, 40, 6, 2);
   oled.drawVLine(8, 42, 4);
@@ -370,11 +440,10 @@ static void oledHeartbeat(uint32_t now) {
   if (!oledReady || now - oledHbMs < 500) return;
   oledHbMs = now;
   oledHbTick++;
-  // Heartbeat is placed in the top-right corner of the yellow header zone
-  oled.setDrawColor(0); oled.drawBox(122, 2, 6, 6);
+  oled.setDrawColor(0); oled.drawBox(122, 57, 6, 7);
   oled.setDrawColor(1);
   if (oledHbTick & 1) {
-    oled.drawBox(123, 3, 4, 4);
+    oled.drawBox(123, 58, 4, 5);
   }
   oled.sendBuffer();
 }
@@ -383,6 +452,7 @@ static void updateOled(uint32_t now) {
   if (!oledReady) return;
   oledHeartbeat(now);
   if (now < oledUntilMs) return;
+  if (!oledAutoScroll) return;
   if (now - oledPageMs < kPageIntervalMs) return;
   oledPageMs = now;
   oledPage = (oledPage + 1) % 3;
@@ -514,7 +584,25 @@ static void kickBackgroundScan(bool showOled = true) {
 static int pickBestFromLastScan(uint8_t skipMask = 0) {
   const int found = WiFi.scanComplete();
   if (found == WIFI_SCAN_RUNNING) return -2;
-  if (found <= 0) { WiFi.scanDelete(); return -1; }
+  if (found <= 0) {
+    if (found == WIFI_SCAN_FAILED) {
+      Serial.println("[WiFi] Scan FAILED!");
+    } else {
+      Serial.println("[WiFi] Scan finished, 0 networks found.");
+    }
+    WiFi.scanDelete();
+    return -1;
+  }
+
+  Serial.printf("[WiFi] Scan found %d networks:\n", found);
+  for (int s = 0; s < found; s++) {
+    Serial.printf("  - %s (%d dBm) ch:%d sec:%s\n",
+                  WiFi.SSID(s).c_str(),
+                  WiFi.RSSI(s),
+                  WiFi.channel(s),
+                  WiFi.encryptionType(s) == WIFI_AUTH_OPEN ? "open" : "secured");
+  }
+
   int bestIdx = -1, bestRssi = -999;
   for (int s = 0; s < found; s++) {
     for (uint8_t w = 0; w < wifiCount; w++) {
@@ -526,7 +614,9 @@ static int pickBestFromLastScan(uint8_t skipMask = 0) {
   }
   WiFi.scanDelete();
   if (bestIdx >= 0)
-    Serial.printf("[WiFi] Best: [%d] %s (%ddBm)\n", bestIdx, wifiList[bestIdx].ssid.c_str(), bestRssi);
+    Serial.printf("[WiFi] Best match: [%d] %s (%ddBm)\n", bestIdx, wifiList[bestIdx].ssid.c_str(), bestRssi);
+  else
+    Serial.println("[WiFi] No saved networks matched the scan results.");
   return bestIdx;
 }
 
@@ -539,10 +629,20 @@ static void connectToEntry(uint8_t idx) {
   savedSsid = wifiList[idx].ssid;
   char attempt[24];
   snprintf(attempt, sizeof(attempt), "(%d/%d)", __builtin_popcount(triedMask), wifiCount);
-  Serial.printf("[WiFi] → %s %s\n", savedSsid.c_str(), attempt);
-  oledShow("WiFi Connecting", savedSsid.c_str(), attempt, 15000);
   WiFi.disconnect(false);
-  WiFi.begin(wifiList[idx].ssid.c_str(), wifiList[idx].pass.c_str());
+
+  // FastConnect: jika cache valid dan SSID cocok, langsung connect tanpa scan
+  if (fcCacheValid && fcCache.ssid == wifiList[idx].ssid) {
+    Serial.printf("[FC] Fast connect → %s ch%d %s\n", savedSsid.c_str(), fcCache.ch, attempt);
+    oledShow("WiFi FastConnect", savedSsid.c_str(), attempt, 15000);
+    WiFi.begin(wifiList[idx].ssid.c_str(), wifiList[idx].pass.c_str(),
+               fcCache.ch, fcCache.bssid);
+  } else {
+    Serial.printf("[WiFi] → %s %s\n", savedSsid.c_str(), attempt);
+    oledShow("WiFi Connecting", savedSsid.c_str(), attempt, 15000);
+    WiFi.begin(wifiList[idx].ssid.c_str(), wifiList[idx].pass.c_str());
+  }
+
   staConnecting = true;
   staStartMs    = millis();
   scanPending   = false;
@@ -551,48 +651,110 @@ static void connectToEntry(uint8_t idx) {
 void beginStaConnect() {
   triedMask      = 0;
   scanRetryCount = 0;
-  rebootAtMs     = 0;
   scanPending    = false;
   WiFi.disconnect(false);
-  kickBackgroundScan(true);
-  scanPending = true;
-}
-
-static void scheduleReboot() {
-  if (rebootAtMs != 0) return;
-  rtcWifiFailMagic = kWifiFailMagic;
-  rtcWifiFailCount++;
-  rebootAtMs = millis() + 60000;
-  Serial.printf("[WiFi] No network — reboot in 60s (fail #%lu)\n", rtcWifiFailCount);
-  restoreAp();
-  char line[20]; snprintf(line, sizeof(line), "Gagal #%lu", rtcWifiFailCount);
-  oledShow("No WiFi Found", "AP: 192.168.4.1", line, 6000);
-}
-
-static void processScanResult() {
-  if (!scanPending) return;
-  const int best = pickBestFromLastScan(triedMask);
-  if (best == -2) return;   // still scanning
-  scanPending = false;
-  if (best >= 0) { connectToEntry((uint8_t)best); return; }
-  if (scanRetryCount < kMaxScanRetry) {
-    scanRetryCount++;
-    Serial.printf("[WiFi] Scan empty, retry %d/%d\n", scanRetryCount, kMaxScanRetry);
-    oledShow("Scan empty", "Retrying...", "", 5000);
-    kickBackgroundScan(false);
-    scanPending = true;
+  if (wifiCount > 0) {
+    connectToEntry(0);
   } else {
-    scheduleReboot();
+    Serial.println("[WiFi] No saved networks to connect.");
   }
 }
 
+// Reset fail-cycle counter on successful connection
+static void resetWifiFailCycles() {
+  wifiFailCycles = 0;
+}
+
+static void scheduleReboot() {
+  Serial.println("[WiFi] Retrying from start...");
+  beginStaConnect();
+}
+
+static void processScanResult() {
+  // Background scanning is disabled in Normal Mode.
+}
+
 static void handleStaTimeout(uint32_t now) {
-  if (!staConnecting) return;
-  if (now - staStartMs < kStaTimeoutMs) return;
-  staConnecting = false;
-  Serial.printf("[WiFi] Timeout: %s\n", savedSsid.c_str());
-  kickBackgroundScan(false);
-  scanPending = true;
+  if (configMode) return;  // config mode: biarkan user yang trigger connect via web UI
+
+  // 1. Watchdog: staConnected tapi IP hilang atau status bukan WL_CONNECTED
+  if (staConnected && !staConnecting) {
+    bool stale = (WiFi.status() != WL_CONNECTED) ||
+                 (WiFi.localIP() == IPAddress(0, 0, 0, 0));
+    if (stale) {
+      Serial.println("[WiFi] Stale connected state detected (no IP), reconnecting...");
+      staConnected = false;
+      WiFi.disconnect(false);
+      beginStaConnect();
+      return;
+    }
+  }
+
+  // 2. Timeout saat connecting
+  if (staConnecting) {
+    if (now - staStartMs < kStaTimeoutMs) return;
+    staConnecting = false;
+    Serial.printf("[WiFi] Timeout/Failed: %s\n", savedSsid.c_str());
+    WiFi.disconnect(false);
+    // Jika gagal dengan FastConnect cache, hapus — mungkin AP sudah ganti channel/BSSID
+    if (fcCacheValid && fcCache.ssid == savedSsid) fcClear();
+
+    // Coba network berikutnya yang belum dicoba
+    int nextIdx = -1;
+    for (uint8_t i = 0; i < wifiCount; i++) {
+      if (!(triedMask & (1 << i))) {
+        nextIdx = i;
+        break;
+      }
+    }
+    if (nextIdx >= 0) {
+      connectToEntry(nextIdx);
+    } else {
+      wifiFailCycles++;
+      Serial.printf("[WiFi] All saved networks tried. Cycle #%d\n", wifiFailCycles);
+
+      if (wifiFailCycles >= kMaxFailCycles) {
+        // After N full cycles, enable AP so user can reconfigure
+        Serial.printf("[WiFi] %d cycles failed — activating AP mode\n", wifiFailCycles);
+        oledShow("WiFi Gagal", "AP Aktif", "192.168.4.1", 5000);
+        restoreAp();
+        // Keep retrying STA in background — reset cycle counter so AP isn't re-triggered every cycle
+        wifiFailCycles = 0;
+      } else {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Coba ulang %d/%d", wifiFailCycles, kMaxFailCycles);
+        oledShow("WiFi Offline", buf, "Retrying...", 4000);
+      }
+      beginStaConnect();
+    }
+    return;
+  }
+
+  // 3. Idle watchdog: tidak ada proses koneksi dan tidak connected → retry setelah 30 detik
+  static uint32_t idleSinceMs = 0;
+  if (!staConnected && !staConnecting && wifiCount > 0) {
+    if (idleSinceMs == 0) idleSinceMs = now;
+    else if (now - idleSinceMs > 30000) {
+      Serial.println("[WiFi] Idle watchdog: not connected, starting connect cycle.");
+      idleSinceMs = 0;
+      beginStaConnect();
+    }
+  } else {
+    idleSinceMs = 0;  // reset timer selagi connected atau connecting
+  }
+}
+
+// ============================================================
+// FreeRTOS Task for Synchronous Scanning (to prevent lockups)
+// ============================================================
+static void wifiScanTask(void *pvParameters) {
+  scanTaskRunning = true;
+  Serial.println("[Scan Task] Initiating synchronous WiFi scan in Config Mode...");
+  WiFi.scanDelete();
+  int res = WiFi.scanNetworks(false, false);
+  Serial.printf("[Scan Task] Scan completed. Found: %d networks.\n", res);
+  scanTaskRunning = false;
+  vTaskDelete(NULL);
 }
 
 // ============================================================
@@ -615,7 +777,6 @@ void startAp() {
 
 void restoreAp() {
   if (apStarted) return;
-  WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   const String ssid = getApSsid();
   WiFi.softAP(ssid.c_str(), kApPass);
@@ -624,57 +785,13 @@ void restoreAp() {
 }
 
 // ============================================================
-// Reboot countdown
-// ============================================================
-static void handleRebootCountdown(uint32_t now) {
-  if (rebootAtMs == 0) return;
-  const int32_t secsLeft = (int32_t)(rebootAtMs - now) / 1000;
-
-  if (secsLeft <= 0) {
-    if (WiFi.softAPgetStationNum() > 0) {
-      rebootAtMs = now + 30000;
-      Serial.println("[Reboot] AP client connected — postpone 30s");
-      oledShow("Client terhubung", "Tunda reboot 30s", "AP: 192.168.4.1", 4000);
-      return;
-    }
-    Serial.println("[Reboot] Rebooting now");
-    ESP.restart();
-  }
-
-  // Every 10s: scan to see if a saved network appeared
-  static uint32_t lastRetryMs = 0;
-  if (now - lastRetryMs >= 10000) {
-    lastRetryMs = now;
-    if (!scanPending) { kickBackgroundScan(false); scanPending = true; }
-  }
-  if (scanPending) {
-    const int best = pickBestFromLastScan(0);
-    if (best == -2) { /* still scanning */ }
-    else if (best >= 0) {
-      Serial.printf("[Reboot] WiFi appeared: %s — cancel\n", wifiList[best].ssid.c_str());
-      rebootAtMs = 0; lastRetryMs = 0; scanPending = false;
-      rtcWifiFailMagic = 0;
-      beginStaConnect();
-      return;
-    } else {
-      scanPending = false;
-    }
-  }
-
-  static int32_t lastSec = -1;
-  if (secsLeft != lastSec) {
-    lastSec = secsLeft;
-    char buf[18]; snprintf(buf, sizeof(buf), "Reboot in %ds", secsLeft);
-    oledShow("No WiFi Found", buf, "AP: 192.168.4.1", 1100);
-    Serial.printf("[Reboot] %ds\n", secsLeft);
-  }
-}
-
-// ============================================================
 // Config mode
 // ============================================================
 void enterConfigMode() {
-  rtcConfigMagic = kConfigMagic;
+  Preferences p;
+  p.begin(kNvsWifi, false);
+  p.putBool("cfgMode", true);
+  p.end();
   oledShow("Config Mode", "Restarting...", "", 2000);
   Serial.println("[Boot] Config mode — restarting");
   delay(500);
@@ -689,6 +806,65 @@ static void handleConfigButton(uint32_t now) {
   } else {
     btnPressedMs = 0;
   }
+}
+
+// GPIO13 — short press: next OLED page; long press (3s): toggle autoscroll
+static void handleBtn2(uint32_t now) {
+  const bool pressed = (digitalRead(kBtn2Pin) == LOW);
+  if (pressed) {
+    if (btn2PressedMs == 0) btn2PressedMs = now;
+    else if (now - btn2PressedMs >= kBtnHoldMs) {
+      btn2PressedMs = 0;
+      oledAutoScroll = !oledAutoScroll;
+      oledShow(oledAutoScroll ? "Display" : "Display",
+               oledAutoScroll ? "Auto Scroll ON" : "Auto Scroll OFF",
+               "", 2000);
+    }
+  } else {
+    if (btn2PressedMs > 0 && now - btn2PressedMs < kBtnHoldMs) {
+      // short press: advance page immediately
+      oledPage = (oledPage + 1) % 3;
+      oledPageMs = now;
+      oledDrawPage(oledPage);
+    }
+    btn2PressedMs = 0;
+  }
+}
+
+// ============================================================
+// NTP
+// ============================================================
+void ntpBeginSync() {
+  configTime(kTzOffset, 0, kNtpServer);
+  ntpLastSync = millis();
+  Serial.println("[NTP] Sync started");
+}
+
+static void handleNtp(uint32_t now) {
+  if (!staConnected && !ethReady) return;
+  if (ntpSynced && now - ntpLastSync < kNtpResyncMs) return;
+  // Check if time is valid (year > 2020)
+  struct tm ti;
+  if (getLocalTime(&ti, 0) && ti.tm_year > 120) {
+    if (!ntpSynced) {
+      ntpSynced = true;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%02d:%02d:%02d WIB", ti.tm_hour, ti.tm_min, ti.tm_sec);
+      oledShow("NTP Synced", buf, "", 3000);
+      Serial.printf("[NTP] Synced: %s\n", buf);
+    }
+    ntpLastSync = now;
+  } else if (ntpLastSync == 0 || now - ntpLastSync > 10000) {
+    ntpBeginSync();
+  }
+}
+
+// Helper: get time string "HH:MM" or "--:--" if not synced
+void getTimeStr(char* buf, size_t len) {
+  if (!ntpSynced) { snprintf(buf, len, "--:--"); return; }
+  struct tm ti;
+  if (getLocalTime(&ti, 0)) snprintf(buf, len, "%02d:%02d", ti.tm_hour, ti.tm_min);
+  else snprintf(buf, len, "--:--");
 }
 
 // ============================================================
@@ -739,20 +915,45 @@ static const char kStyle[] PROGMEM =
   ".toggle span{font-size:14px;color:#0f172a;font-weight:500}"
   "</style>";
 
-static const char kNav[] PROGMEM =
-  "<div class=nav>"
-  "<a href=/>&#9881; Setup</a>"
-  "<a href=/network>&#127760; Network</a>"
-  "<a href=/mqtt>&#128236; MQTT</a>"
-  "</div>";
+static String getNav() {
+  String nav;
+  nav.reserve(384);
+  nav = "<div class=nav>";
+  if (!configMode) {
+    nav += "<a href=/>&#127968; Home</a>";
+  }
+  nav += "<a href=/network>&#127760; Network</a>";
+  nav += "<a href=/mqtt>&#128236; MQTT</a>";
+  nav += "<a href=/update>&#128229; OTA</a>";
+  if (configMode) {
+    nav += "<a href='#' onclick='if(confirm(\"Reboot device ke Normal Mode?\"))fetch(\"/api/reboot\",{method:\"POST\"})' style='background:#fee2e2;color:#b91c1c;margin-left:auto'>&#8635; Reboot (Normal Mode)</a>";
+  }
+  nav += "</div>";
+  return nav;
+}
 
 static const char kScanScript[] PROGMEM =
   "function eh(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+  "async function goToConfigMode(){"
+    "if(!confirm('Masuk Config Mode? Device akan restart dan broadcast AP.'))return;"
+    "await fetch('/api/config-mode',{method:'POST'});"
+    "document.body.innerHTML='<div class=wrap><div class=card><h3>Restarting...</h3><p style=\"font-size:13px;color:#64748b;margin-top:8px\">Device sedang memuat ulang ke Config Mode. Hubungkan ke AP SEMS-SETUP-xx jika menggunakan WiFi.</p></div></div>';"
+    "setTimeout(async function poll(){"
+      "try{let r=await fetch('/api/network');if(r.ok){location.href='/network';return;}}catch(e){}"
+      "setTimeout(poll,1500);"
+    "},4000);"
+  "}"
   "async function scanWifi(tid){"
     "const msg=document.getElementById('msg');"
     "msg.className='err';msg.textContent='Scanning...';"
     "document.getElementById('scanList').innerHTML='';"
-    "await fetch('/api/scan',{method:'POST'});"
+    "const r=await fetch('/api/scan',{method:'POST'});"
+    "if(!r.ok){"
+      "const d=await r.json();"
+      "if(d.error==='scan_restricted')msg.innerHTML='Scan hanya diperbolehkan di Config Mode. <button class=\"btn btn-sm btn-danger\" type=button onclick=goToConfigMode() style=\"margin-top:5px;display:block\">Masuk Config Mode</button>';"
+      "else msg.textContent='Scan gagal: '+(d.error||'unknown');"
+      "return;"
+    "}"
     "pollScan(20,tid);"
   "}"
   "async function pollScan(n,tid){"
@@ -771,6 +972,13 @@ static const char kScanScript[] PROGMEM =
     "document.querySelectorAll('[data-s]').forEach(b=>b.onclick=()=>{"
       "document.getElementById(tid).value=b.dataset.s;"
       "document.getElementById('pass').focus();"
+    "});"
+    "r.networks.forEach(net=>{"
+      "document.querySelectorAll('[data-saved-ssid]').forEach(span=>{"
+        "if(span.dataset.savedSsid===net.ssid){"
+          "span.textContent=' [ch'+net.ch+' • '+net.rssi+' dBm]';"
+        "}"
+      "});"
     "});"
   "}";
 
@@ -805,6 +1013,7 @@ static String htmlEsc(String s) {
 // Web handlers
 // ============================================================
 static void handleRoot() {
+  Serial.printf("[Web] Request on / from %s\n", server.client().remoteIP().toString().c_str());
   oledShow("Web UI", "Setup dibuka", server.client().remoteIP().toString().c_str(), 3000);
 
   char uptime[18], mac[18];
@@ -818,7 +1027,7 @@ static void handleRoot() {
   html += FPSTR(kStyle);
   html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
             "<h1>SEMS AIoT &mdash; Setup</h1>");
-  html += FPSTR(kNav);
+  html += getNav();
 
   // Hardware card
   html += F("<div class=card><div class=card-title>Hardware</div>");
@@ -836,43 +1045,30 @@ static void handleRoot() {
   html += "<div class=row><span class=label>Uptime</span><span class=val>"; html += uptime;
   html += F("</span></div></div>");
 
-  // Saved WiFi card
-  html += F("<div class=card><div class=card-title>Saved WiFi Networks</div>");
-  if (wifiCount == 0) {
-    html += F("<p style='font-size:13px;color:#94a3b8'>Belum ada jaringan tersimpan.</p>");
-  } else {
-    for (uint8_t i = 0; i < wifiCount; i++) {
-      String s = htmlEsc(wifiList[i].ssid);
-      bool active = staConnected && wifiList[i].ssid == savedSsid;
-      html += "<div class=net-item><div><div class=net-ssid>"; html += s;
-      if (active) { html += F(" <span class=ok>&#10003; "); html += WiFi.localIP().toString(); html += F("</span>"); }
-      html += F("</div></div><button class='btn btn-sm btn-danger' type=button data-d=\"");
-      html += s; html += F("\">&#10005;</button></div>");
-    }
-  }
-  html += F("</div>");
-
   // Config links
   html += F("<div class=card><div class=card-title>Konfigurasi</div>"
             "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
             "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a></div>");
 
   // System buttons
-  html += F("<div class=card><div class=card-title>Sistem</div>"
-            "<button class='btn btn-sm' id=btnCfg type=button>&#128268; Config Mode (AP)</button> "
-            "<button class='btn btn-sm btn-danger' id=btnRbt type=button>&#8635; Reboot</button></div>");
+  html += F("<div class=card><div class=card-title>Sistem</div>");
+  if (!configMode) {
+    html += F("<button class='btn btn-sm btn-danger' id=btnCfg type=button>&#128268; Masuk Config Mode (AP)</button> ");
+  } else {
+    html += F("<button class='btn btn-sm btn-ghost' style='cursor:not-allowed;opacity:0.6' disabled type=button>Sudah di Config Mode (AP)</button> ");
+  }
+  html += F("<button class='btn btn-sm btn-danger' id=btnRbt type=button>&#8635; Reboot</button></div>");
 
   html += F("<script>"
-    "document.querySelectorAll('[data-d]').forEach(b=>b.onclick=async()=>{"
-      "await fetch('/api/wifi/delete',{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:b.dataset.d})});"
-      "location.reload();"
-    "});"
-    "document.getElementById('btnCfg').onclick=async()=>{"
+    "const btnCfg=document.getElementById('btnCfg');"
+    "if(btnCfg)btnCfg.onclick=async()=>{"
       "if(!confirm('Masuk Config Mode? Device akan restart dan broadcast AP.'))return;"
       "await fetch('/api/config-mode',{method:'POST'});"
-      "document.body.innerHTML='<div class=wrap><div class=card>"
-        "<p>Restarting... Hubungkan ke AP SEMS-SETUP-xx</p></div></div>';"
+      "document.body.innerHTML='<div class=wrap><div class=card><h3>Restarting...</h3><p style=\"font-size:13px;color:#64748b;margin-top:8px\">Device sedang memuat ulang ke Config Mode. Hubungkan ke AP SEMS-SETUP-xx jika menggunakan WiFi.</p></div></div>';"
+      "setTimeout(async function poll(){"
+        "try{let r=await fetch('/api/network');if(r.ok){location.href='/network';return;}}catch(e){}"
+        "setTimeout(poll,1500);"
+      "},4000);"
     "};"
     "document.getElementById('btnRbt').onclick=async()=>{"
       "if(!confirm('Reboot device?'))return;"
@@ -892,19 +1088,50 @@ static void handleNetworkPage() {
   html += F("<title>SEMS Network</title>"
             "<style>.refresh{font-size:11px;color:#94a3b8;text-align:right;margin-top:4px}</style>"
             "</head><body><div class=wrap><h1>SEMS AIoT &mdash; Network</h1>");
-  html += FPSTR(kNav);
+  html += getNav();
+  if (!configMode) {
+    html += F("<div class='card' style='background:#fee2e2;border:1px solid #fca5a5;padding:12px;margin-bottom:12px;'>"
+              "<div style='font-weight:600;color:#991b1b;font-size:14px;margin-bottom:4px;'>Normal Mode Aktif</div>"
+              "<div style='font-size:12px;color:#7f1d1d;margin-bottom:8px;'>Fitur WiFi Scan dikunci untuk menjaga kestabilan koneksi.</div>"
+              "<button class='btn btn-sm btn-danger' type=button onclick='goToConfigMode()'>&#128268; Masuk Config Mode</button>"
+              "</div>");
+  }
   html += F("<div id=root><p style='color:#94a3b8;font-size:13px'>Loading...</p></div>"
-            "<div class=refresh id=ts></div>"
-            "<div class=card style='margin-top:12px'><div class=card-title>Scan WiFi</div>"
-            "<button class='btn btn-sm' type=button onclick=\"scanWifi('ssid')\">&#128268; Scan Sekarang</button>"
-            "<div id=msg style='margin-top:8px;font-size:13px'></div>"
-            "<div id=scanList></div>"
-            "<div id=addForm style='display:none'>"
-            "<label>SSID</label><input type=text id=ssid readonly>"
-            "<label>Password</label><input type=password id=pass placeholder='Password'>"
-            "<button class=btn style='width:100%;margin-top:10px' onclick=saveWifi()>Simpan &amp; Reboot</button>"
-            "</div></div>"
-            "<script>"
+            "<div class=refresh id=ts></div>");
+
+  // Saved WiFi card
+  html += F("<div class=card><div class=card-title>Saved WiFi Networks</div>");
+  if (wifiCount == 0) {
+    html += F("<p style='font-size:13px;color:#94a3b8'>Belum ada jaringan tersimpan.</p>");
+  } else {
+    for (uint8_t i = 0; i < wifiCount; i++) {
+      String s = htmlEsc(wifiList[i].ssid);
+      bool active = staConnected && wifiList[i].ssid == savedSsid;
+      html += "<div class=net-item><div><div class=net-ssid>"; html += s;
+      if (active) { html += F(" <span class=ok>&#10003; "); html += WiFi.localIP().toString(); html += F("</span>"); }
+      html += "<span data-saved-ssid=\""; html += s; html += "\" style=\"font-size:11px;color:#64748b;margin-left:6px\"></span>";
+      html += F("</div></div>");
+      if (configMode) {
+        html += F("<button class='btn btn-sm btn-danger' type=button data-d=\"");
+        html += s; html += F("\">&#10005;</button>");
+      }
+      html += F("</div>");
+    }
+  }
+  html += F("</div>");
+
+  if (configMode) {
+    html += F("<div class=card style='margin-top:12px'><div class=card-title>Scan WiFi</div>"
+              "<button class='btn btn-sm' type=button onclick=\"scanWifi('ssid')\">&#128268; Scan Sekarang</button>"
+              "<div id=msg style='margin-top:8px;font-size:13px'></div>"
+              "<div id=scanList></div>"
+              "<div id=addForm style='display:none'>"
+              "<label>SSID</label><input type=text id=ssid readonly>"
+              "<label>Password</label><input type=password id=pass placeholder='Password'>"
+              "<button class=btn style='width:100%;margin-top:10px' onclick=saveWifi()>Connect &amp; Simpan</button>"
+              "</div></div>");
+  }
+  html += F("<script>"
             "function badge(ok,yes,no,mid){"
               "const s=ok===null?'connecting':ok?'up':'down';"
               "const t=ok===null?mid:ok?yes:no;"
@@ -945,6 +1172,7 @@ static void handleNetworkPage() {
               "}catch(e){document.getElementById('root').innerHTML='<p style=color:#b91c1c>'+e+'</p>';}"
             "}"
             "load();setInterval(load,5000);"
+            "if(document.getElementById('scanList')){scanWifi('ssid');}"
             "window.addEventListener('click',e=>{"
               "if(e.target.dataset.s!==undefined){"
                 "document.getElementById('ssid').value=e.target.dataset.s;"
@@ -952,17 +1180,30 @@ static void handleNetworkPage() {
                 "document.getElementById('addForm').style.display='block';"
                 "document.getElementById('pass').focus();}"
             "});"
-            "async function saveWifi(){"
-              "const msg=document.getElementById('msg');"
-              "msg.className='err';msg.textContent='Menyimpan...';"
-              "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
-                "pass:document.getElementById('pass').value});"
-              "const r=await fetch('/api/wifi/save',{method:'POST',"
-                "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
-              "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Rebooting...';"
-                "setTimeout(()=>fetch('/api/reboot',{method:'POST'}),800);}"
-              "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}"
-            "}");
+            "document.querySelectorAll('[data-d]').forEach(b=>b.onclick=async()=>{"
+              "if(!confirm('Hapus jaringan '+b.dataset.d+'?'))return;"
+              "await fetch('/api/wifi/delete',{method:'POST',"
+                "headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:b.dataset.d})});"
+              "location.reload();"
+            "});"
+             "async function saveWifi(){"
+               "const msg=document.getElementById('msg');"
+               "msg.className='ok';msg.textContent='Sedang menguji koneksi WiFi, mohon tunggu...';"
+               "const b=JSON.stringify({ssid:document.getElementById('ssid').value,"
+                 "pass:document.getElementById('pass').value});"
+               "try{"
+                 "const r=await fetch('/api/wifi/connect-test',{method:'POST',"
+                   "headers:{'Content-Type':'application/json'},body:b}).then(x=>x.json());"
+                 "if(r.ok){"
+                   "msg.className='ok';msg.innerHTML='Koneksi sukses! IP: '+r.ip+'<br>Konfigurasi WiFi telah disimpan.';"
+                   "setTimeout(()=>location.reload(),2000);"
+                 "}else{"
+                   "msg.className='err';msg.textContent='Gagal tersambung ke WiFi. Periksa kembali Password/Sinyal Anda (status: '+r.status+').';"
+                 "}"
+               "}catch(e){"
+                 "msg.className='err';msg.textContent='Error saat menguji koneksi: '+e;"
+               "}"
+             "}");
   html += FPSTR(kScanScript);
   html += F("</script></div></body></html>");
   server.send(200, "text/html", html);
@@ -972,11 +1213,38 @@ static void handleMqttPage() {
   oledShow("Web UI", "MQTT dibuka", server.client().remoteIP().toString().c_str(), 3000);
 
   String html;
-  html.reserve(3500);
+  html.reserve(3800);
   html += FPSTR(kStyle);
   html += F("<title>SEMS MQTT</title></head><body><div class=wrap>"
             "<h1>SEMS AIoT &mdash; MQTT</h1>");
-  html += FPSTR(kNav);
+  html += getNav();
+
+  if (!configMode) {
+    // Normal Mode: tampilkan banner info bahwa config hanya bisa di config mode
+    html += F("<div class='card' style='background:#fee2e2;border:1px solid #fca5a5;padding:12px;margin-bottom:12px;'>"
+              "<div style='font-weight:600;color:#991b1b;font-size:14px;margin-bottom:4px;'>Normal Mode Aktif</div>"
+              "<div style='font-size:12px;color:#7f1d1d;margin-bottom:8px;'>Konfigurasi MQTT hanya dapat diubah di Config Mode.</div>"
+              "<button class='btn btn-sm btn-danger' type=button onclick='goToConfigMode()'>&#128268; Masuk Config Mode</button>"
+              "</div>"
+              "<div class=card><div class=card-title>Status MQTT</div><div id=status>Loading...</div></div>"
+              "<script>"
+              "async function load(){"
+                "const d=await fetch('/api/mqtt').then(r=>r.json());"
+                "const ok=d.connected;"
+                "document.getElementById('status').innerHTML="
+                  "'<span class=\"badge '+(ok?'up':'down')+'\"><span class=dot></span>'+(ok?'Connected':'Disconnected')+'</span> '+"
+                  "'<span style=\"font-size:12px;color:#64748b;margin-left:8px\">'+(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';}"
+              "load();setInterval(load,5000);"
+              "</script></div></body></html>");
+    server.send(200, "text/html", html);
+    return;
+  }
+
+  // Config Mode: full editor + banner kuning info
+  html += F("<div class='card' style='background:#fef9c3;border:1px solid #fde047;padding:12px;margin-bottom:12px;'>"
+            "<div style='font-weight:600;color:#854d0e;font-size:14px;margin-bottom:4px;'>Config Mode</div>"
+            "<div style='font-size:12px;color:#713f12;'>Koneksi ke broker tidak akan dicoba sampai reboot ke Normal Mode.</div>"
+            "</div>");
   html += F("<div class=card><div class=card-title>Status</div><div id=status>Loading...</div></div>"
             "<div class=card><div class=card-title>Konfigurasi Broker</div>"
             "<div class=toggle><input type=checkbox id=enabled><span>MQTT Aktif</span></div>"
@@ -993,7 +1261,23 @@ static void handleMqttPage() {
             "<button class=btn style='width:100%;margin-top:14px' onclick=save()>Simpan</button>"
             "<div id=msg></div></div>"
             "<script>"
-            "async function load(){"
+            "let dirty=false;"
+            "document.addEventListener('DOMContentLoaded',()=>{"
+              "['host','port','user','pass','topic','enabled'].forEach(id=>{"
+                "const el=document.getElementById(id);"
+                "if(el)el.addEventListener('input',()=>{dirty=true;});});"
+            "});"
+            "async function load(force){"
+              "if(dirty&&!force){"
+                // only refresh status badge, never overwrite form fields
+                "const d=await fetch('/api/mqtt').then(r=>r.json());"
+                "const ok=d.connected;"
+                "document.getElementById('status').innerHTML="
+                  "'<span class=\"badge '+(ok?'up':'down')+'\">"
+                    "<span class=dot></span>'+(ok?'Connected':'Disconnected')+'</span> '+"
+                  "'<span style=\"font-size:12px;color:#64748b;margin-left:8px\">'+"
+                    "(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';"
+                "return;}"
               "const d=await fetch('/api/mqtt').then(r=>r.json());"
               "document.getElementById('enabled').checked=d.enabled;"
               "document.getElementById('host').value=d.host||'';"
@@ -1005,7 +1289,8 @@ static void handleMqttPage() {
                 "'<span class=\"badge '+(ok?'up':'down')+'\">"
                   "<span class=dot></span>'+(ok?'Connected':'Disconnected')+'</span> '+"
                 "'<span style=\"font-size:12px;color:#64748b;margin-left:8px\">'+"
-                  "(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';}"
+                  "(d.host?d.host+':'+d.port:'Belum dikonfigurasi')+'</span>';"
+              "dirty=false;}"
             "async function save(){"
               "const msg=document.getElementById('msg');"
               "msg.className='';msg.textContent='Menyimpan...';"
@@ -1017,26 +1302,44 @@ static void handleMqttPage() {
                 "topic:document.getElementById('topic').value||'sems'};"
               "const r=await fetch('/api/mqtt/save',{method:'POST',"
                 "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(x=>x.json());"
-              "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Reconnecting...';setTimeout(load,2000);}"
+              "if(r.ok){dirty=false;msg.className='ok';msg.textContent='Tersimpan!';setTimeout(()=>load(true),1500);}"
               "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}}"
-            "load();setInterval(load,5000);"
-            "</script></div></body></html>");
+            "load(true);setInterval(load,5000);");
+  html += F("</script></div></body></html>");
   server.send(200, "text/html", html);
 }
 
 // --- API handlers ---
 
 static void handleScanStart() {
+  bool inConfigMode = configMode;
+  if (!inConfigMode) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"scan_restricted\"}");
+    return;
+  }
+
+  if (scanTaskRunning) {
+    server.send(202, "application/json", "{\"ok\":true}");
+    return;
+  }
+
   WiFi.scanDelete();
-  WiFi.scanNetworks(true, true);
+  xTaskCreate(wifiScanTask, "wifiScanTask", 4096, NULL, 1, NULL);
   server.send(202, "application/json", "{\"ok\":true}");
 }
 
 static void handleScanResult() {
   const int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) {
+  Serial.printf("[Web Scan API] Query status: %d (Task Running: %d)\n", n, scanTaskRunning);
+  
+  if (n == WIFI_SCAN_RUNNING || scanTaskRunning) {
     server.send(200, "application/json", "{\"status\":\"scanning\"}"); return;
   }
+  if (n == WIFI_SCAN_FAILED) {
+    WiFi.scanDelete();
+    server.send(200, "application/json", "{\"status\":\"failed\",\"networks\":[]}"); return;
+  }
+  
   String body;
   body.reserve(512);
   body = "{\"status\":\"done\",\"networks\":[";
@@ -1124,6 +1427,52 @@ static void handleWifiSave() {
   server.send(200,"application/json","{\"ok\":true}");
 }
 
+static void handleWifiConnectTest() {
+  String body = server.arg("plain");
+  String ssid = jsonExtract(body, "ssid"), pass = jsonExtract(body, "pass");
+  if (ssid.isEmpty()) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}");
+    return;
+  }
+
+  Serial.printf("[WiFi Test] Testing connection to SSID: %s\n", ssid.c_str());
+  oledShow("WiFi Test", ssid.c_str(), "Connecting...", 15000);
+
+  // Switch to WIFI_AP_STA dynamically to test connection
+  if (WiFi.getMode() != WIFI_AP_STA) {
+    WiFi.mode(WIFI_AP_STA);
+    delay(100);
+  }
+
+  WiFi.disconnect(false);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  uint32_t startMs = millis();
+  bool connected = false;
+  while (millis() - startMs < 12000) {
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      break;
+    }
+    delay(200);
+    yield();
+  }
+
+  if (connected) {
+    IPAddress ip = WiFi.localIP();
+    Serial.printf("[WiFi Test] Success! IP: %s\n", ip.toString().c_str());
+    oledShow("WiFi Test OK", ssid.c_str(), ip.toString().c_str(), 6000);
+    addOrUpdateWifi(ssid, pass);
+    server.send(200, "application/json", "{\"ok\":true,\"ip\":\"" + ip.toString() + "\"}");
+  } else {
+    int status = WiFi.status();
+    Serial.printf("[WiFi Test] Failed! Status: %d\n", status);
+    oledShow("WiFi Test FAIL", ssid.c_str(), "Check password", 6000);
+    WiFi.disconnect(true);
+    server.send(200, "application/json", "{\"ok\":false,\"error\":\"conn_failed\",\"status\":" + String(status) + "}");
+  }
+}
+
 static void handleWifiDelete() {
   String ssid = jsonExtract(server.arg("plain"), "ssid");
   if (ssid.isEmpty()) { server.send(400,"application/json","{\"ok\":false,\"error\":\"ssid_required\"}"); return; }
@@ -1153,6 +1502,61 @@ static void handleWifiClear() {
   server.send(200,"application/json","{\"ok\":true}");
 }
 
+static const char kUpdateHtml[] PROGMEM =
+  "<!doctype html><html><head><meta charset=utf-8><title>SEMS OTA</title>"
+  "<meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<style>"
+  "body{font-family:system-ui,sans-serif;background:#f1f5f9;padding:16px;display:flex;justify-content:center;align-items:center;min-height:90vh;margin:0}"
+  ".card{background:#fff;border-radius:12px;padding:24px;width:100%;max-width:360px;box-shadow:0 4px 6px rgba(0,0,0,.05)}"
+  "h1{font-size:16px;font-weight:700;color:#0f172a;margin-bottom:16px}"
+  "input[type=file]{margin:16px 0;display:block;width:100%}"
+  ".btn{display:block;width:100%;background:#0f766e;color:#fff;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;text-align:center}"
+  "#prg{margin-top:12px;font-size:12px;color:#64748b;text-align:center}"
+  "</style></head><body><div class=card><h1>SEMS OTA Update</h1>"
+  "<form method=POST action=/update enctype=multipart/form-data id=upForm>"
+  "<input type=file name=update accept=.bin>"
+  "<input type=submit class=btn value='Update Firmware'></form><div id=prg></div>"
+  "<script>document.getElementById('upForm').onsubmit=function(){"
+  "document.getElementById('prg').textContent='Uploading... Mohon tunggu.';};</script>"
+  "</div></body></html>";
+
+static void handleUpdateGet() {
+  oledShow("OTA Mode", "Awaiting file...", "http://sems.local/update", 30000);
+  server.sendHeader("Connection", "close");
+  server.send(200, "text/html", FPSTR(kUpdateHtml));
+}
+
+static void handleUpdatePost() {
+  oledShow("OTA Finished", "Rebooting...", "", 5000);
+  server.sendHeader("Connection", "close");
+  server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+  delay(1000);
+  ESP.restart();
+}
+
+static void handleUpdateUpload() {
+  HTTPUpload& upload = server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("[Update] Start: %s\n", upload.filename.c_str());
+    oledShow("OTA Uploading", "Please wait...", "Do not power off", 60000);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("[Update] Success: %u bytes. Rebooting...\n", upload.totalSize);
+      oledShow("OTA Success", "Rebooting...", "Please wait", 5000);
+    } else {
+      Update.printError(Serial);
+      oledShow("OTA Failed", "Error writing file", "Please retry", 5000);
+    }
+  }
+}
+
 // ============================================================
 // Web server init
 // ============================================================
@@ -1165,6 +1569,7 @@ static void startWebServer() {
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",   HTTP_POST, handleWifiSave);
+  server.on("/api/wifi/connect-test", HTTP_POST, handleWifiConnectTest);
   server.on("/api/wifi/delete", HTTP_POST, handleWifiDelete);
   server.on("/api/wifi/list",   HTTP_GET,  handleWifiList);
   server.on("/api/wifi/clear",  HTTP_POST, handleWifiClear);
@@ -1174,6 +1579,8 @@ static void startWebServer() {
     server.send(200,"application/json","{\"ok\":true}");
     enterConfigMode();
   });
+  server.on("/update",          HTTP_GET,  handleUpdateGet);
+  server.on("/update",          HTTP_POST, handleUpdatePost, handleUpdateUpload);
   server.begin();
   if (MDNS.begin("sems")) {
     MDNS.addService("http","tcp",80);
@@ -1183,12 +1590,39 @@ static void startWebServer() {
 }
 
 // ============================================================
+// Ethernet IP / Link Active Loop Synchronizer
+// ============================================================
+static void handleEthSync(uint32_t now) {
+  static uint32_t lastEthSyncMs = 0;
+  if (now - lastEthSyncMs < 1000) return;
+  lastEthSyncMs = now;
+
+  bool currentEthLink = ETH.linkUp();
+  IPAddress localIp = ETH.localIP();
+  bool currentEthReady = (localIp != IPAddress(0,0,0,0));
+  
+  if (currentEthLink != ethLink || currentEthReady != ethReady || (currentEthReady && ethIp != localIp.toString())) {
+    ethLink = currentEthLink;
+    ethReady = currentEthReady;
+    ethIp = ethReady ? localIp.toString() : "";
+    if (ethReady) {
+      ETH.setDefault();
+      Serial.printf("[ETH Sync] Link: %d, IP: %s\n", ethLink, ethIp.c_str());
+    } else {
+      if (staConnected) WiFi.STA.setDefault();
+      Serial.printf("[ETH Sync] Offline (Link: %d)\n", ethLink);
+    }
+  }
+}
+
+// ============================================================
 // setup()
 // ============================================================
 void setup() {
   Serial.begin(115200);
   pinMode(kLedPin, OUTPUT);
-  pinMode(kBtnPin, INPUT_PULLUP);
+  pinMode(kBtnPin,  INPUT_PULLUP);
+  pinMode(kBtn2Pin, INPUT_PULLUP);
 
   Wire.begin(22, 21);
   if (oled.begin()) {
@@ -1201,15 +1635,23 @@ void setup() {
   oledShow("SEMS AIoT", "FW: " FW_VERSION, "Booting...", 2000);
 
   loadWifiList();
+  fcLoad();
   loadMqttConfig();
 
+  Preferences p;
+  p.begin(kNvsWifi, false);
+  const bool configModeReboot = p.getBool("cfgMode", false);
+  if (configModeReboot) {
+    p.putBool("cfgMode", false);
+  }
+  p.end();
+
   const bool wifiFailReboot   = (rtcWifiFailMagic == kWifiFailMagic);
-  const bool configModeReboot = (rtcConfigMagic   == kConfigMagic);
   rtcWifiFailMagic = 0;
-  rtcConfigMagic   = 0;
 
   // Register unified event handler BEFORE any WiFi/ETH init
   WiFi.onEvent(onNetworkEvent);
+  WiFi.setSleep(false); // Disable modem sleep globally
 
   // Manual hardware reset for W5500
   pinMode(kEthRst, OUTPUT);
@@ -1227,6 +1669,8 @@ void setup() {
   }
 
   if (configModeReboot) {
+    // Mode AP Saja (Config Mode)
+    configMode = true;
     WiFi.mode(WIFI_AP);
     startAp();
     startWebServer();
@@ -1234,20 +1678,24 @@ void setup() {
     Serial.println("[Boot] Config mode — AP only");
 
   } else if (wifiCount == 0 || wifiFailReboot) {
+    // Masuk Config Mode jika tidak ada wifi tersimpan atau setelah wifi fail reboot
+    configMode = true;
     WiFi.mode(WIFI_AP_STA);
     startAp();
     startWebServer();
+    // Jangan connectToSTA di config mode — biarkan user scan & pilih via web UI
     if (wifiCount == 0) {
       oledShow("No saved WiFi", "Open 192.168.4.1", "to configure", 8000);
     } else {
-      beginStaConnect();
+      oledShow("WiFi Gagal", "Config Mode", "192.168.4.1", 8000);
     }
-
   } else {
-    // Normal boot: STA only — AP restored if STA fails (via event handler)
+    // Normal Boot: Hanya STA (Client Mode), AP radio fully OFF!
+    configMode = false;
     WiFi.mode(WIFI_STA);
     startWebServer();
     beginStaConnect();
+    Serial.println("[Boot] Normal mode — STA only (AP disabled)");
   }
 }
 
@@ -1261,8 +1709,10 @@ void loop() {
   handleMqttLifecycle(now);
   processScanResult();
   handleStaTimeout(now);
-  handleRebootCountdown(now);
   handleConfigButton(now);
+  handleBtn2(now);
+  handleNtp(now);
+  handleEthSync(now);
 
   // LED heartbeat
   if (now - lastBlinkMs >= 500) {

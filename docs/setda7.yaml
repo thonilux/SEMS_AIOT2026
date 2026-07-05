@@ -1,0 +1,345 @@
+esphome:
+  name: smart_enms_pm
+  friendly_name: Smart ENMS LabIoT
+  # includes:
+  #   - <HTTPClient.h>
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  baud_rate: 9600
+  level: ERROR
+  logs:
+    display.component: ERROR
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "IoT"
+  password: "agusramelan"
+  power_save_mode: none
+  output_power: 8.5dB
+  fast_connect: true
+  reboot_timeout: 0s
+
+captive_portal:
+
+web_server:
+  port: 80
+
+i2c:
+  sda: GPIO22
+  scl: GPIO21
+  scan: true
+
+uart:
+  id: mod_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 19200
+  stop_bits: 1
+  parity: EVEN
+
+modbus:
+  id: modbus1
+  uart_id: mod_bus
+
+modbus_controller:
+  - id: kwh1
+    address: 1
+    modbus_id: modbus1
+    update_interval: 5s
+    command_throttle: 100ms
+    setup_priority: -10
+
+http_request:
+  useragent: esphome/device
+  timeout: 10s
+  verify_ssl: false
+
+globals:
+  - id: kwh1_connected
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: dataup
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+font:
+  - file: "Arial.ttf"
+    id: font1
+    size: 11
+
+  - file: "BebasNeue-Regular.ttf"
+    id: font2
+    size: 24
+
+  - file: "Icons South St.ttf"
+    id: font3
+    size: 9
+
+  - file: "Icons South St.ttf"
+    id: font4
+    size: 18
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Sensor"
+    id: wifi_rssi
+    update_interval: 60s
+  # KWh Meter 1 ###########################################################
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Voltage AC"
+    id: modbus_voltage_ac1
+    register_type: holding
+    address: 3027
+    unit_of_measurement: "V"
+    value_type: FP32
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lambda: |-
+            id(kwh1_connected) = true;
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Voltage PP"
+    id: modbus_voltage_pp1
+    register_type: holding
+    address: 3029
+    unit_of_measurement: "V"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Voltage LP"
+    id: modbus_voltage_lp1
+    register_type: holding
+    address: 3031
+    unit_of_measurement: "V"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Current AC"
+    id: modbus_current_ac1
+    register_type: holding
+    address: 2999
+    unit_of_measurement: "A"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Current PP"
+    id: modbus_current_pp1
+    register_type: holding
+    address: 3001
+    unit_of_measurement: "A"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Current LP"
+    id: modbus_current_lp1
+    register_type: holding
+    address: 3003
+    unit_of_measurement: "A"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Active Power AC"
+    id: modbus_active_power_ac1
+    register_type: holding
+    address: 3053
+    unit_of_measurement: "kW"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Active Power PP"
+    id: modbus_active_power_pp1
+    register_type: holding
+    address: 3055
+    unit_of_measurement: "kW"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Active Power LP"
+    id: modbus_active_power_lp1
+    register_type: holding
+    address: 3057
+    unit_of_measurement: "kW"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Reactive Power AC"
+    id: modbus_reactive_power_ac1
+    register_type: holding
+    address: 3061
+    unit_of_measurement: "kVAR"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Reactive Power PP"
+    id: modbus_reactive_power_pp1
+    register_type: holding
+    address: 3063
+    unit_of_measurement: "kVAR"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Reactive Power LP"
+    id: modbus_reactive_power_lp1
+    register_type: holding
+    address: 3065
+    unit_of_measurement: "kVAR"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Energy AC"
+    id: modbus_energy_ac1
+    register_type: holding
+    address: 2811
+    unit_of_measurement: "kWh"
+    value_type: FP32
+    accuracy_decimals: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Energy PP"
+    id: modbus_energy_pp1
+    register_type: holding
+    address: 2813
+    unit_of_measurement: "kWh"
+    value_type: FP32
+    accuracy_decimals: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Energy LP"
+    id: modbus_energy_lp1
+    register_type: holding
+    address: 2815
+    unit_of_measurement: "kWh"
+    value_type: FP32
+    accuracy_decimals: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Frequency"
+    id: modbus_grid_frequency1
+    register_type: holding
+    address: 3109
+    unit_of_measurement: "Hz"
+    value_type: FP32
+    accuracy_decimals: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Power Factor AC"
+    id: modbus_Power_Factor_AC1
+    register_type: holding
+    address: 3077
+    unit_of_measurement: ""
+    value_type: FP32
+    accuracy_decimals: 2
+    force_new_range: true
+    filters:
+      - lambda: |-
+          if (isnan(x)) return x;
+          if (x < 0.0f) x = -x;
+          if (x > 1.0f) x = 2.0f - x;
+          if (x < 0.0f) x = 0.0f;
+          if (x > 1.0f) x = 1.0f;
+          return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Power Factor PP"
+    id: modbus_Power_Factor_PP1
+    register_type: holding
+    address: 3079
+    unit_of_measurement: ""
+    value_type: FP32
+    accuracy_decimals: 2
+    force_new_range: true
+    filters:
+      - lambda: |-
+          if (isnan(x)) return x;
+          if (x < 0.0f) x = -x;
+          if (x > 1.0f) x = 2.0f - x;
+          if (x < 0.0f) x = 0.0f;
+          if (x > 1.0f) x = 1.0f;
+          return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: kwh1
+    name: "Power Factor LP"
+    id: modbus_Power_Factor_LP1
+    register_type: holding
+    address: 3081
+    unit_of_measurement: ""
+    value_type: FP32
+    accuracy_decimals: 2
+    force_new_range: true
+    filters:
+      - lambda: |-
+          if (isnan(x)) return x;
+          if (x < 0.0f) x = -x;
+          if (x > 1.0f) x = 2.0f - x;
+          if (x < 0.0f) x = 0.0f;
+          if (x > 1.0f) x = 1.0f;
+          return x;
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: my_ip
+      name: "IP Address"
+
+display:
+  - platform: ssd1306_i2c
+    model: "SH1106 128x64"
+    # reset_pin: GPIO00
+    address: 0x3C
+    lambda: |-
+      // Draw a 1-pixel border using horizontal and vertical lines
+      it.horizontal_line(0, 0, 128);   // Top border
+      it.horizontal_line(0, 63, 128);  // Bottom border
+      it.vertical_line(0, 0, 64);      // Left border
+      it.vertical_line(125, 0, 64);    // Right border
+      it.vertical_line(75, 26, 64);    // Right border
+
+      // Display the WiFi RSSI and IP address
+      it.printf(2, 0, id(font3), "q", id(wifi_rssi).state);
+      it.printf(12, 0, id(font1), "%.1f dB", id(wifi_rssi).state);
+      it.printf(53, 0, id(font3), "R");
+      it.printf(66, 0, id(font1), "%s", id(my_ip).state.c_str());
+
+      it.printf(2, 14, id(font1), "KWh AC : %s", id(kwh1_connected) ? "Connect" : "Disconnect");
+      it.printf(80, 35, id(font4), "%s", id(dataup) ? "K" : "");

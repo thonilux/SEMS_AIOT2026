@@ -32,6 +32,22 @@ static constexpr int kEthIrq = 27;
 static constexpr int kEthRst = 26;
 
 // ============================================================
+// RS485 / Modbus
+// ============================================================
+static constexpr int     kRs485Rx       = 16;
+static constexpr int     kRs485Tx       = 17;
+static constexpr int     kRs485Baud     = 19200;
+static constexpr uint8_t kModbusSlaveId = 1;
+static constexpr uint32_t kModbusPollMs = 1000;
+
+// PM2230 register map (FC03 holding, FP32 big-endian)
+static constexpr uint16_t kRegVoltage   = 3027;  // V
+static constexpr uint16_t kRegCurrent   = 2999;  // A
+static constexpr uint16_t kRegPower     = 3053;  // kW
+static constexpr uint16_t kRegEnergy    = 2811;  // kWh
+static constexpr uint16_t kRegFreq      = 3109;  // Hz
+
+// ============================================================
 // RTC state — survives soft reboot, NOT power-off
 // ============================================================
 RTC_DATA_ATTR static uint32_t rtcWifiFailMagic = 0;
@@ -142,7 +158,28 @@ static volatile bool scanTaskRunning = false;
 static NetworkClient netClient;
 static PubSubClient  mqttClient(netClient);
 static bool          mqttConnected  = false;
-static uint32_t      mqttLastTryMs  = 0;
+static uint32_t      mqttLastTryMs    = 0;
+static uint32_t      mqttHealthLastMs = 0;
+static uint32_t      mqttTxUntilMs   = 0;
+static constexpr uint32_t kHealthIntervalMs = 30000;
+static String        mqttDeviceId;   // "AABBCCDD1122" — set in setup()
+
+// ============================================================
+// Modbus / Meter data
+// ============================================================
+struct MeterData {
+  float    voltage  = 0;   // V
+  float    current  = 0;   // A
+  float    power    = 0;   // kW
+  float    energy   = 0;   // kWh
+  float    freq     = 0;   // Hz
+  bool     valid    = false;
+  uint32_t lastMs   = 0;
+};
+static MeterData     meter;
+static uint32_t      modbusLastPollMs = 0;
+static uint32_t      mqttMeterLastMs  = 0;
+static constexpr uint32_t kMeterPublishMs = 5000;  // publish meter data setiap 5s
 
 // ============================================================
 // Web server
@@ -195,6 +232,7 @@ void restoreAp();
 void enterConfigMode();
 void beginStaConnect();
 void oledShow(const char* l1, const char* l2 = "", const char* l3 = "", uint32_t ms = 4000);
+void mqttPublish(const char* subtopic, const String& payload);
 void ntpBeginSync();
 void getTimeStr(char* buf, size_t len);
 
@@ -426,37 +464,125 @@ static void drawPageLan() {
   oled.drawStr(2, 62, ethReady ? "Route: Ethernet (Primary)" : "Route: Standby");
 }
 
+static void oledDrawOverlay(uint32_t now) {
+  // Heartbeat dot — pojok kanan atas (x=122..127)
+  oled.setDrawColor(0); oled.drawBox(122, 57, 6, 7);
+  oled.setDrawColor(1);
+  if (oledHbTick & 1) oled.drawBox(123, 58, 4, 5);
+
+  // MQTT indicator — kanan bawah, kiri heartbeat (x=108..121)
+  oled.setDrawColor(0); oled.drawBox(108, 57, 14, 7);
+  oled.setDrawColor(1);
+  if (mqttCfg.enabled) {
+    if (now < mqttTxUntilMs) {
+      // TX aktif: ikon broadcast (node + gelombang melebar ke kanan)
+      oled.drawBox(108, 59, 2, 3);  // titik transmitter
+      oled.drawVLine(112, 60,  1);  // gelombang 1 (1px)
+      oled.drawVLine(114, 59,  3);  // gelombang 2 (3px)
+      oled.drawVLine(116, 58,  5);  // gelombang 3 (5px)
+      oled.drawVLine(118, 57,  7);  // gelombang 4 (7px penuh)
+    } else if (mqttConnected) {
+      oled.drawBox(113, 59, 5, 4);   // connected: kotak padat
+    } else {
+      oled.drawFrame(113, 59, 5, 4); // disconnected: kotak kosong
+    }
+  }
+  oled.setDrawColor(1);
+}
+
+static void drawPageMqtt() {
+  // Yellow Zone Header
+  oled.setFont(u8g2_font_helvB08_tf);
+  oled.drawStr(0, 10, "MQTT BROKER");
+  oled.drawHLine(0, 14, 128);
+
+  oled.setFont(u8g2_font_6x12_tf);
+  if (!mqttCfg.enabled) {
+    oled.drawStr(10, 38, "MQTT Disabled");
+    oled.drawHLine(0, 54, 128);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(2, 62, "Enable via web /mqtt");
+    return;
+  }
+
+  // Ikon status: kotak padat = connected, kerangka = offline
+  if (mqttConnected) {
+    oled.drawBox(2, 19, 12, 10);
+    oled.setDrawColor(0);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(4, 28, "ON");
+    oled.setDrawColor(1);
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(18, 27, "Connected");
+  } else {
+    oled.drawFrame(2, 19, 12, 10);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(4, 28, "--");
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(18, 27, "Offline");
+  }
+
+  // Host (truncate kalau panjang)
+  String h = mqttCfg.host;
+  if (h.length() > 17) h = h.substring(0, 16) + "~";
+  oled.drawStr(2, 39, h.c_str());
+
+  // Port & topic
+  char portBuf[24];
+  snprintf(portBuf, sizeof(portBuf), ":%d  [%s]", mqttCfg.port, mqttCfg.topicPrefix.c_str());
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(2, 49, portBuf);
+
+  // Status bar
+  oled.drawHLine(0, 54, 128);
+  oled.drawStr(2, 62, mqttConnected ? "Broker reachable" : "Reconnecting...");
+}
+
 static void oledDrawPage(uint8_t page) {
   oled.clearBuffer();
-  switch (page % 3) {
+  switch (page % 4) {
     case 0: drawPageDevice(); break;
     case 1: drawPageWifi();   break;
     case 2: drawPageLan();    break;
+    case 3: drawPageMqtt();   break;
   }
-  oled.sendBuffer();
-}
-
-static void oledHeartbeat(uint32_t now) {
-  if (!oledReady || now - oledHbMs < 500) return;
-  oledHbMs = now;
-  oledHbTick++;
-  oled.setDrawColor(0); oled.drawBox(122, 57, 6, 7);
-  oled.setDrawColor(1);
-  if (oledHbTick & 1) {
-    oled.drawBox(123, 58, 4, 5);
-  }
+  oledDrawOverlay(millis());
   oled.sendBuffer();
 }
 
 static void updateOled(uint32_t now) {
   if (!oledReady) return;
-  oledHeartbeat(now);
-  if (now < oledUntilMs) return;
-  if (!oledAutoScroll) return;
-  if (now - oledPageMs < kPageIntervalMs) return;
-  oledPageMs = now;
-  oledPage = (oledPage + 1) % 3;
-  oledDrawPage(oledPage);
+
+  bool hbTick = (now - oledHbMs >= 500);
+  if (hbTick) { oledHbMs = now; oledHbTick++; }
+
+  if (now < oledUntilMs) {
+    if (hbTick) { oledDrawOverlay(now); oled.sendBuffer(); }
+    return;
+  }
+
+  bool needRedraw = false;
+  if (!oledAutoScroll) {
+    needRedraw = hbTick;
+  } else if (now - oledPageMs >= kPageIntervalMs) {
+    oledPageMs = now;
+    oledPage = (oledPage + 1) % 4;  // 4 pages: device, wifi, lan, mqtt
+    needRedraw = true;
+  } else {
+    needRedraw = hbTick;
+  }
+
+  if (needRedraw) {
+    oled.clearBuffer();
+    switch (oledPage % 4) {
+      case 0: drawPageDevice(); break;
+      case 1: drawPageWifi();   break;
+      case 2: drawPageLan();    break;
+      case 3: drawPageMqtt();   break;
+    }
+    oledDrawOverlay(now);
+    oled.sendBuffer();
+  }
 }
 
 // ============================================================
@@ -535,10 +661,143 @@ static void saveMqttConfig() {
 // ============================================================
 // MQTT lifecycle
 // ============================================================
+// ============================================================
+// Modbus RTU helpers
+// ============================================================
+static uint16_t modbusCrc(const uint8_t* buf, uint8_t len) {
+  uint16_t crc = 0xFFFF;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= buf[i];
+    for (uint8_t b = 0; b < 8; b++)
+      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
+  }
+  return crc;
+}
+
+static float bytesToFloat(const uint8_t* b) {
+  // big-endian IEEE 754: b[0]=MSB b[1] b[2] b[3]=LSB
+  uint32_t u = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16)
+             | ((uint32_t)b[2] <<  8) |  (uint32_t)b[3];
+  float f; memcpy(&f, &u, 4);
+  return f;
+}
+
+// Send FC04 request, return true + fill 4 bytes into out[] on success
+static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x03;           // FC03 Read Holding Registers
+  req[2] = regAddr >> 8;
+  req[3] = regAddr & 0xFF;
+  req[4] = 0x00; req[5] = 0x02;  // quantity = 2 registers = 4 bytes
+  uint16_t crc = modbusCrc(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  while (Serial2.available()) Serial2.read();  // flush
+  Serial2.write(req, 8);
+  Serial2.flush();
+
+  // expect 9 bytes: slaveId + FC + byteCount + 4 data + 2 CRC
+  uint32_t t = millis();
+  while (Serial2.available() < 9 && millis() - t < 200);
+  if (Serial2.available() < 9) return false;
+
+  uint8_t resp[9];
+  Serial2.readBytes(resp, 9);
+
+  uint16_t rcrc = modbusCrc(resp, 7);
+  if (resp[7] != (rcrc & 0xFF) || resp[8] != (rcrc >> 8)) return false;
+  if (resp[0] != slaveId || resp[1] != 0x03 || resp[2] != 4) return false;
+
+  memcpy(out, &resp[3], 4);
+  return true;
+}
+
+static void handleModbus(uint32_t now) {
+  if (now - modbusLastPollMs < kModbusPollMs) return;
+  modbusLastPollMs = now;
+
+  uint8_t raw[4];
+  bool ok = true;
+
+  if (modbusRead2Regs(kModbusSlaveId, kRegVoltage, raw))
+    meter.voltage = bytesToFloat(raw);
+  else ok = false;
+
+  if (ok && modbusRead2Regs(kModbusSlaveId, kRegCurrent, raw))
+    meter.current = bytesToFloat(raw);
+  else ok = false;
+
+  if (ok && modbusRead2Regs(kModbusSlaveId, kRegPower, raw))
+    meter.power = bytesToFloat(raw);
+  else ok = false;
+
+  if (ok && modbusRead2Regs(kModbusSlaveId, kRegEnergy, raw))
+    meter.energy = bytesToFloat(raw);
+  else ok = false;
+
+  if (ok && modbusRead2Regs(kModbusSlaveId, kRegFreq, raw))
+    meter.freq = bytesToFloat(raw);
+  else ok = false;
+
+  if (ok) {
+    meter.valid  = true;
+    meter.lastMs = now;
+    Serial.printf("[MB] V=%.1f A=%.3f kW=%.3f kWh=%.3f Hz=%.2f\n",
+      meter.voltage, meter.current, meter.power, meter.energy, meter.freq);
+  } else {
+    meter.valid = false;
+    Serial.println("[MB] Poll failed");
+  }
+}
+
+static void publishMeter(uint32_t now) {
+  if (!mqttConnected || !meter.valid) return;
+  if (now - mqttMeterLastMs < kMeterPublishMs) return;
+  mqttMeterLastMs = now;
+
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+    "{\"v\":%.1f,\"a\":%.3f,\"kw\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
+    meter.voltage, meter.current, meter.power, meter.energy, meter.freq);
+  mqttPublish("meter", buf);
+}
+
+// ============================================================
+// MQTT publish
+// ============================================================
 void mqttPublish(const char* subtopic, const String& payload) {
   if (!mqttConnected) return;
-  String topic = mqttCfg.topicPrefix + "/" + subtopic;
-  mqttClient.publish(topic.c_str(), payload.c_str());
+  String topic = mqttCfg.topicPrefix + "/" + mqttDeviceId + "/" + subtopic;
+  bool ok = mqttClient.publish(topic.c_str(), payload.c_str());
+  Serial.printf("[MQTT] publish %s (%d bytes) %s\n",
+    topic.c_str(), payload.length(), ok ? "OK" : "FAIL");
+  if (ok) mqttTxUntilMs = millis() + 1000;
+}
+
+static void publishHealth(uint32_t now) {
+  if (!mqttConnected) return;
+  if (now - mqttHealthLastMs < kHealthIntervalMs) return;
+  mqttHealthLastMs = now;
+
+  char buf[256];
+  char timeBuf[8]; getTimeStr(timeBuf, sizeof(timeBuf));
+
+  // ip: aktif interface (ETH prioritas)
+  const char* ip   = ethReady    ? ethIp.c_str()
+                   : staConnected ? WiFi.localIP().toString().c_str()
+                   : "0.0.0.0";
+  const char* iface = ethReady ? "eth" : staConnected ? "wifi" : "none";
+
+  snprintf(buf, sizeof(buf),
+    "{\"up\":%lu,\"heap\":%lu,\"rssi\":%d,\"ip\":\"%s\",\"if\":\"%s\",\"time\":\"%s\"}",
+    millis() / 1000,
+    (unsigned long)ESP.getFreeHeap(),
+    staConnected ? WiFi.RSSI() : 0,
+    ip, iface, timeBuf);
+
+  mqttPublish("health", buf);
 }
 
 static void handleMqttLifecycle(uint32_t now) {
@@ -555,13 +814,17 @@ static void handleMqttLifecycle(uint32_t now) {
   mqttLastTryMs = now;
 
   mqttClient.setServer(mqttCfg.host.c_str(), mqttCfg.port);
+  mqttClient.setBufferSize(512);
   String id = "sems-" + WiFi.macAddress(); id.replace(":", "");
+  String lwtTopic = mqttCfg.topicPrefix + "/" + mqttDeviceId + "/status";
+  const char* lwtMsg = "{\"online\":false}";
   bool ok = mqttCfg.user.isEmpty()
-    ? mqttClient.connect(id.c_str())
-    : mqttClient.connect(id.c_str(), mqttCfg.user.c_str(), mqttCfg.pass.c_str());
+    ? mqttClient.connect(id.c_str(), lwtTopic.c_str(), 0, true, lwtMsg)
+    : mqttClient.connect(id.c_str(), mqttCfg.user.c_str(), mqttCfg.pass.c_str(), lwtTopic.c_str(), 0, true, lwtMsg);
 
   if (ok) {
     mqttConnected = true;
+    mqttHealthLastMs = 0;  // publish health segera setelah connect
     Serial.println("[MQTT] Connected");
     oledShow("MQTT", "Connected", mqttCfg.host.c_str(), 3000);
     mqttPublish("status", "{\"online\":true,\"fw\":\"" FW_VERSION "\"}");
@@ -1620,6 +1883,7 @@ static void handleEthSync(uint32_t now) {
 // ============================================================
 void setup() {
   Serial.begin(115200);
+  Serial2.begin(kRs485Baud, SERIAL_8E1, kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin,  INPUT_PULLUP);
   pinMode(kBtn2Pin, INPUT_PULLUP);
@@ -1633,6 +1897,12 @@ void setup() {
 
   Serial.println("\n=== SEMS AIoT " FW_VERSION " ===");
   oledShow("SEMS AIoT", "FW: " FW_VERSION, "Booting...", 2000);
+
+  // Build device ID from last 3 bytes of MAC: "AABBCCDD1122"
+  { uint8_t mac[6]; WiFi.macAddress(mac);
+    char buf[13];
+    snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X", mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+    mqttDeviceId = buf; }
 
   loadWifiList();
   fcLoad();
@@ -1713,6 +1983,9 @@ void loop() {
   handleBtn2(now);
   handleNtp(now);
   handleEthSync(now);
+  handleModbus(now);
+  publishMeter(now);
+  publishHealth(now);
 
   // LED heartbeat
   if (now - lastBlinkMs >= 500) {

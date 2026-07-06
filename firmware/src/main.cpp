@@ -146,6 +146,14 @@ static uint8_t  wifiFailCycles = 0;    // full cycles attempted (all SSIDs tried
 static constexpr uint8_t kMaxFailCycles = 3; // activate AP after this many full cycles
 
 // ============================================================
+// Web Serial — ring buffer (captured via wlog)
+// ============================================================
+static constexpr uint8_t kWsLines = 80;
+static String            wsLines[kWsLines];
+static uint8_t           wsHead  = 0;
+static uint32_t          wsSeq   = 0;
+
+// ============================================================
 // FastConnect — cache BSSID+channel of last successful STA
 // ============================================================
 static constexpr char kNvsFast[] = "wfast";
@@ -301,6 +309,22 @@ void ntpBeginSync();
 void getTimeStr(char* buf, size_t len);
 
 // ============================================================
+// wlog — serial + web ring buffer
+// ============================================================
+static void wlog(const char* fmt, ...) {
+  char buf[220];
+  va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+  Serial.println(buf);
+  uint32_t ms = millis();
+  uint32_t s=ms/1000, m=s/60; s%=60; uint32_t h=m/60; m%=60;
+  char ts[240];
+  snprintf(ts, sizeof(ts), "[%02lu:%02lu:%02lu.%03lu] %s", h, m, s, ms%1000, buf);
+  wsLines[wsHead] = String(ts);
+  wsHead = (wsHead + 1) % kWsLines;
+  wsSeq++;
+}
+
+// ============================================================
 // NETWORK EVENT HANDLER — unified WiFi + ETH events (v3.x)
 // ============================================================
 static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
@@ -313,17 +337,16 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
 
     case ARDUINO_EVENT_ETH_CONNECTED:
       ethLink = true;
-      Serial.println("[ETH] Cable connected");
+      wlog("[ETH] Cable connected");
       break;
 
     case ARDUINO_EVENT_ETH_GOT_IP:
       ethReady = true;
       ethIp    = ETH.localIP().toString();
       ETH.setDefault();   // LAN takes routing priority
-      Serial.printf("[ETH] IP: %s  speed: %dMbps %s\n",
-                    ethIp.c_str(),
-                    ETH.linkSpeed(),
-                    ETH.fullDuplex() ? "FD" : "HD");
+      wlog("[ETH] IP: %s  speed: %dMbps %s",
+           ethIp.c_str(), ETH.linkSpeed(),
+           ETH.fullDuplex() ? "FD" : "HD");
       oledShow("LAN Ready", ethIp.c_str(), "W5500", 4000);
       break;
 
@@ -331,7 +354,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       ethReady = false;
       ethIp    = "";
       if (staConnected) WiFi.STA.setDefault();
-      Serial.println("[ETH] IP lost");
+      wlog("[ETH] IP lost");
       break;
 
     case ARDUINO_EVENT_ETH_DISCONNECTED:
@@ -339,7 +362,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       ethReady = false;
       ethIp    = "";
       if (staConnected) WiFi.STA.setDefault();
-      Serial.println("[ETH] Disconnected");
+      wlog("[ETH] Disconnected");
       break;
 
     // --- WiFi STA ---
@@ -348,14 +371,11 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       staConnected  = true;
       rtcWifiFailMagic = 0;
       rtcWifiFailCount = 0;
-      wifiFailCycles = 0;   // reset fail counter on success
-      scanPending   = false; // Cancel background scans immediately
-      fcSave(WiFi.BSSID(), WiFi.channel(), savedSsid);  // FastConnect cache
-      if (!ethReady) WiFi.STA.setDefault();  // use WiFi only when LAN absent
-      Serial.printf("[WiFi] Connected: %s  IP: %s\n",
-                    savedSsid.c_str(),
-                    WiFi.localIP().toString().c_str());
-      // AP off once STA is up (only when in Normal Mode / STA only)
+      wifiFailCycles = 0;
+      scanPending   = false;
+      fcSave(WiFi.BSSID(), WiFi.channel(), savedSsid);
+      if (!ethReady) WiFi.STA.setDefault();
+      wlog("[WiFi] Connected: %s  IP: %s", savedSsid.c_str(), WiFi.localIP().toString().c_str());
       if (!configMode) {
         WiFi.softAPdisconnect(true);
         apStarted = false;
@@ -366,7 +386,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       if (staConnected) {
         staConnected = false;
-        Serial.println("[WiFi] STA disconnected, retrying in background...");
+        wlog("[WiFi] STA disconnected — retrying...");
         oledShow("WiFi Lost", "Reconnecting...", "", 3000);
         beginStaConnect();
       }
@@ -2492,6 +2512,95 @@ static void handleUpdateUpload() {
 }
 
 // ============================================================
+// Web Serial page + API
+// ============================================================
+static void handleSerialPage() {
+  server.send(200, "text/html", F(
+    "<!DOCTYPE html><html><head>"
+    "<title>SEMS Serial Monitor</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{background:#0d1117;color:#3fb950;font-family:'Courier New',monospace;height:100vh;display:flex;flex-direction:column}"
+    ".bar{background:#161b22;border-bottom:1px solid #30363d;padding:8px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}"
+    ".bar h1{font-size:14px;color:#e6edf3;font-weight:600}"
+    ".dot{width:8px;height:8px;border-radius:50%;background:#3fb950}"
+    ".dot.off{background:#6e7681}"
+    ".spacer{flex:1}"
+    ".btn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px;margin-left:6px}"
+    ".btn:hover{background:#30363d}"
+    "label{color:#8b949e;font-size:12px;cursor:pointer;margin-left:6px}"
+    "#log{flex:1;overflow-y:auto;padding:10px 14px;font-size:12px;line-height:1.6;background:#010409}"
+    ".ln{white-space:pre-wrap;word-break:break-all;padding:0 0 1px}"
+    ".eth{color:#58a6ff}.wifi{color:#a371f7}.mqtt{color:#d29922}.ok{color:#3fb950}.err{color:#f85149}"
+    "</style></head><body>"
+    "<div class='bar'>"
+    "<div class='dot' id='dot'></div>"
+    "<h1>&#128187; SEMS Serial Monitor</h1>"
+    "<div class='spacer'></div>"
+    "<button class='btn' onclick=\"document.getElementById('log').innerHTML=''\">Clear</button>"
+    "<label><input type='checkbox' id='as' checked> Auto-scroll</label>"
+    "</div>"
+    "<div id='log'></div>"
+    "<script>"
+    "let seq=0;"
+    "const lg=document.getElementById('log'),dot=document.getElementById('dot'),as2=document.getElementById('as');"
+    "function cc(l){"
+    " if(l.includes('[ETH]')||l.includes('[ETH Sync]'))return l.includes('IP:')||l.includes('success')?'ok':'eth';"
+    " if(l.includes('[WiFi]')||l.includes('[STA]'))return 'wifi';"
+    " if(l.includes('[MQTT]'))return 'mqtt';"
+    " if(l.includes('FAILED')||l.includes('Error')||l.includes('failed'))return 'err';"
+    " return '';}"
+    "async function poll(){"
+    " try{"
+    "  const r=await fetch('/api/serial?since='+seq);"
+    "  const d=await r.json();"
+    "  dot.className='dot';"
+    "  if(d.lines&&d.lines.length){"
+    "   d.lines.forEach(l=>{"
+    "    const div=document.createElement('div');"
+    "    div.className='ln '+cc(l);"
+    "    div.textContent=l;"
+    "    lg.appendChild(div);"
+    "   });"
+    "   while(lg.children.length>500)lg.removeChild(lg.firstChild);"
+    "   if(as2.checked)lg.scrollTop=lg.scrollHeight;"
+    "  }"
+    "  seq=d.seq;"
+    " }catch(e){dot.className='dot off';}"
+    " setTimeout(poll,500);"
+    "}"
+    "poll();"
+    "</script></body></html>"
+  ));
+}
+
+static void handleSerialApi() {
+  uint32_t since = 0;
+  if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
+
+  // clamp: never go further back than ring buffer holds
+  if (wsSeq > kWsLines && since < wsSeq - kWsLines) since = wsSeq - kWsLines;
+
+  String out = "{\"seq\":";
+  out += wsSeq;
+  out += ",\"lines\":[";
+  bool first = true;
+  for (uint32_t i = since; i < wsSeq; i++) {
+    if (!first) out += ',';
+    first = false;
+    String line = wsLines[i % kWsLines];
+    line.replace("\\", "\\\\");
+    line.replace("\"", "\\\"");
+    line.replace("\r", "");
+    line.replace("\n", " ");
+    out += '"'; out += line; out += '"';
+  }
+  out += "]}";
+  server.send(200, "application/json", out);
+}
+
+// ============================================================
 // Web server init
 // ============================================================
 static void startWebServer() {
@@ -2518,6 +2627,8 @@ static void startWebServer() {
   });
   server.on("/update",          HTTP_GET,  handleUpdateGet);
   server.on("/update",          HTTP_POST, handleUpdatePost, handleUpdateUpload);
+  server.on("/serial",          HTTP_GET,  handleSerialPage);
+  server.on("/api/serial",      HTTP_GET,  handleSerialApi);
   server.begin();
   if (MDNS.begin("sems")) {
     MDNS.addService("http","tcp",80);
@@ -2598,19 +2709,41 @@ void setup() {
   WiFi.onEvent(onNetworkEvent);
   WiFi.setSleep(false); // Disable modem sleep globally
 
-  // Manual hardware reset for W5500
+  // Manual hardware reset for W5500 — hold RST low cukup lama
   pinMode(kEthRst, OUTPUT);
   digitalWrite(kEthRst, LOW);
-  delay(50);
+  delay(100);               // was 50ms — longer reset pulse
   digitalWrite(kEthRst, HIGH);
-  delay(100);
+  delay(250);               // was 100ms — beri W5500 waktu PLL lock
 
   // Init W5500 via native ETH.h using SPIClass in v3.x
+  // Gunakan kEthIrq (GPIO27) agar event-driven, bukan polling
   SPI.begin(18, 19, 23, kEthCs);
-  if (ETH.begin(ETH_PHY_W5500, -1, kEthCs, -1, kEthRst, SPI)) {
-    Serial.println("[ETH] W5500 init success");
+  if (ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst, SPI)) {
+    wlog("[ETH] W5500 init success");
   } else {
-    Serial.println("[ETH] W5500 init FAILED!");
+    wlog("[ETH] W5500 init FAILED! — check SPI wiring");
+  }
+
+  // ── LAN-first: tunggu physical link dulu (maks 2 detik) ──
+  {
+    oledShow("LAN", "Checking cable...", "", 2000);
+    uint32_t t0 = millis();
+    while (!ethLink && (millis() - t0 < 2000)) delay(50);
+  }
+  if (ethLink) {
+    // Kabel ada — tunggu DHCP (maks 6 detik)
+    wlog("[Boot] LAN cable detected, waiting DHCP...");
+    oledShow("LAN", "DHCP...", "Waiting IP...", 6000);
+    uint32_t t0 = millis();
+    while (!ethReady && (millis() - t0 < 6000)) delay(50);
+    if (ethReady) {
+      wlog("[Boot] LAN ready: %s — WiFi as backup", ethIp.c_str());
+    } else {
+      wlog("[Boot] LAN DHCP timeout — fallback ke WiFi");
+    }
+  } else {
+    wlog("[Boot] No LAN cable — WiFi only");
   }
 
   if (configModeReboot) {

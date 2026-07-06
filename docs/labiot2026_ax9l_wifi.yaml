@@ -1,0 +1,192 @@
+esphome:
+  name: test_ax9l
+  friendly_name: Test AX9L Modbus
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "EMJI"
+  password: "QWerty123"
+  power_save_mode: none
+  fast_connect: true
+
+captive_portal:
+
+web_server:
+  port: 80
+
+# ── UART khusus Modbus RS485, GPIO sama persis dgn firmware kita (RX=16, TX=17) ──
+# debug (tanpa dummy_receiver) -> tetep log raw bytes TX/RX ke logger, SEKALIGUS
+# byte-nya diproses beneran sama modbus_controller di bawah (ESPHome jadi master).
+# PENTING: matikan/cabut python di Ubuntu (USB-RS485) dulu -> Modbus RTU cuma boleh 1 master.
+uart:
+  id: mod_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600     # sesuai default ax9l.py (bukan 19200 seperti PM2230)
+  stop_bits: 2        # sesuai ax9l.py: stopbits=2
+  parity: NONE        # sesuai ax9l.py: parity='N'  -> 8N2 (bukan 8E1 punya PM2230)
+  debug:
+    direction: BOTH
+    after:
+      timeout: 100ms
+    sequence:
+      - lambda: |-
+          UARTDebug::log_hex(direction, bytes, ' ');
+
+modbus:
+  id: modbus1
+  uart_id: mod_bus
+
+modbus_controller:
+  - id: ax9l
+    address: 2          # slave 2 -- kebukti bales normal di sniff sebelumnya
+    modbus_id: modbus1
+    update_interval: 5s
+    command_throttle: 100ms
+    setup_priority: -10
+
+# ── Register map Renata AX9L (dari tabel: alamat Modicon hex, tipe long/int32, big-endian) ──
+# value_type S_DWORD = signed 32-bit big-endian (word tinggi dulu) -> cocok sama bytesToLong() di firmware kita
+sensor:
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Voltage A"
+    register_type: holding
+    address: 0x4000       # 16384
+    value_type: S_DWORD
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Voltage B"
+    register_type: holding
+    address: 0x4002       # 16386
+    value_type: S_DWORD
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Voltage C"
+    register_type: holding
+    address: 0x4004       # 16388
+    value_type: S_DWORD
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Current A"
+    register_type: holding
+    address: 0x400C       # 16396
+    value_type: S_DWORD
+    unit_of_measurement: "A"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Current B"
+    register_type: holding
+    address: 0x400E       # 16398
+    value_type: S_DWORD
+    unit_of_measurement: "A"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Current C"
+    register_type: holding
+    address: 0x4010       # 16400
+    value_type: S_DWORD
+    unit_of_measurement: "A"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Total Active Power"
+    register_type: holding
+    address: 0x4018       # 16408
+    value_type: S_DWORD
+    unit_of_measurement: "kW"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.0001   # register 0.1W -> kW
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Total Reactive Power"
+    register_type: holding
+    address: 0x4020       # 16416
+    value_type: S_DWORD
+    unit_of_measurement: "kvar"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.0001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Total Apparent Power"
+    register_type: holding
+    address: 0x4028       # 16424
+    value_type: S_DWORD
+    unit_of_measurement: "kVA"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.0001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Total Power Factor"
+    register_type: holding
+    address: 0x4030       # 16432
+    value_type: S_DWORD
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Frequency"
+    register_type: holding
+    address: 0x4032       # 16434
+    value_type: S_DWORD
+    unit_of_measurement: "Hz"
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Total Active Energy"
+    register_type: holding
+    address: 0x4034       # 16436
+    value_type: S_DWORD
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01

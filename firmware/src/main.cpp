@@ -45,6 +45,7 @@ struct ModbusConfig {
   uint32_t baud      = 19200;
   uint32_t pollMs    = 1000;
   uint8_t  phase     = 1;      // 1 or 3
+  uint8_t  meterType = 0;      // 0 = FP32 (PM2xxx/EM6400), 1 = INT32+scale (Renata AX9L)
   // 1-phase register map (FC03, FP32 big-endian, 0-based, PM2230 defaults)
   uint16_t r1V       = 3027;   // Voltage A-N
   uint16_t r1A       = 2999;   // Current A
@@ -751,6 +752,7 @@ static void loadModbusConfig() {
   modbusCfg.baud    = p.getULong("baud",    19200);
   modbusCfg.pollMs  = p.getULong("poll",    1000);
   modbusCfg.phase   = (uint8_t)p.getUChar("phase",  1);
+  modbusCfg.meterType = (uint8_t)p.getUChar("type", 0);
   // 1-phase
   modbusCfg.r1V     = p.getUShort("1V",    3027);
   modbusCfg.r1A     = p.getUShort("1A",    2999);
@@ -799,6 +801,7 @@ static void saveModbusConfig() {
   p.putULong("baud",    modbusCfg.baud);
   p.putULong("poll",    modbusCfg.pollMs);
   p.putUChar("phase",   modbusCfg.phase);
+  p.putUChar("type",    modbusCfg.meterType);
   p.putUShort("1V",     modbusCfg.r1V);
   p.putUShort("1A",     modbusCfg.r1A);
   p.putUShort("1Kw",    modbusCfg.r1Kw);
@@ -861,6 +864,13 @@ static float bytesToFloat(const uint8_t* b) {
   return f;
 }
 
+static int32_t bytesToLong(const uint8_t* b) {
+  // big-endian signed 32-bit: b[0]=MSB b[1] b[2] b[3]=LSB
+  uint32_t u = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16)
+             | ((uint32_t)b[2] <<  8) |  (uint32_t)b[3];
+  return (int32_t)u;
+}
+
 // Send FC04 request, return true + fill 4 bytes into out[] on success
 static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
   uint8_t req[8];
@@ -893,6 +903,64 @@ static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
   return true;
 }
 
+// Diagnostic single-register read with detailed error reason (for web /api/modbus/ping)
+struct ModbusPingResult {
+  bool    ok = false;
+  uint8_t raw[4] = {0,0,0,0};
+  String  error;
+};
+
+static ModbusPingResult modbusPing(uint8_t slaveId, uint16_t regAddr) {
+  ModbusPingResult r;
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x03;
+  req[2] = regAddr >> 8;
+  req[3] = regAddr & 0xFF;
+  req[4] = 0x00; req[5] = 0x02;
+  uint16_t crc = modbusCrc(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  while (Serial2.available()) Serial2.read();
+  Serial2.write(req, 8);
+  Serial2.flush();
+
+  uint32_t t = millis();
+  while (Serial2.available() < 9 && millis() - t < 300);
+  int avail = Serial2.available();
+  if (avail == 0) { r.error = "Timeout - tidak ada respon sama sekali (cek wiring A/B, GND, baud, slave ID)"; return r; }
+
+  uint8_t resp[9] = {0};
+  int n = Serial2.readBytes(resp, avail > 9 ? 9 : avail);
+  if (n < 9) {
+    r.error = "Respon terlalu pendek (" + String(n) + " byte, harusnya 9) - kemungkinan baud/parity/stopbit salah";
+    return r;
+  }
+
+  uint16_t rcrc = modbusCrc(resp, 7);
+  if (resp[7] != (rcrc & 0xFF) || resp[8] != (rcrc >> 8)) {
+    r.error = "CRC mismatch - kemungkinan parity/stopbit tidak cocok dengan meter";
+    return r;
+  }
+  if (resp[0] != slaveId) {
+    r.error = "Slave ID di respon beda (dapat " + String(resp[0]) + ", minta " + String(slaveId) + ")";
+    return r;
+  }
+  if (resp[1] == 0x83) {
+    r.error = "Modbus exception code " + String(resp[2]) + " (alamat register salah/di luar jangkauan)";
+    return r;
+  }
+  if (resp[1] != 0x03 || resp[2] != 4) {
+    r.error = "Format respon tidak sesuai (FC=" + String(resp[1]) + " byteCount=" + String(resp[2]) + ")";
+    return r;
+  }
+
+  memcpy(r.raw, &resp[3], 4);
+  r.ok = true;
+  return r;
+}
+
 // Decode 4Q Floating Point Power Factor (Schneider PM2xxx format) → signed float -1..1
 static float decode4QFpPf(float reg) {
   if (reg > 1.0f)       return  2.0f - reg;  // leading
@@ -909,6 +977,12 @@ static float decode4QFpPf(float reg) {
 #define MB_READ4Q(field, reg) \
   if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
     (field) = decode4QFpPf(bytesToFloat(raw)); \
+  else ok = false;
+
+// Macro: read 2 holding regs into int32 scaled to float (Renata AX9L style)
+#define MB_READ_L(field, reg, scale) \
+  if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
+    (field) = bytesToLong(raw) * (scale); \
   else ok = false;
 
 static void handleModbus(uint32_t now) {
@@ -941,8 +1015,48 @@ static void handleModbus(uint32_t now) {
       Serial.println("[MB1] Poll failed");
     }
 
+  } else if (modbusCfg.meterType == 1) {
+    // ── Three-phase — Renata AX9L (INT32 + scale, tanpa Vll/Vln/Iavg) ──
+    MeterData3Ph m;
+    MB_READ_L(m.va,   modbusCfg.r3Va,   0.1f)
+    MB_READ_L(m.vb,   modbusCfg.r3Vb,   0.1f)
+    MB_READ_L(m.vc,   modbusCfg.r3Vc,   0.1f)
+    m.vll = 0; m.vln = 0;  // tidak ada di register map Renata
+    MB_READ_L(m.ia,   modbusCfg.r3Ia,   0.001f)
+    MB_READ_L(m.ib,   modbusCfg.r3Ib,   0.001f)
+    MB_READ_L(m.ic,   modbusCfg.r3Ic,   0.001f)
+    m.iavg = 0;            // tidak ada di register map Renata
+    MB_READ_L(m.pa,   modbusCfg.r3Pa,   0.0001f)   // 0.1W -> kW
+    MB_READ_L(m.pb,   modbusCfg.r3Pb,   0.0001f)
+    MB_READ_L(m.pc,   modbusCfg.r3Pc,   0.0001f)
+    MB_READ_L(m.ptot, modbusCfg.r3Ptot, 0.0001f)
+    MB_READ_L(m.qa,   modbusCfg.r3Qa,   0.0001f)   // 0.1var -> kvar
+    MB_READ_L(m.qb,   modbusCfg.r3Qb,   0.0001f)
+    MB_READ_L(m.qc,   modbusCfg.r3Qc,   0.0001f)
+    MB_READ_L(m.qtot, modbusCfg.r3Qtot, 0.0001f)
+    MB_READ_L(m.sa,   modbusCfg.r3Sa,   0.0001f)   // 0.1VA -> kVA
+    MB_READ_L(m.sb,   modbusCfg.r3Sb,   0.0001f)
+    MB_READ_L(m.sc,   modbusCfg.r3Sc,   0.0001f)
+    MB_READ_L(m.stot, modbusCfg.r3Stot, 0.0001f)
+    MB_READ_L(m.pfa,  modbusCfg.r3Pfa,  0.001f)
+    MB_READ_L(m.pfb,  modbusCfg.r3Pfb,  0.001f)
+    MB_READ_L(m.pfc,  modbusCfg.r3Pfc,  0.001f)
+    MB_READ_L(m.pftot,modbusCfg.r3Pftot,0.001f)
+    MB_READ_L(m.kwh,  modbusCfg.r3Kwh,  0.01f)
+    MB_READ_L(m.hz,   modbusCfg.r3Hz,   0.01f)
+    if (ok) {
+      m.valid = true; m.lastMs = now;
+      meter3 = m;
+      meter1.valid = false;
+      Serial.printf("[MB3-Renata] Va=%.1f Vb=%.1f Vc=%.1f Ia=%.3f Ib=%.3f Ic=%.3f Ptot=%.3f kWh=%.3f Hz=%.2f\n",
+        m.va, m.vb, m.vc, m.ia, m.ib, m.ic, m.ptot, m.kwh, m.hz);
+    } else {
+      meter3.valid = false;
+      Serial.println("[MB3-Renata] Poll failed");
+    }
+
   } else {
-    // ── Three-phase ───────────────────────────────────────
+    // ── Three-phase — PM2xxx/EM6400 (FP32) ────────────────
     MeterData3Ph m;
     // Voltage
     MB_READ(m.va,   modbusCfg.r3Va)
@@ -2058,11 +2172,22 @@ static void handleModbusPage() {
 
   html += F("<div class='card' style='background:#fef9c3;border:1px solid #fde047;padding:12px;margin-bottom:12px;'>"
             "<div style='font-weight:600;color:#854d0e;font-size:14px;margin-bottom:4px;'>Config Mode</div>"
-            "<div style='font-size:12px;color:#713f12;'>Perubahan baud rate aktif setelah reboot.</div>"
+            "<div style='font-size:12px;color:#713f12;'>Perubahan baud rate &amp; tipe meter aktif setelah reboot.</div>"
             "</div>");
 
   // ── Status card ──────────────────────────────────────────
   html += F("<div class=card><div class=card-title>Status Meter</div><div id=status>Loading...</div></div>");
+
+  // ── Ping/Test Register card ───────────────────────────────
+  html += F("<div class=card><div class=card-title>Test Koneksi (Ping Register)</div>"
+            "<div style='font-size:12px;color:#64748b;margin-bottom:8px'>Baca 1 register langsung — cek respon RTU tanpa nunggu polling penuh. Berguna untuk debug wiring/baud/parity.</div>"
+            "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px 16px'>"
+              "<div><label>Slave ID</label><input type=number id=pingSlave min=1 max=247 placeholder='(pakai slave aktif)'></div>"
+              "<div><label>Alamat Register (desimal)</label><input type=number id=pingAddr min=0 max=65535 value=16384></div>"
+            "</div>"
+            "<button class='btn btn-sm' style='margin-top:8px' onclick=doPing()>Ping</button>"
+            "<div id=pingResult style='margin-top:8px;font-size:13px;font-family:monospace;white-space:pre-wrap'></div>"
+            "</div>");
 
   // ── Preset card ──────────────────────────────────────────
   html += F("<div class=card><div class=card-title>Preset</div>"
@@ -2070,6 +2195,7 @@ static void handleModbusPage() {
             "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
               "<button class='btn btn-sm' onclick='applyPreset(\"p1_1ph\")'>PM2230 / PM2120 / EM6400 &mdash; 1-Phase</button>"
               "<button class='btn btn-sm' onclick='applyPreset(\"p1_3ph\")'>PM2230 / EM6400 &mdash; 3-Phase</button>"
+              "<button class='btn btn-sm' onclick='applyPreset(\"renata_3ph\")'>Renata AX9L &mdash; 3-Phase (INT32)</button>"
             "</div></div>");
 
   // ── RS485 connection card ─────────────────────────────────
@@ -2091,6 +2217,13 @@ static void handleModbusPage() {
                 "<input type=radio name=phase id=ph1 value=1> 1-Phase</label>"
               "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
                 "<input type=radio name=phase id=ph3 value=3> 3-Phase</label>"
+            "</div>"
+            "<label style='margin-top:10px'>Tipe Data Register</label>"
+            "<div style='display:flex;gap:12px;margin-top:4px'>"
+              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
+                "<input type=radio name=mtype id=mt0 value=0 onchange='curMeterType=0'> FP32 (PM2xxx/EM6400)</label>"
+              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
+                "<input type=radio name=mtype id=mt1 value=1 onchange='curMeterType=1'> INT32+Scale (Renata AX9L)</label>"
             "</div></div>");
 
   // ── 1-Phase register map ──────────────────────────────────
@@ -2153,12 +2286,28 @@ static void handleModbusPage() {
              "'r3Sa':3069,'r3Sb':3071,'r3Sc':3073,'r3St':3075,"
              "'r3Pfa':3077,'r3Pfb':3079,'r3Pfc':3081,'r3Pft':3191,"
              "'r3Kwh':2675,'r3Hz':3109};"
+  // Renata AX9L — 3-phase, INT32 + scale, addr desimal dari Modicon hex (mis. 0x4000=16384)
+  "const PR={'r3Va':16384,'r3Vb':16386,'r3Vc':16388,"
+             "'r3Ia':16396,'r3Ib':16398,'r3Ic':16400,"
+             "'r3Pa':16402,'r3Pb':16404,'r3Pc':16406,'r3Pt':16408,"
+             "'r3Qa':16410,'r3Qb':16412,'r3Qc':16414,'r3Qt':16416,"
+             "'r3Sa':16418,'r3Sb':16420,'r3Sc':16422,'r3St':16424,"
+             "'r3Pfa':16426,'r3Pfb':16428,'r3Pfc':16430,'r3Pft':16432,"
+             "'r3Kwh':16436,'r3Hz':16434};"
+  "let curMeterType=0;"
   "function applyPreset(k){"
-    "const map=k==='p1_1ph'?P1:P3;"
+    "const map=k==='p1_1ph'?P1:(k==='renata_3ph'?PR:P3);"
+    "if(k==='renata_3ph'){"
+      "document.getElementById('r3Vll').value='';document.getElementById('r3Vln').value='';"
+      "document.getElementById('r3Iavg').value='';"
+      "const bsel=document.getElementById('baud');"
+      "for(let i=0;i<bsel.options.length;i++)if(bsel.options[i].value==='9600')bsel.selectedIndex=i;}"
     "Object.entries(map).forEach(([id,v])=>{"
       "const el=document.getElementById(id);if(el)el.value=v;});"
     "if(k==='p1_1ph'){document.getElementById('ph1').checked=true;}"
     "else{document.getElementById('ph3').checked=true;}"
+    "curMeterType=k==='renata_3ph'?1:0;"
+    "document.getElementById(curMeterType===1?'mt1':'mt0').checked=true;"
     "updatePhaseView();"
     "dirty=true;"
     "document.getElementById('msg').className='';"
@@ -2189,6 +2338,8 @@ static void handleModbusPage() {
     "document.getElementById('poll').value=d.poll;"
     "if(d.phase===3)document.getElementById('ph3').checked=true;"
     "else document.getElementById('ph1').checked=true;"
+    "curMeterType=d.type||0;"
+    "document.getElementById(curMeterType===1?'mt1':'mt0').checked=true;"
     "updatePhaseView();"
     // 1-phase fields
     "['r1V','r1A','r1Kw','r1Kvar','r1Kva','r1Pf','r1Kwh','r1Hz'].forEach(id=>{"
@@ -2207,12 +2358,31 @@ static void handleModbusPage() {
       "const el=document.getElementById(id);if(el&&d[k]!==undefined)el.value=d[k];});"
     "dirty=false;}"
   "function gv(id,def){const el=document.getElementById(id);return el?parseInt(el.value)||def:def;}"
+  "async function doPing(){"
+    "const out=document.getElementById('pingResult');"
+    "out.textContent='Mengirim...';"
+    "const addr=gv('pingAddr',16384);"
+    "const slaveEl=document.getElementById('pingSlave');"
+    "const q=new URLSearchParams({addr});"
+    "if(slaveEl.value)q.set('slave',slaveEl.value);"
+    "try{"
+      "const d=await fetch('/api/modbus/ping?'+q.toString()).then(r=>r.json());"
+      "if(d.ok){"
+        "out.textContent='OK — slave='+d.slave+' addr='+d.addr+'\\n'+"
+          "'raw bytes: '+d.raw+'\\n'+"
+          "'as FP32 (PM2xxx style): '+d.asFloat+'\\n'+"
+          "'as INT32 raw (Renata style): '+d.asLong+' (kalikan scale sesuai parameter)';"
+      "}else{"
+        "out.textContent='GAGAL — slave='+d.slave+' addr='+d.addr+'\\n'+d.error;"
+      "}"
+    "}catch(e){out.textContent='Error request: '+e;}"
+  "}"
   "async function save(){"
     "const msg=document.getElementById('msg');"
     "msg.className='';msg.textContent='Menyimpan...';"
     "const phase=document.getElementById('ph3').checked?3:1;"
     "const b={slave:gv('slave',1),baud:parseInt(document.getElementById('baud').value)||19200,"
-      "poll:gv('poll',1000),phase,"
+      "poll:gv('poll',1000),phase,type:curMeterType,"
       "'1V':gv('r1V',3027),'1A':gv('r1A',2999),'1Kw':gv('r1Kw',3053),"
       "'1Kvar':gv('r1Kvar',3061),'1Kva':gv('r1Kva',3069),'1Pf':gv('r1Pf',3077),"
       "'1Kwh':gv('r1Kwh',2675),'1Hz':gv('r1Hz',3109),"
@@ -2233,6 +2403,30 @@ static void handleModbusPage() {
   server.send(200, "text/html", html);
 }
 
+static void handleModbusPingApi() {
+  uint16_t addr  = (uint16_t)server.arg("addr").toInt();
+  uint8_t  slave = server.hasArg("slave") ? (uint8_t)server.arg("slave").toInt() : modbusCfg.slaveId;
+  float    scale = server.hasArg("scale") ? server.arg("scale").toFloat() : 1.0f;
+
+  ModbusPingResult r = modbusPing(slave, addr);
+  String body = "{\"ok\":";
+  body += r.ok ? "true" : "false";
+  body += ",\"slave\":";  body += slave;
+  body += ",\"addr\":";   body += addr;
+  if (r.ok) {
+    char hex[16];
+    snprintf(hex, sizeof(hex), "%02X %02X %02X %02X", r.raw[0], r.raw[1], r.raw[2], r.raw[3]);
+    body += ",\"raw\":\"";        body += hex; body += "\"";
+    body += ",\"asFloat\":";      body += String(bytesToFloat(r.raw), 4);
+    body += ",\"asLong\":";       body += bytesToLong(r.raw);
+    body += ",\"asLongScaled\":"; body += String(bytesToLong(r.raw) * scale, 4);
+  } else {
+    body += ",\"error\":\""; body += r.error; body += "\"";
+  }
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
 static void handleModbusApi() {
   String body;
   body.reserve(512);
@@ -2241,6 +2435,7 @@ static void handleModbusApi() {
   body += ",\"baud\":";   body += modbusCfg.baud;
   body += ",\"poll\":";   body += modbusCfg.pollMs;
   body += ",\"phase\":";  body += modbusCfg.phase;
+  body += ",\"type\":";   body += modbusCfg.meterType;
   // 1-phase regs
   body += ",\"1V\":";     body += modbusCfg.r1V;
   body += ",\"1A\":";     body += modbusCfg.r1A;
@@ -2318,18 +2513,21 @@ static void handleModbusSave() {
   uint32_t baud  = (uint32_t)jsonInt(body, "baud",  19200);
   uint32_t poll  = (uint32_t)jsonInt(body, "poll",  1000);
   uint8_t  phase = (uint8_t)jsonInt(body, "phase", 1);
+  uint8_t  mtype = (uint8_t)jsonInt(body, "type",  0);
   if (slave < 1 || slave > 247) slave = 1;
   if (phase != 1 && phase != 3) phase = 1;
+  if (mtype != 0 && mtype != 1) mtype = 0;
   const uint32_t validBauds[] = {1200,2400,4800,9600,19200,38400,115200};
   bool baudOk = false;
   for (uint32_t vb : validBauds) if (baud == vb) { baudOk = true; break; }
   if (!baudOk) baud = 19200;
   if (poll < 200) poll = 200;
 
-  modbusCfg.slaveId = slave;
-  modbusCfg.baud    = baud;
-  modbusCfg.pollMs  = poll;
-  modbusCfg.phase   = phase;
+  modbusCfg.slaveId   = slave;
+  modbusCfg.baud      = baud;
+  modbusCfg.pollMs    = poll;
+  modbusCfg.phase     = phase;
+  modbusCfg.meterType = mtype;
   // 1-phase
   modbusCfg.r1V     = (uint16_t)jsonInt(body, "1V",    3027);
   modbusCfg.r1A     = (uint16_t)jsonInt(body, "1A",    2999);
@@ -2612,6 +2810,7 @@ static void startWebServer() {
   server.on("/api/mqtt",        HTTP_GET,  handleMqttApi);
   server.on("/api/modbus",      HTTP_GET,  handleModbusApi);
   server.on("/api/modbus/save", HTTP_POST, handleModbusSave);
+  server.on("/api/modbus/ping", HTTP_GET,  handleModbusPingApi);
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",   HTTP_POST, handleWifiSave);
@@ -2669,7 +2868,10 @@ static void handleEthSync(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   loadModbusConfig();
-  Serial2.begin(modbusCfg.baud, SERIAL_8E1, kRs485Rx, kRs485Tx);
+  // PM2xxx/EM6400 pakai framing 8E1 (parity Even). Renata AX9L pakai 8N2
+  // (no parity, 2 stop bit) — dikonfirmasi dari ax9l.py yang sudah terbukti jalan.
+  uint32_t rs485Config = (modbusCfg.meterType == 1) ? SERIAL_8N2 : SERIAL_8E1;
+  Serial2.begin(modbusCfg.baud, rs485Config, kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin,  INPUT_PULLUP);
   pinMode(kBtn2Pin, INPUT_PULLUP);

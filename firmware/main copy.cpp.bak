@@ -25,8 +25,7 @@
 static constexpr uint8_t  kLedPin      = 2;
 static constexpr uint8_t  kBtnPin      = 0;   // BOOT button, active LOW
 static constexpr uint32_t kBtnHoldMs   = 3000;
-static constexpr uint8_t  kBtn2Pin     = 4;   // multifungsi: short=next page, long=toggle autoscroll
-
+static constexpr uint8_t  kBtn2Pin     = 13;  // multifungsi: short=next page, long=toggle autoscroll
 
 static constexpr int kEthCs  = 5;
 static constexpr int kEthIrq = 27;
@@ -46,7 +45,6 @@ struct ModbusConfig {
   uint32_t baud      = 19200;
   uint32_t pollMs    = 1000;
   uint8_t  phase     = 1;      // 1 or 3
-  uint8_t  meterType = 0;      // 0 = FP32 (PM2xxx/EM6400), 1 = INT32+scale (Renata AX9L)
   // 1-phase register map (FC03, FP32 big-endian, 0-based, PM2230 defaults)
   uint16_t r1V       = 3027;   // Voltage A-N
   uint16_t r1A       = 2999;   // Current A
@@ -146,25 +144,6 @@ static bool     scanPending  = false;
 static bool     configMode   = false;  // set at boot, stable for all pages
 static uint8_t  wifiFailCycles = 0;    // full cycles attempted (all SSIDs tried once = 1 cycle)
 static constexpr uint8_t kMaxFailCycles = 3; // activate AP after this many full cycles
-
-// ============================================================
-// Web Serial — ring buffer (captured via wlog)
-// ============================================================
-static constexpr uint8_t kWsLines = 80;
-static String            wsLines[kWsLines];
-static uint8_t           wsHead  = 0;
-static uint32_t          wsSeq   = 0;
-
-// ============================================================
-// Setting Menu state
-// ============================================================
-static bool oledInMenu = false;
-static uint8_t oledMenuCursor = 0; // 0 = Boot Mode, 1 = View Info, 2 = Exit
-
-// ============================================================
-// MQTT stats
-// ============================================================
-static uint32_t mqttPostCount = 0;
 
 // ============================================================
 // FastConnect — cache BSSID+channel of last successful STA
@@ -290,9 +269,9 @@ static uint32_t btnPressedMs  = 0;
 static uint32_t btn2PressedMs = 0;
 
 // ============================================================
-// OLED state
+// OLED autoscroll
 // ============================================================
-static bool oledInfoModeActive = false; // true when manually viewing detail pages
+static bool oledAutoScroll = true;
 
 // ============================================================
 // NTP / RTC
@@ -301,7 +280,7 @@ static bool     ntpSynced   = false;
 static uint32_t ntpLastSync = 0;
 static constexpr uint32_t kNtpResyncMs = 3600000UL; // resync every 1h
 static constexpr char kNtpServer[] = "pool.ntp.org";
-static int8_t sysTzHour = 7; // WIB UTC+7 default, loaded dynamically from NVS
+static constexpr long kTzOffset    = 7 * 3600; // WIB UTC+7
 
 // ============================================================
 // LED blink
@@ -320,23 +299,6 @@ void oledShow(const char* l1, const char* l2 = "", const char* l3 = "", uint32_t
 void mqttPublish(const char* subtopic, const String& payload);
 void ntpBeginSync();
 void getTimeStr(char* buf, size_t len);
-void getDateStr(char* buf, size_t len);
-
-// ============================================================
-// wlog — serial + web ring buffer
-// ============================================================
-static void wlog(const char* fmt, ...) {
-  char buf[220];
-  va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
-  Serial.println(buf);
-  uint32_t ms = millis();
-  uint32_t s=ms/1000, m=s/60; s%=60; uint32_t h=m/60; m%=60;
-  char ts[240];
-  snprintf(ts, sizeof(ts), "[%02lu:%02lu:%02lu.%03lu] %s", h, m, s, ms%1000, buf);
-  wsLines[wsHead] = String(ts);
-  wsHead = (wsHead + 1) % kWsLines;
-  wsSeq++;
-}
 
 // ============================================================
 // NETWORK EVENT HANDLER — unified WiFi + ETH events (v3.x)
@@ -351,16 +313,17 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
 
     case ARDUINO_EVENT_ETH_CONNECTED:
       ethLink = true;
-      wlog("[ETH] Cable connected");
+      Serial.println("[ETH] Cable connected");
       break;
 
     case ARDUINO_EVENT_ETH_GOT_IP:
       ethReady = true;
       ethIp    = ETH.localIP().toString();
       ETH.setDefault();   // LAN takes routing priority
-      wlog("[ETH] IP: %s  speed: %dMbps %s",
-           ethIp.c_str(), ETH.linkSpeed(),
-           ETH.fullDuplex() ? "FD" : "HD");
+      Serial.printf("[ETH] IP: %s  speed: %dMbps %s\n",
+                    ethIp.c_str(),
+                    ETH.linkSpeed(),
+                    ETH.fullDuplex() ? "FD" : "HD");
       oledShow("LAN Ready", ethIp.c_str(), "W5500", 4000);
       break;
 
@@ -368,7 +331,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       ethReady = false;
       ethIp    = "";
       if (staConnected) WiFi.STA.setDefault();
-      wlog("[ETH] IP lost");
+      Serial.println("[ETH] IP lost");
       break;
 
     case ARDUINO_EVENT_ETH_DISCONNECTED:
@@ -376,7 +339,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       ethReady = false;
       ethIp    = "";
       if (staConnected) WiFi.STA.setDefault();
-      wlog("[ETH] Disconnected");
+      Serial.println("[ETH] Disconnected");
       break;
 
     // --- WiFi STA ---
@@ -385,11 +348,14 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
       staConnected  = true;
       rtcWifiFailMagic = 0;
       rtcWifiFailCount = 0;
-      wifiFailCycles = 0;
-      scanPending   = false;
-      fcSave(WiFi.BSSID(), WiFi.channel(), savedSsid);
-      if (!ethReady) WiFi.STA.setDefault();
-      wlog("[WiFi] Connected: %s  IP: %s", savedSsid.c_str(), WiFi.localIP().toString().c_str());
+      wifiFailCycles = 0;   // reset fail counter on success
+      scanPending   = false; // Cancel background scans immediately
+      fcSave(WiFi.BSSID(), WiFi.channel(), savedSsid);  // FastConnect cache
+      if (!ethReady) WiFi.STA.setDefault();  // use WiFi only when LAN absent
+      Serial.printf("[WiFi] Connected: %s  IP: %s\n",
+                    savedSsid.c_str(),
+                    WiFi.localIP().toString().c_str());
+      // AP off once STA is up (only when in Normal Mode / STA only)
       if (!configMode) {
         WiFi.softAPdisconnect(true);
         apStarted = false;
@@ -400,7 +366,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       if (staConnected) {
         staConnected = false;
-        wlog("[WiFi] STA disconnected — retrying...");
+        Serial.println("[WiFi] STA disconnected, retrying in background...");
         oledShow("WiFi Lost", "Reconnecting...", "", 3000);
         beginStaConnect();
       }
@@ -441,96 +407,6 @@ void oledShow(const char* l1, const char* l2, const char* l3, uint32_t ms) {
   oled.sendBuffer();
 }
 
-static void drawCheckmark(uint8_t x, uint8_t y) {
-  // Simbol centang ✔ premium
-  oled.drawVLine(x, y + 2, 3);
-  oled.drawPixel(x + 1, y + 3);
-  oled.drawVLine(x + 2, y + 1, 4);
-  oled.drawPixel(x + 3, y);
-}
-
-static void drawCross(uint8_t x, uint8_t y) {
-  // Simbol silang ✘ premium
-  oled.drawLine(x, y, x + 3, y + 3);
-  oled.drawLine(x + 3, y, x, y + 3);
-}
-
-static void drawPageDashboard() {
-  char timeBuf[12];
-  char dateBuf[16];
-  getTimeStr(timeBuf, sizeof(timeBuf));
-  getDateStr(dateBuf, sizeof(dateBuf));
-
-  // 1. Tampilkan Date & Time besar di bagian atas (Yellow zone)
-  oled.setFont(u8g2_font_helvB14_tf);
-  oled.drawStr(2, 14, timeBuf);
-  
-  oled.setFont(u8g2_font_6x10_tf);
-  oledDrawRight(dateBuf, 12);
-  
-  oled.drawHLine(0, 16, 128); // Pembatas yellow/blue zone
-
-  // 2. Tampilkan Ikon & Simbol Status di bagian tengah (Blue zone)
-  oled.setFont(u8g2_font_6x12_tf);
-
-  // --- Baris 1: LAN Status ---
-  // Ikon Port RJ45 (LAN)
-  oled.drawFrame(4, 21, 9, 6);
-  oled.drawBox(6, 27, 5, 2);
-  // Status Indicator
-  if (ethReady) {
-    drawCheckmark(20, 22);
-    oled.drawStr(32, 28, ethIp.c_str());
-  } else {
-    drawCross(20, 22);
-    oled.drawStr(32, 28, ethLink ? "No IP" : "Cable Off");
-  }
-
-  // --- Baris 2: WiFi Status ---
-  // Ikon Sinyal WiFi (Bar Graph)
-  oled.drawBox(4, 38, 2, 2);
-  oled.drawBox(7, 36, 2, 4);
-  oled.drawBox(10, 34, 2, 6);
-  oled.drawBox(13, 32, 2, 8);
-  // Status Indicator
-  if (staConnected) {
-    drawCheckmark(20, 34);
-    // Tampilkan RSSI
-    char rssiBuf[12];
-    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm", WiFi.RSSI());
-    oled.drawStr(32, 40, rssiBuf);
-  } else {
-    drawCross(20, 34);
-    oled.drawStr(32, 40, staConnecting ? "Connecting" : "Offline");
-  }
-
-  // --- Baris 3: MQTT Status ---
-  // Ikon Cloud MQTT
-  oled.drawCircle(6, 49, 2);
-  oled.drawCircle(10, 49, 2);
-  oled.drawCircle(8, 47, 2);
-  oled.drawBox(5, 49, 6, 3);
-  // Status Indicator
-  if (mqttCfg.enabled && mqttConnected) {
-    drawCheckmark(20, 46);
-    char mqtBuf[24];
-    snprintf(mqtBuf, sizeof(mqtBuf), "Post: %lu", mqttPostCount);
-    oled.drawStr(32, 52, mqtBuf);
-  } else {
-    drawCross(20, 46);
-    oled.drawStr(32, 52, mqttCfg.enabled ? "Broker Off" : "Disabled");
-  }
-
-  // 3. Rute aktif di bagian paling bawah
-  oled.drawHLine(0, 54, 128);
-  oled.setFont(u8g2_font_5x7_tf);
-  if (configMode) {
-    oled.drawStr(2, 62, "Mode: CONFIG (AP Active)");
-  } else {
-    oled.drawStr(2, 62, ethReady ? "Route: Ethernet (Primary)" : staConnected ? "Route: WiFi Client" : "Route: Offline");
-  }
-}
-
 static void drawPageDevice() {
   char buf[24];
   
@@ -538,7 +414,7 @@ static void drawPageDevice() {
   char timeBuf[8];
   getTimeStr(timeBuf, sizeof(timeBuf));
   oled.setFont(u8g2_font_helvB08_tf);
-  oled.drawStr(0, 10, "DEVICE INFO");
+  oled.drawStr(0, 10, "SEMS SYSTEM");
   oledDrawRight(timeBuf, 10);
   oled.drawHLine(0, 14, 128);
   
@@ -728,12 +604,11 @@ static void drawPageMqtt() {
 
 static void oledDrawPage(uint8_t page) {
   oled.clearBuffer();
-  switch (page % 5) {
-    case 0: drawPageDashboard(); break;
-    case 1: drawPageDevice();    break;
-    case 2: drawPageWifi();      break;
-    case 3: drawPageLan();       break;
-    case 4: drawPageMqtt();      break;
+  switch (page % 4) {
+    case 0: drawPageDevice(); break;
+    case 1: drawPageWifi();   break;
+    case 2: drawPageLan();    break;
+    case 3: drawPageMqtt();   break;
   }
   oledDrawOverlay(millis());
   oled.sendBuffer();
@@ -751,64 +626,25 @@ static void updateOled(uint32_t now) {
   }
 
   bool needRedraw = false;
-  if (oledInMenu) {
-    needRedraw = hbTick || (btn2PressedMs > 0); // redraw untuk feedback hold timer/blink
-  } else if (!oledInfoModeActive) {
-    // Mode normal = selalu di Dashboard (Page 0)
-    if (oledPage != 0) {
-      oledPage = 0;
-      oledPageMs = now;
-    }
+  if (!oledAutoScroll) {
     needRedraw = hbTick;
+  } else if (now - oledPageMs >= kPageIntervalMs) {
+    oledPageMs = now;
+    oledPage = (oledPage + 1) % 4;  // 4 pages: device, wifi, lan, mqtt
+    needRedraw = true;
   } else {
-    // Info Mode (Manual paging)
     needRedraw = hbTick;
   }
 
   if (needRedraw) {
     oled.clearBuffer();
-    if (oledInMenu) {
-      // Draw Setting Menu
-      oled.setFont(u8g2_font_helvB08_tf);
-      oled.drawStr(0, 10, "SETTING MENU");
-      oled.drawHLine(0, 14, 128);
-      
-      oled.setFont(u8g2_font_6x12_tf);
-      
-      // Option 0: Boot Mode
-      if (oledMenuCursor == 0) oled.drawStr(2, 26, "> 1. Boot Mode");
-      else oled.drawStr(10, 26, "1. Boot Mode");
-      oled.drawStr(98, 26, configMode ? "[CFG]" : "[NRM]");
-      
-      // Option 1: View Info
-      if (oledMenuCursor == 1) oled.drawStr(2, 38, "> 2. View Info");
-      else oled.drawStr(10, 38, "2. View Info");
-      
-      // Option 2: Exit
-      if (oledMenuCursor == 2) oled.drawStr(2, 50, "> 3. Exit");
-      else oled.drawStr(10, 50, "3. Exit");
-      
-      // Progress/Hint bar at bottom
-      oled.drawHLine(0, 55, 128);
-      oled.setFont(u8g2_font_5x7_tf);
-      if (btn2PressedMs > 0) {
-        // Tampilkan visual bar waktu menahan hold
-        uint32_t pressMs = now - btn2PressedMs;
-        uint8_t bar = min((uint8_t)(pressMs * 128 / 2000), (uint8_t)128);
-        oled.drawBox(0, 57, bar, 7);
-      } else {
-        oled.drawStr(2, 63, "Tap: Next  |  Hold 2s: Select");
-      }
-    } else {
-      switch (oledPage % 5) {
-        case 0: drawPageDashboard(); break;
-        case 1: drawPageDevice();    break;
-        case 2: drawPageWifi();      break;
-        case 3: drawPageLan();       break;
-        case 4: drawPageMqtt();      break;
-      }
-      oledDrawOverlay(now);
+    switch (oledPage % 4) {
+      case 0: drawPageDevice(); break;
+      case 1: drawPageWifi();   break;
+      case 2: drawPageLan();    break;
+      case 3: drawPageMqtt();   break;
     }
+    oledDrawOverlay(now);
     oled.sendBuffer();
   }
 }
@@ -895,7 +731,6 @@ static void loadModbusConfig() {
   modbusCfg.baud    = p.getULong("baud",    19200);
   modbusCfg.pollMs  = p.getULong("poll",    1000);
   modbusCfg.phase   = (uint8_t)p.getUChar("phase",  1);
-  modbusCfg.meterType = (uint8_t)p.getUChar("type", 0);
   // 1-phase
   modbusCfg.r1V     = p.getUShort("1V",    3027);
   modbusCfg.r1A     = p.getUShort("1A",    2999);
@@ -944,7 +779,6 @@ static void saveModbusConfig() {
   p.putULong("baud",    modbusCfg.baud);
   p.putULong("poll",    modbusCfg.pollMs);
   p.putUChar("phase",   modbusCfg.phase);
-  p.putUChar("type",    modbusCfg.meterType);
   p.putUShort("1V",     modbusCfg.r1V);
   p.putUShort("1A",     modbusCfg.r1A);
   p.putUShort("1Kw",    modbusCfg.r1Kw);
@@ -1007,13 +841,6 @@ static float bytesToFloat(const uint8_t* b) {
   return f;
 }
 
-static int32_t bytesToLong(const uint8_t* b) {
-  // big-endian signed 32-bit: b[0]=MSB b[1] b[2] b[3]=LSB
-  uint32_t u = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16)
-             | ((uint32_t)b[2] <<  8) |  (uint32_t)b[3];
-  return (int32_t)u;
-}
-
 // Send FC04 request, return true + fill 4 bytes into out[] on success
 static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
   uint8_t req[8];
@@ -1046,64 +873,6 @@ static bool modbusRead2Regs(uint8_t slaveId, uint16_t regAddr, uint8_t out[4]) {
   return true;
 }
 
-// Diagnostic single-register read with detailed error reason (for web /api/modbus/ping)
-struct ModbusPingResult {
-  bool    ok = false;
-  uint8_t raw[4] = {0,0,0,0};
-  String  error;
-};
-
-static ModbusPingResult modbusPing(uint8_t slaveId, uint16_t regAddr) {
-  ModbusPingResult r;
-  uint8_t req[8];
-  req[0] = slaveId;
-  req[1] = 0x03;
-  req[2] = regAddr >> 8;
-  req[3] = regAddr & 0xFF;
-  req[4] = 0x00; req[5] = 0x02;
-  uint16_t crc = modbusCrc(req, 6);
-  req[6] = crc & 0xFF;
-  req[7] = crc >> 8;
-
-  while (Serial2.available()) Serial2.read();
-  Serial2.write(req, 8);
-  Serial2.flush();
-
-  uint32_t t = millis();
-  while (Serial2.available() < 9 && millis() - t < 300);
-  int avail = Serial2.available();
-  if (avail == 0) { r.error = "Timeout - tidak ada respon sama sekali (cek wiring A/B, GND, baud, slave ID)"; return r; }
-
-  uint8_t resp[9] = {0};
-  int n = Serial2.readBytes(resp, avail > 9 ? 9 : avail);
-  if (n < 9) {
-    r.error = "Respon terlalu pendek (" + String(n) + " byte, harusnya 9) - kemungkinan baud/parity/stopbit salah";
-    return r;
-  }
-
-  uint16_t rcrc = modbusCrc(resp, 7);
-  if (resp[7] != (rcrc & 0xFF) || resp[8] != (rcrc >> 8)) {
-    r.error = "CRC mismatch - kemungkinan parity/stopbit tidak cocok dengan meter";
-    return r;
-  }
-  if (resp[0] != slaveId) {
-    r.error = "Slave ID di respon beda (dapat " + String(resp[0]) + ", minta " + String(slaveId) + ")";
-    return r;
-  }
-  if (resp[1] == 0x83) {
-    r.error = "Modbus exception code " + String(resp[2]) + " (alamat register salah/di luar jangkauan)";
-    return r;
-  }
-  if (resp[1] != 0x03 || resp[2] != 4) {
-    r.error = "Format respon tidak sesuai (FC=" + String(resp[1]) + " byteCount=" + String(resp[2]) + ")";
-    return r;
-  }
-
-  memcpy(r.raw, &resp[3], 4);
-  r.ok = true;
-  return r;
-}
-
 // Decode 4Q Floating Point Power Factor (Schneider PM2xxx format) → signed float -1..1
 static float decode4QFpPf(float reg) {
   if (reg > 1.0f)       return  2.0f - reg;  // leading
@@ -1120,12 +889,6 @@ static float decode4QFpPf(float reg) {
 #define MB_READ4Q(field, reg) \
   if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
     (field) = decode4QFpPf(bytesToFloat(raw)); \
-  else ok = false;
-
-// Macro: read 2 holding regs into int32 scaled to float (Renata AX9L style)
-#define MB_READ_L(field, reg, scale) \
-  if (ok && modbusRead2Regs(modbusCfg.slaveId, (reg), raw)) \
-    (field) = bytesToLong(raw) * (scale); \
   else ok = false;
 
 static void handleModbus(uint32_t now) {
@@ -1158,48 +921,8 @@ static void handleModbus(uint32_t now) {
       Serial.println("[MB1] Poll failed");
     }
 
-  } else if (modbusCfg.meterType == 1) {
-    // ── Three-phase — Renata AX9L (INT32 + scale, tanpa Vll/Vln/Iavg) ──
-    MeterData3Ph m;
-    MB_READ_L(m.va,   modbusCfg.r3Va,   0.1f)
-    MB_READ_L(m.vb,   modbusCfg.r3Vb,   0.1f)
-    MB_READ_L(m.vc,   modbusCfg.r3Vc,   0.1f)
-    m.vll = 0; m.vln = 0;  // tidak ada di register map Renata
-    MB_READ_L(m.ia,   modbusCfg.r3Ia,   0.001f)
-    MB_READ_L(m.ib,   modbusCfg.r3Ib,   0.001f)
-    MB_READ_L(m.ic,   modbusCfg.r3Ic,   0.001f)
-    m.iavg = 0;            // tidak ada di register map Renata
-    MB_READ_L(m.pa,   modbusCfg.r3Pa,   0.0001f)   // 0.1W -> kW
-    MB_READ_L(m.pb,   modbusCfg.r3Pb,   0.0001f)
-    MB_READ_L(m.pc,   modbusCfg.r3Pc,   0.0001f)
-    MB_READ_L(m.ptot, modbusCfg.r3Ptot, 0.0001f)
-    MB_READ_L(m.qa,   modbusCfg.r3Qa,   0.0001f)   // 0.1var -> kvar
-    MB_READ_L(m.qb,   modbusCfg.r3Qb,   0.0001f)
-    MB_READ_L(m.qc,   modbusCfg.r3Qc,   0.0001f)
-    MB_READ_L(m.qtot, modbusCfg.r3Qtot, 0.0001f)
-    MB_READ_L(m.sa,   modbusCfg.r3Sa,   0.0001f)   // 0.1VA -> kVA
-    MB_READ_L(m.sb,   modbusCfg.r3Sb,   0.0001f)
-    MB_READ_L(m.sc,   modbusCfg.r3Sc,   0.0001f)
-    MB_READ_L(m.stot, modbusCfg.r3Stot, 0.0001f)
-    MB_READ_L(m.pfa,  modbusCfg.r3Pfa,  0.001f)
-    MB_READ_L(m.pfb,  modbusCfg.r3Pfb,  0.001f)
-    MB_READ_L(m.pfc,  modbusCfg.r3Pfc,  0.001f)
-    MB_READ_L(m.pftot,modbusCfg.r3Pftot,0.001f)
-    MB_READ_L(m.kwh,  modbusCfg.r3Kwh,  0.01f)
-    MB_READ_L(m.hz,   modbusCfg.r3Hz,   0.01f)
-    if (ok) {
-      m.valid = true; m.lastMs = now;
-      meter3 = m;
-      meter1.valid = false;
-      Serial.printf("[MB3-Renata] Va=%.1f Vb=%.1f Vc=%.1f Ia=%.3f Ib=%.3f Ic=%.3f Ptot=%.3f kWh=%.3f Hz=%.2f\n",
-        m.va, m.vb, m.vc, m.ia, m.ib, m.ic, m.ptot, m.kwh, m.hz);
-    } else {
-      meter3.valid = false;
-      Serial.println("[MB3-Renata] Poll failed");
-    }
-
   } else {
-    // ── Three-phase — PM2xxx/EM6400 (FP32) ────────────────
+    // ── Three-phase ───────────────────────────────────────
     MeterData3Ph m;
     // Voltage
     MB_READ(m.va,   modbusCfg.r3Va)
@@ -1298,10 +1021,7 @@ void mqttPublish(const char* subtopic, const String& payload) {
   bool ok = mqttClient.publish(topic.c_str(), payload.c_str());
   Serial.printf("[MQTT] publish %s (%d bytes) %s\n",
     topic.c_str(), payload.length(), ok ? "OK" : "FAIL");
-  if (ok) {
-    mqttTxUntilMs = millis() + 1000;
-    mqttPostCount++;
-  }
+  if (ok) mqttTxUntilMs = millis() + 1000;
 }
 
 static void publishHealth(uint32_t now) {
@@ -1599,81 +1319,26 @@ static void handleConfigButton(uint32_t now) {
   }
 }
 
-// GPIO4 — short press: next OLED page / move menu cursor; long press: enter menu / select option / exit info mode
+// GPIO13 — short press: next OLED page; long press (3s): toggle autoscroll
 static void handleBtn2(uint32_t now) {
-  const bool pressed = (digitalRead(kBtn2Pin) == HIGH);
+  const bool pressed = (digitalRead(kBtn2Pin) == LOW);
   if (pressed) {
     if (btn2PressedMs == 0) btn2PressedMs = now;
-    else {
-      uint32_t holdTime = now - btn2PressedMs;
-      // Jika sedang di dalam mode "View Info" (bukan di dashboard), hold 2s untuk kembali
-      if (oledInfoModeActive && !oledInMenu && oledPage != 0) {
-        if (holdTime >= 2000) {
-          btn2PressedMs = 0;
-          oledInfoModeActive = false;
-          oledPage = 0;
-          oledPageMs = now;
-          oledShow("Dashboard", "Returned", "", 1500);
-        }
-      }
-      // Di luar menu (dan bukan View Info mode): hold 3 detik masuk menu
-      else if (!oledInMenu) {
-        if (holdTime >= 3000) {
-          btn2PressedMs = 0;
-          oledInMenu = true;
-          oledMenuCursor = 0;
-        }
-      } 
-      // Di dalam menu setting: hold 2 detik pilih opsi
-      else {
-        if (holdTime >= 2000) {
-          btn2PressedMs = 0;
-          if (oledMenuCursor == 0) {
-            oledInMenu = false;
-            if (configMode) {
-              Preferences p; p.begin(kNvsWifi, false); p.putBool("cfgMode", false); p.end();
-              oledShow("Normal Mode", "Rebooting...", "", 3000);
-              delay(500); ESP.restart();
-            } else {
-              enterConfigMode();
-            }
-          } else if (oledMenuCursor == 1) {
-            // View Info: aktifkan oledInfoModeActive dan manual paging
-            oledInfoModeActive = true;
-            oledInMenu = false;
-            oledPage = 1; // start from page 1 (Device Info)
-            oledPageMs = now;
-            oledShow("Info Mode", "Manual Paging...", "Hold 2s to exit", 3000);
-          } else if (oledMenuCursor == 2) {
-            oledInMenu = false;
-            oledShow("Settings", "Exited", "", 1500);
-          }
-        }
-      }
+    else if (now - btn2PressedMs >= kBtnHoldMs) {
+      btn2PressedMs = 0;
+      oledAutoScroll = !oledAutoScroll;
+      oledShow(oledAutoScroll ? "Display" : "Display",
+               oledAutoScroll ? "Auto Scroll ON" : "Auto Scroll OFF",
+               "", 2000);
     }
   } else {
-    if (btn2PressedMs > 0) {
-      uint32_t pressDuration = now - btn2PressedMs;
-      btn2PressedMs = 0;
-      if (pressDuration < 2000) {
-        // Short press
-        if (oledInMenu) {
-          // Pindah cursor menu (3 opsi: 0..2)
-          oledMenuCursor = (oledMenuCursor + 1) % 3;
-        } else if (oledInfoModeActive) {
-          // Di dalam view info mode, short press langsung lompat ke halaman info berikutnya
-          oledPage = (oledPage + 1) % 5;
-          if (oledPage == 0) oledPage = 1; // skip kembali ke dashboard saat manual paging
-          oledPageMs = now;
-          oledDrawPage(oledPage);
-        } else {
-          // Di luar info mode/dalam mode dashboard: tap sekali paksa redraw dashboard
-          oledPage = 0;
-          oledPageMs = now;
-          oledDrawPage(0);
-        }
-      }
+    if (btn2PressedMs > 0 && now - btn2PressedMs < kBtnHoldMs) {
+      // short press: advance page immediately
+      oledPage = (oledPage + 1) % 3;
+      oledPageMs = now;
+      oledDrawPage(oledPage);
     }
+    btn2PressedMs = 0;
   }
 }
 
@@ -1681,8 +1346,7 @@ static void handleBtn2(uint32_t now) {
 // NTP
 // ============================================================
 void ntpBeginSync() {
-  wlog("[NTP] Start sync...");
-  configTime(sysTzHour * 3600, 0, kNtpServer);
+  configTime(kTzOffset, 0, kNtpServer);
   ntpLastSync = millis();
   Serial.println("[NTP] Sync started");
 }
@@ -1712,17 +1376,6 @@ void getTimeStr(char* buf, size_t len) {
   struct tm ti;
   if (getLocalTime(&ti, 0)) snprintf(buf, len, "%02d:%02d", ti.tm_hour, ti.tm_min);
   else snprintf(buf, len, "--:--");
-}
-
-// Helper: get date string "DD-MM-YYYY" or "--/--/----" if not synced
-void getDateStr(char* buf, size_t len) {
-  if (!ntpSynced) { snprintf(buf, len, "--/--/----"); return; }
-  struct tm ti;
-  if (getLocalTime(&ti, 0)) {
-    snprintf(buf, len, "%02d/%02d/%04d", ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900);
-  } else {
-    snprintf(buf, len, "--/--/----");
-  }
 }
 
 // ============================================================
@@ -1882,7 +1535,7 @@ static void handleRoot() {
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", b[0],b[1],b[2],b[3],b[4],b[5]); }
 
   String html;
-  html.reserve(4500);
+  html.reserve(5000);
   html += FPSTR(kStyle);
   html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
             "<h1>SEMS AIoT &mdash; Setup</h1>");
@@ -1908,14 +1561,6 @@ static void handleRoot() {
   html += F("<div class=card><div class=card-title>Konfigurasi</div>"
             "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
             "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a></div>");
-
-  // Timezone Status Card (Read-only)
-  char tzBuf[32];
-  snprintf(tzBuf, sizeof(tzBuf), "UTC %s%d", (sysTzHour >= 0) ? "+" : "", sysTzHour);
-  html += F("<div class=card><div class=card-title>Waktu & Timezone</div>");
-  html += "<div class=row><span class=label>Timezone</span><span class=val>";
-  html += tzBuf;
-  html += F("</span></div></div>");
 
   // System buttons
   html += F("<div class=card><div class=card-title>Sistem</div>");
@@ -1944,22 +1589,6 @@ static void handleRoot() {
     "</script></div></body></html>");
 
   server.send(200, "text/html", html);
-}
-
-static void handleTimezoneSave() {
-  if (server.hasArg("tz")) {
-    sysTzHour = (int8_t)server.arg("tz").toInt();
-    Preferences pSys;
-    pSys.begin(kNvsWifi, false); // kNvsWifi ("wifi") is proven writable
-    pSys.putChar("sys_tz", sysTzHour);
-    pSys.end();
-    configTime(sysTzHour * 3600, 0, kNtpServer); // update RTC offset
-    ntpBeginSync(); // force ntp resync
-    wlog("[TZ] Saved timezone to NVS: UTC %s%d", (sysTzHour >= 0) ? "+" : "", sysTzHour);
-    server.send(200, "application/json", "{\"ok\":true}");
-  } else {
-    server.send(400, "application/json", "{\"error\":\"Missing tz\"}");
-  }
 }
 
 static void handleNetworkPage() {
@@ -2013,21 +1642,6 @@ static void handleNetworkPage() {
               "<label>Password</label><input type=password id=pass placeholder='Password'>"
               "<button class=btn style='width:100%;margin-top:10px' onclick=saveWifi()>Connect &amp; Simpan</button>"
               "</div></div>");
-
-    // Timezone form inside network page (only during AP config mode)
-    html += F("<div class=card style='margin-top:12px'><div class=card-title>Waktu & Timezone</div>"
-              "<form id=tzForm style='display:flex;gap:8px;align-items:center'>"
-              "<label style='margin:0'>UTC Offset:</label>"
-              "<select id='tzSelect' name='tz' style='padding:8px;border-radius:8px;border:1px solid #ccc;flex:1'>");
-    for (int i = -12; i <= 14; i++) {
-      char opt[64];
-      snprintf(opt, sizeof(opt), "<option value='%d' %s>UTC %s%d</option>",
-               i, (i == sysTzHour) ? "selected" : "", (i >= 0) ? "+" : "", i);
-      html += opt;
-    }
-    html += F("</select>"
-              "<button class='btn btn-sm' type=submit>Simpan</button>"
-              "</form></div>");
   }
   html += F("<script>"
             "function badge(ok,yes,no,mid){"
@@ -2102,15 +1716,6 @@ static void handleNetworkPage() {
                  "msg.className='err';msg.textContent='Error saat menguji koneksi: '+e;"
                "}"
              "}");
-  if (configMode) {
-    html += F("document.getElementById('tzForm').onsubmit=async(e)=>{"
-              "e.preventDefault();"
-              "const tz=document.getElementById('tzSelect').value;"
-              "let r=await fetch('/api/timezone/save?tz='+tz,{method:'POST'});"
-              "if(r.ok)alert('Timezone disimpan & disinkronkan!');"
-              "else alert('Gagal menyimpan timezone.');"
-              "};");
-  }
   html += FPSTR(kScanScript);
   html += F("</script></div></body></html>");
   server.send(200, "text/html", html);
@@ -2433,22 +2038,11 @@ static void handleModbusPage() {
 
   html += F("<div class='card' style='background:#fef9c3;border:1px solid #fde047;padding:12px;margin-bottom:12px;'>"
             "<div style='font-weight:600;color:#854d0e;font-size:14px;margin-bottom:4px;'>Config Mode</div>"
-            "<div style='font-size:12px;color:#713f12;'>Perubahan baud rate &amp; tipe meter aktif setelah reboot.</div>"
+            "<div style='font-size:12px;color:#713f12;'>Perubahan baud rate aktif setelah reboot.</div>"
             "</div>");
 
   // ── Status card ──────────────────────────────────────────
   html += F("<div class=card><div class=card-title>Status Meter</div><div id=status>Loading...</div></div>");
-
-  // ── Ping/Test Register card ───────────────────────────────
-  html += F("<div class=card><div class=card-title>Test Koneksi (Ping Register)</div>"
-            "<div style='font-size:12px;color:#64748b;margin-bottom:8px'>Baca 1 register langsung — cek respon RTU tanpa nunggu polling penuh. Berguna untuk debug wiring/baud/parity.</div>"
-            "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px 16px'>"
-              "<div><label>Slave ID</label><input type=number id=pingSlave min=1 max=247 placeholder='(pakai slave aktif)'></div>"
-              "<div><label>Alamat Register (desimal)</label><input type=number id=pingAddr min=0 max=65535 value=16384></div>"
-            "</div>"
-            "<button class='btn btn-sm' style='margin-top:8px' onclick=doPing()>Ping</button>"
-            "<div id=pingResult style='margin-top:8px;font-size:13px;font-family:monospace;white-space:pre-wrap'></div>"
-            "</div>");
 
   // ── Preset card ──────────────────────────────────────────
   html += F("<div class=card><div class=card-title>Preset</div>"
@@ -2456,7 +2050,6 @@ static void handleModbusPage() {
             "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
               "<button class='btn btn-sm' onclick='applyPreset(\"p1_1ph\")'>PM2230 / PM2120 / EM6400 &mdash; 1-Phase</button>"
               "<button class='btn btn-sm' onclick='applyPreset(\"p1_3ph\")'>PM2230 / EM6400 &mdash; 3-Phase</button>"
-              "<button class='btn btn-sm' onclick='applyPreset(\"renata_3ph\")'>Renata AX9L &mdash; 3-Phase (INT32)</button>"
             "</div></div>");
 
   // ── RS485 connection card ─────────────────────────────────
@@ -2478,13 +2071,6 @@ static void handleModbusPage() {
                 "<input type=radio name=phase id=ph1 value=1> 1-Phase</label>"
               "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
                 "<input type=radio name=phase id=ph3 value=3> 3-Phase</label>"
-            "</div>"
-            "<label style='margin-top:10px'>Tipe Data Register</label>"
-            "<div style='display:flex;gap:12px;margin-top:4px'>"
-              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
-                "<input type=radio name=mtype id=mt0 value=0 onchange='curMeterType=0'> FP32 (PM2xxx/EM6400)</label>"
-              "<label style='display:flex;align-items:center;gap:6px;font-size:14px;color:#1e293b'>"
-                "<input type=radio name=mtype id=mt1 value=1 onchange='curMeterType=1'> INT32+Scale (Renata AX9L)</label>"
             "</div></div>");
 
   // ── 1-Phase register map ──────────────────────────────────
@@ -2547,28 +2133,12 @@ static void handleModbusPage() {
              "'r3Sa':3069,'r3Sb':3071,'r3Sc':3073,'r3St':3075,"
              "'r3Pfa':3077,'r3Pfb':3079,'r3Pfc':3081,'r3Pft':3191,"
              "'r3Kwh':2675,'r3Hz':3109};"
-  // Renata AX9L — 3-phase, INT32 + scale, addr desimal dari Modicon hex (mis. 0x4000=16384)
-  "const PR={'r3Va':16384,'r3Vb':16386,'r3Vc':16388,"
-             "'r3Ia':16396,'r3Ib':16398,'r3Ic':16400,"
-             "'r3Pa':16402,'r3Pb':16404,'r3Pc':16406,'r3Pt':16408,"
-             "'r3Qa':16410,'r3Qb':16412,'r3Qc':16414,'r3Qt':16416,"
-             "'r3Sa':16418,'r3Sb':16420,'r3Sc':16422,'r3St':16424,"
-             "'r3Pfa':16426,'r3Pfb':16428,'r3Pfc':16430,'r3Pft':16432,"
-             "'r3Kwh':16436,'r3Hz':16434};"
-  "let curMeterType=0;"
   "function applyPreset(k){"
-    "const map=k==='p1_1ph'?P1:(k==='renata_3ph'?PR:P3);"
-    "if(k==='renata_3ph'){"
-      "document.getElementById('r3Vll').value='';document.getElementById('r3Vln').value='';"
-      "document.getElementById('r3Iavg').value='';"
-      "const bsel=document.getElementById('baud');"
-      "for(let i=0;i<bsel.options.length;i++)if(bsel.options[i].value==='9600')bsel.selectedIndex=i;}"
+    "const map=k==='p1_1ph'?P1:P3;"
     "Object.entries(map).forEach(([id,v])=>{"
       "const el=document.getElementById(id);if(el)el.value=v;});"
     "if(k==='p1_1ph'){document.getElementById('ph1').checked=true;}"
     "else{document.getElementById('ph3').checked=true;}"
-    "curMeterType=k==='renata_3ph'?1:0;"
-    "document.getElementById(curMeterType===1?'mt1':'mt0').checked=true;"
     "updatePhaseView();"
     "dirty=true;"
     "document.getElementById('msg').className='';"
@@ -2599,8 +2169,6 @@ static void handleModbusPage() {
     "document.getElementById('poll').value=d.poll;"
     "if(d.phase===3)document.getElementById('ph3').checked=true;"
     "else document.getElementById('ph1').checked=true;"
-    "curMeterType=d.type||0;"
-    "document.getElementById(curMeterType===1?'mt1':'mt0').checked=true;"
     "updatePhaseView();"
     // 1-phase fields
     "['r1V','r1A','r1Kw','r1Kvar','r1Kva','r1Pf','r1Kwh','r1Hz'].forEach(id=>{"
@@ -2619,31 +2187,12 @@ static void handleModbusPage() {
       "const el=document.getElementById(id);if(el&&d[k]!==undefined)el.value=d[k];});"
     "dirty=false;}"
   "function gv(id,def){const el=document.getElementById(id);return el?parseInt(el.value)||def:def;}"
-  "async function doPing(){"
-    "const out=document.getElementById('pingResult');"
-    "out.textContent='Mengirim...';"
-    "const addr=gv('pingAddr',16384);"
-    "const slaveEl=document.getElementById('pingSlave');"
-    "const q=new URLSearchParams({addr});"
-    "if(slaveEl.value)q.set('slave',slaveEl.value);"
-    "try{"
-      "const d=await fetch('/api/modbus/ping?'+q.toString()).then(r=>r.json());"
-      "if(d.ok){"
-        "out.textContent='OK — slave='+d.slave+' addr='+d.addr+'\\n'+"
-          "'raw bytes: '+d.raw+'\\n'+"
-          "'as FP32 (PM2xxx style): '+d.asFloat+'\\n'+"
-          "'as INT32 raw (Renata style): '+d.asLong+' (kalikan scale sesuai parameter)';"
-      "}else{"
-        "out.textContent='GAGAL — slave='+d.slave+' addr='+d.addr+'\\n'+d.error;"
-      "}"
-    "}catch(e){out.textContent='Error request: '+e;}"
-  "}"
   "async function save(){"
     "const msg=document.getElementById('msg');"
     "msg.className='';msg.textContent='Menyimpan...';"
     "const phase=document.getElementById('ph3').checked?3:1;"
     "const b={slave:gv('slave',1),baud:parseInt(document.getElementById('baud').value)||19200,"
-      "poll:gv('poll',1000),phase,type:curMeterType,"
+      "poll:gv('poll',1000),phase,"
       "'1V':gv('r1V',3027),'1A':gv('r1A',2999),'1Kw':gv('r1Kw',3053),"
       "'1Kvar':gv('r1Kvar',3061),'1Kva':gv('r1Kva',3069),'1Pf':gv('r1Pf',3077),"
       "'1Kwh':gv('r1Kwh',2675),'1Hz':gv('r1Hz',3109),"
@@ -2664,30 +2213,6 @@ static void handleModbusPage() {
   server.send(200, "text/html", html);
 }
 
-static void handleModbusPingApi() {
-  uint16_t addr  = (uint16_t)server.arg("addr").toInt();
-  uint8_t  slave = server.hasArg("slave") ? (uint8_t)server.arg("slave").toInt() : modbusCfg.slaveId;
-  float    scale = server.hasArg("scale") ? server.arg("scale").toFloat() : 1.0f;
-
-  ModbusPingResult r = modbusPing(slave, addr);
-  String body = "{\"ok\":";
-  body += r.ok ? "true" : "false";
-  body += ",\"slave\":";  body += slave;
-  body += ",\"addr\":";   body += addr;
-  if (r.ok) {
-    char hex[16];
-    snprintf(hex, sizeof(hex), "%02X %02X %02X %02X", r.raw[0], r.raw[1], r.raw[2], r.raw[3]);
-    body += ",\"raw\":\"";        body += hex; body += "\"";
-    body += ",\"asFloat\":";      body += String(bytesToFloat(r.raw), 4);
-    body += ",\"asLong\":";       body += bytesToLong(r.raw);
-    body += ",\"asLongScaled\":"; body += String(bytesToLong(r.raw) * scale, 4);
-  } else {
-    body += ",\"error\":\""; body += r.error; body += "\"";
-  }
-  body += "}";
-  server.send(200, "application/json", body);
-}
-
 static void handleModbusApi() {
   String body;
   body.reserve(512);
@@ -2696,7 +2221,6 @@ static void handleModbusApi() {
   body += ",\"baud\":";   body += modbusCfg.baud;
   body += ",\"poll\":";   body += modbusCfg.pollMs;
   body += ",\"phase\":";  body += modbusCfg.phase;
-  body += ",\"type\":";   body += modbusCfg.meterType;
   // 1-phase regs
   body += ",\"1V\":";     body += modbusCfg.r1V;
   body += ",\"1A\":";     body += modbusCfg.r1A;
@@ -2774,21 +2298,18 @@ static void handleModbusSave() {
   uint32_t baud  = (uint32_t)jsonInt(body, "baud",  19200);
   uint32_t poll  = (uint32_t)jsonInt(body, "poll",  1000);
   uint8_t  phase = (uint8_t)jsonInt(body, "phase", 1);
-  uint8_t  mtype = (uint8_t)jsonInt(body, "type",  0);
   if (slave < 1 || slave > 247) slave = 1;
   if (phase != 1 && phase != 3) phase = 1;
-  if (mtype != 0 && mtype != 1) mtype = 0;
   const uint32_t validBauds[] = {1200,2400,4800,9600,19200,38400,115200};
   bool baudOk = false;
   for (uint32_t vb : validBauds) if (baud == vb) { baudOk = true; break; }
   if (!baudOk) baud = 19200;
   if (poll < 200) poll = 200;
 
-  modbusCfg.slaveId   = slave;
-  modbusCfg.baud      = baud;
-  modbusCfg.pollMs    = poll;
-  modbusCfg.phase     = phase;
-  modbusCfg.meterType = mtype;
+  modbusCfg.slaveId = slave;
+  modbusCfg.baud    = baud;
+  modbusCfg.pollMs  = poll;
+  modbusCfg.phase   = phase;
   // 1-phase
   modbusCfg.r1V     = (uint16_t)jsonInt(body, "1V",    3027);
   modbusCfg.r1A     = (uint16_t)jsonInt(body, "1A",    2999);
@@ -2971,95 +2492,6 @@ static void handleUpdateUpload() {
 }
 
 // ============================================================
-// Web Serial page + API
-// ============================================================
-static void handleSerialPage() {
-  server.send(200, "text/html", F(
-    "<!DOCTYPE html><html><head>"
-    "<title>SEMS Serial Monitor</title>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>"
-    "*{box-sizing:border-box;margin:0;padding:0}"
-    "body{background:#0d1117;color:#3fb950;font-family:'Courier New',monospace;height:100vh;display:flex;flex-direction:column}"
-    ".bar{background:#161b22;border-bottom:1px solid #30363d;padding:8px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}"
-    ".bar h1{font-size:14px;color:#e6edf3;font-weight:600}"
-    ".dot{width:8px;height:8px;border-radius:50%;background:#3fb950}"
-    ".dot.off{background:#6e7681}"
-    ".spacer{flex:1}"
-    ".btn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px;margin-left:6px}"
-    ".btn:hover{background:#30363d}"
-    "label{color:#8b949e;font-size:12px;cursor:pointer;margin-left:6px}"
-    "#log{flex:1;overflow-y:auto;padding:10px 14px;font-size:12px;line-height:1.6;background:#010409}"
-    ".ln{white-space:pre-wrap;word-break:break-all;padding:0 0 1px}"
-    ".eth{color:#58a6ff}.wifi{color:#a371f7}.mqtt{color:#d29922}.ok{color:#3fb950}.err{color:#f85149}"
-    "</style></head><body>"
-    "<div class='bar'>"
-    "<div class='dot' id='dot'></div>"
-    "<h1>&#128187; SEMS Serial Monitor</h1>"
-    "<div class='spacer'></div>"
-    "<button class='btn' onclick=\"document.getElementById('log').innerHTML=''\">Clear</button>"
-    "<label><input type='checkbox' id='as' checked> Auto-scroll</label>"
-    "</div>"
-    "<div id='log'></div>"
-    "<script>"
-    "let seq=0;"
-    "const lg=document.getElementById('log'),dot=document.getElementById('dot'),as2=document.getElementById('as');"
-    "function cc(l){"
-    " if(l.includes('[ETH]')||l.includes('[ETH Sync]'))return l.includes('IP:')||l.includes('success')?'ok':'eth';"
-    " if(l.includes('[WiFi]')||l.includes('[STA]'))return 'wifi';"
-    " if(l.includes('[MQTT]'))return 'mqtt';"
-    " if(l.includes('FAILED')||l.includes('Error')||l.includes('failed'))return 'err';"
-    " return '';}"
-    "async function poll(){"
-    " try{"
-    "  const r=await fetch('/api/serial?since='+seq);"
-    "  const d=await r.json();"
-    "  dot.className='dot';"
-    "  if(d.lines&&d.lines.length){"
-    "   d.lines.forEach(l=>{"
-    "    const div=document.createElement('div');"
-    "    div.className='ln '+cc(l);"
-    "    div.textContent=l;"
-    "    lg.appendChild(div);"
-    "   });"
-    "   while(lg.children.length>500)lg.removeChild(lg.firstChild);"
-    "   if(as2.checked)lg.scrollTop=lg.scrollHeight;"
-    "  }"
-    "  seq=d.seq;"
-    " }catch(e){dot.className='dot off';}"
-    " setTimeout(poll,500);"
-    "}"
-    "poll();"
-    "</script></body></html>"
-  ));
-}
-
-static void handleSerialApi() {
-  uint32_t since = 0;
-  if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
-
-  // clamp: never go further back than ring buffer holds
-  if (wsSeq > kWsLines && since < wsSeq - kWsLines) since = wsSeq - kWsLines;
-
-  String out = "{\"seq\":";
-  out += wsSeq;
-  out += ",\"lines\":[";
-  bool first = true;
-  for (uint32_t i = since; i < wsSeq; i++) {
-    if (!first) out += ',';
-    first = false;
-    String line = wsLines[i % kWsLines];
-    line.replace("\\", "\\\\");
-    line.replace("\"", "\\\"");
-    line.replace("\r", "");
-    line.replace("\n", " ");
-    out += '"'; out += line; out += '"';
-  }
-  out += "]}";
-  server.send(200, "application/json", out);
-}
-
-// ============================================================
 // Web server init
 // ============================================================
 static void startWebServer() {
@@ -3071,7 +2503,6 @@ static void startWebServer() {
   server.on("/api/mqtt",        HTTP_GET,  handleMqttApi);
   server.on("/api/modbus",      HTTP_GET,  handleModbusApi);
   server.on("/api/modbus/save", HTTP_POST, handleModbusSave);
-  server.on("/api/modbus/ping", HTTP_GET,  handleModbusPingApi);
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",   HTTP_POST, handleWifiSave);
@@ -3080,7 +2511,6 @@ static void startWebServer() {
   server.on("/api/wifi/list",   HTTP_GET,  handleWifiList);
   server.on("/api/wifi/clear",  HTTP_POST, handleWifiClear);
   server.on("/api/mqtt/save",   HTTP_POST, handleMqttSave);
-  server.on("/api/timezone/save", HTTP_POST, handleTimezoneSave);
   server.on("/api/reboot",      HTTP_POST, handleReboot);
   server.on("/api/config-mode", HTTP_POST, [](){
     server.send(200,"application/json","{\"ok\":true}");
@@ -3088,8 +2518,6 @@ static void startWebServer() {
   });
   server.on("/update",          HTTP_GET,  handleUpdateGet);
   server.on("/update",          HTTP_POST, handleUpdatePost, handleUpdateUpload);
-  server.on("/serial",          HTTP_GET,  handleSerialPage);
-  server.on("/api/serial",      HTTP_GET,  handleSerialApi);
   server.begin();
   if (MDNS.begin("sems")) {
     MDNS.addService("http","tcp",80);
@@ -3130,13 +2558,10 @@ static void handleEthSync(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   loadModbusConfig();
-  // PM2xxx/EM6400 pakai framing 8E1 (parity Even). Renata AX9L pakai 8N2
-  // (no parity, 2 stop bit) — dikonfirmasi dari ax9l.py yang sudah terbukti jalan.
-  uint32_t rs485Config = (modbusCfg.meterType == 1) ? SERIAL_8N2 : SERIAL_8E1;
-  Serial2.begin(modbusCfg.baud, rs485Config, kRs485Rx, kRs485Tx);
+  Serial2.begin(modbusCfg.baud, SERIAL_8E1, kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin,  INPUT_PULLUP);
-  pinMode(kBtn2Pin, INPUT);        // Touch TTP223 has external active-high output; no pullup needed
+  pinMode(kBtn2Pin, INPUT_PULLUP);
 
   Wire.begin(22, 21);
   if (oled.begin()) {
@@ -3158,14 +2583,6 @@ void setup() {
   fcLoad();
   loadMqttConfig();
 
-  // Load timezone config from NVS (using stable kNvsWifi namespace)
-  {
-    Preferences pSys;
-    pSys.begin(kNvsWifi, true);
-    sysTzHour = pSys.getChar("sys_tz", 7); // Default to UTC+7
-    pSys.end();
-  }
-
   Preferences p;
   p.begin(kNvsWifi, false);
   const bool configModeReboot = p.getBool("cfgMode", false);
@@ -3181,41 +2598,19 @@ void setup() {
   WiFi.onEvent(onNetworkEvent);
   WiFi.setSleep(false); // Disable modem sleep globally
 
-  // Manual hardware reset for W5500 — hold RST low cukup lama
+  // Manual hardware reset for W5500
   pinMode(kEthRst, OUTPUT);
   digitalWrite(kEthRst, LOW);
-  delay(100);               // was 50ms — longer reset pulse
+  delay(50);
   digitalWrite(kEthRst, HIGH);
-  delay(250);               // was 100ms — beri W5500 waktu PLL lock
+  delay(100);
 
   // Init W5500 via native ETH.h using SPIClass in v3.x
-  // Gunakan kEthIrq (GPIO27) agar event-driven, bukan polling
   SPI.begin(18, 19, 23, kEthCs);
-  if (ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst, SPI)) {
-    wlog("[ETH] W5500 init success");
+  if (ETH.begin(ETH_PHY_W5500, -1, kEthCs, -1, kEthRst, SPI)) {
+    Serial.println("[ETH] W5500 init success");
   } else {
-    wlog("[ETH] W5500 init FAILED! — check SPI wiring");
-  }
-
-  // ── LAN-first: tunggu physical link dulu (maks 2 detik) ──
-  {
-    oledShow("LAN", "Checking cable...", "", 2000);
-    uint32_t t0 = millis();
-    while (!ethLink && (millis() - t0 < 2000)) delay(50);
-  }
-  if (ethLink) {
-    // Kabel ada — tunggu DHCP (maks 6 detik)
-    wlog("[Boot] LAN cable detected, waiting DHCP...");
-    oledShow("LAN", "DHCP...", "Waiting IP...", 6000);
-    uint32_t t0 = millis();
-    while (!ethReady && (millis() - t0 < 6000)) delay(50);
-    if (ethReady) {
-      wlog("[Boot] LAN ready: %s — WiFi as backup", ethIp.c_str());
-    } else {
-      wlog("[Boot] LAN DHCP timeout — fallback ke WiFi");
-    }
-  } else {
-    wlog("[Boot] No LAN cable — WiFi only");
+    Serial.println("[ETH] W5500 init FAILED!");
   }
 
   if (configModeReboot) {

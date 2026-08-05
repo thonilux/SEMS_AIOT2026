@@ -30,17 +30,18 @@ struct MqttConfig {
 
 struct ModbusConfig {
   uint32_t baudrate;
-  uint8_t slave_id;
+  uint8_t slave_id[3];      // 3 meters on the same RS485 bus
   uint8_t parity;           // 0=EVEN, 1=ODD, 2=NONE
   uint8_t stop_bits;
   uint16_t poll_interval_ms;
   uint16_t timeout_ms;
   uint8_t retry_count;
-  uint8_t meter_profile;    // 0=Schneider EM6400 / PM2xxx, 1=Generic float32
+  uint8_t meter_profile;    // 0=Renatta AX9L, 1=Generic float32
 };
 
 struct ProtectionConfig {
   bool relay_enabled;
+  uint8_t relay_pin[4];         // Pins for Relay 1, 2, 3, 4 (default: {2, 15, 14, 13})
   uint8_t current_limit_a;
   uint32_t trip_delay_ms;
   uint8_t reset_mode;           // 0=MANUAL, 1=AUTO
@@ -82,6 +83,9 @@ class ConfigManager {
 
   static ProtectionConfig loadProtectionConfig();
   static bool saveProtectionConfig(const ProtectionConfig& cfg);
+
+  static void loadRelayStates(uint8_t states[4]);
+  static bool saveRelayStates(const uint8_t states[4]);
 
   static DisplayConfig loadDisplayConfig();
   static bool saveDisplayConfig(const DisplayConfig& cfg);

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Update.h>
 #include <Ethernet.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
@@ -34,6 +35,7 @@ uint32_t configButtonPressedSinceMs = 0;
 uint32_t lastConfigButtonProgressSecond = 0;
 AppMode currentMode = AppMode::Normal;
 bool configApStarted = false;
+bool webConfigUnlocked = false;
 bool configWebStarted = false;
 bool rebootRequested = false;
 uint32_t rebootAtMs = 0;
@@ -64,11 +66,10 @@ uint32_t mqttLastPublishMs = 0;
 WiFiClient mqttWifiTransport;
 // mqttEthTransport declared below after EthernetClient is available
 PubSubClient mqttWifiClient(mqttWifiTransport);
-bool relayRequestedState = false;
-bool relayActualState = false;
-bool relayLockedOut = false;
-uint32_t relayTripUntilMs = 0;
-uint32_t relayOvercurrentSinceMs = 0;
+uint8_t relayState[4] = {0, 0, 0, 0};            // 0=OFF, 1=ON, 2=TRIP
+uint8_t relayRequestedState[4] = {0, 0, 0, 0};   // 0=OFF, 1=ON
+uint32_t relayTripUntilMs[4] = {0, 0, 0, 0};
+uint32_t relayOvercurrentSinceMs[4] = {0, 0, 0, 0};
 bool displayReady = false;
 uint32_t displayLastUpdateMs = 0;
 uint8_t displayPage = 0;
@@ -90,7 +91,7 @@ struct HistoryRuntime {
   uint32_t lastPersistMs = 0;
 };
 
-HistoryRuntime historyRuntime;
+HistoryRuntime historyRuntime[3];
 
 struct MeterSnapshot {
   bool online = false;
@@ -99,20 +100,69 @@ struct MeterSnapshot {
   uint32_t lastSuccessMs = 0;
   uint32_t lastErrorMs = 0;
   uint16_t lastErrorCode = 0;
+
+  // Tegangan (V)
+  float ua = NAN;
+  float ub = NAN;
+  float uc = NAN;
+  float uab = NAN;
+  float ubc = NAN;
+  float uca = NAN;
+
+  // Arus (A)
+  float ia = NAN;
+  float ib = NAN;
+  float ic = NAN;
+
+  // Daya Aktif (W)
+  float pa = NAN;
+  float pb = NAN;
+  float pc = NAN;
+  float p_total = NAN;
+
+  // Daya Reaktif (var)
+  float qa = NAN;
+  float qb = NAN;
+  float qc = NAN;
+  float q_total = NAN;
+
+  // Daya Nyata (VA)
+  float sa = NAN;
+  float sb = NAN;
+  float sc = NAN;
+  float s_total = NAN;
+
+  // Power Factor
+  float pf1 = NAN;
+  float pf2 = NAN;
+  float pf3 = NAN;
+  float pf_avg = NAN;
+
+  // Frekuensi & Energi
+  float frequency = NAN;
+  float kwh_total = NAN;
+  float kvarh_total = NAN;
+  float kwh_forward = NAN;
+  float kwh_backward = NAN;
+  float kvarh_forward = NAN;
+  float kvarh_backward = NAN;
+
+  // Variabel kompatibilitas lama
   float voltage = NAN;
   float current = NAN;
   float power = NAN;
-  float frequency = NAN;
   float pf = NAN;
   float energy = NAN;
 };
 
-MeterSnapshot meterSnapshot;
+MeterSnapshot meterSnapshots[3];
 WebServer configServer(80);
 
 void startConfigWebServer();
 void enterConfigMode();
 void startConfigAccessPoint(bool disconnectSta = true);
+bool isPinUsedByRelay(uint8_t pin);
+String mqttSwitchStateTopic(size_t index);
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
@@ -120,6 +170,11 @@ bool isConfigButtonPressed() {
 }
 
 void setBuiltinLed(bool on) {
+  // GPIO2 doubles as the default Relay 1 pin on this board — never let the
+  // status LED fight a relay output that's using the same physical pin.
+  if (isPinUsedByRelay(PinMap::kBuiltinLed)) {
+    return;
+  }
   const bool outputHigh = PinMap::kBuiltinLedActiveHigh ? on : !on;
   digitalWrite(PinMap::kBuiltinLed, outputHigh ? HIGH : LOW);
 }
@@ -334,10 +389,23 @@ String getDeviceUid() {
 }
 
 String getMqttBaseTopic() {
-  if (currentMqttConfig.base_topic[0] == '\0') {
-    return String("sems");
+  String base = String(currentMqttConfig.base_topic);
+  base.trim();
+  if (base.length() == 0 || base == "sems" || base == "semsiot") {
+    base = "trofis/enms";
   }
-  return String(currentMqttConfig.base_topic);
+  while (base.endsWith("/")) {
+    base.remove(base.length() - 1);
+  }
+  String devName = String(currentDeviceConfig.device_name);
+  devName.trim();
+  if (devName.length() == 0) {
+    devName = "nocola";
+  }
+  while (devName.endsWith("/")) {
+    devName.remove(devName.length() - 1);
+  }
+  return base + "/" + devName;
 }
 
 String getMqttClientId() {
@@ -376,57 +444,81 @@ String formatDayKey(uint32_t dayKey) {
   return String(buffer);
 }
 
-float currentMeterEnergyDelta() {
-  if (isnan(meterSnapshot.energy)) {
+float currentMeterEnergyDelta(size_t index) {
+  if (isnan(meterSnapshots[index].energy)) {
     return NAN;
   }
 
-  return meterSnapshot.energy;
+  return meterSnapshots[index].energy;
 }
 
-void setRelayOutput(bool on) {
+uint8_t relayPinFor(size_t index) {
+  const uint8_t defPins[4] = {2, 15, 14, 13};
+  if (index >= 4) return defPins[0];
+  const uint8_t configured = currentProtectionConfig.relay_pin[index];
+  return configured == 0 ? defPins[index] : configured;
+}
+
+bool isPinUsedByRelay(uint8_t pin) {
+  for (size_t i = 0; i < 4; i++) {
+    if (relayPinFor(i) == pin) return true;
+  }
+  return false;
+}
+
+void setRelayOutput(size_t index, uint8_t state) {
+  if (index >= 4) return;
+  const uint8_t pin = relayPinFor(index);
+
+  const bool on = (state == 1);
   const bool outputHigh = PinMap::kRelayOutputActiveHigh ? on : !on;
-  digitalWrite(PinMap::kRelayOutput, outputHigh ? HIGH : LOW);
-  relayActualState = on;
+  digitalWrite(pin, outputHigh ? HIGH : LOW);
+  relayState[index] = state;
 }
 
-void loadHistoryRuntime() {
+void loadHistoryRuntime(size_t index) {
   Preferences prefs;
-  historyRuntime.loaded = true;  // mark loaded regardless — NVS missing = fresh start
-  if (!prefs.begin("history_rt", true)) {
+  HistoryRuntime& hr = historyRuntime[index];
+  hr.loaded = true;  // mark loaded regardless — NVS missing = fresh start
+  char ns[16] = {};
+  snprintf(ns, sizeof(ns), "history_rt%u", static_cast<unsigned>(index));
+  if (!prefs.begin(ns, true)) {
     return;
   }
 
-  historyRuntime.dayKey = prefs.getUInt("day_key", 0);
-  historyRuntime.baselineEnergy = prefs.getFloat("baseline", NAN);
+  hr.dayKey = prefs.getUInt("day_key", 0);
+  hr.baselineEnergy = prefs.getFloat("baseline", NAN);
   for (size_t i = 0; i < 7; i++) {
     char key[8] = {};
     snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
-    historyRuntime.daily[i] = prefs.getFloat(key, 0.0f);
+    hr.daily[i] = prefs.getFloat(key, 0.0f);
   }
   prefs.end();
-  historyRuntime.loaded = true;
+  hr.loaded = true;
 }
 
-void saveHistoryRuntime() {
+void saveHistoryRuntime(size_t index) {
   Preferences prefs;
-  if (!prefs.begin("history_rt", false)) {
+  HistoryRuntime& hr = historyRuntime[index];
+  char ns[16] = {};
+  snprintf(ns, sizeof(ns), "history_rt%u", static_cast<unsigned>(index));
+  if (!prefs.begin(ns, false)) {
     return;
   }
 
-  prefs.putUInt("day_key", historyRuntime.dayKey);
-  prefs.putFloat("baseline", historyRuntime.baselineEnergy);
+  prefs.putUInt("day_key", hr.dayKey);
+  prefs.putFloat("baseline", hr.baselineEnergy);
   for (size_t i = 0; i < 7; i++) {
     char key[8] = {};
     snprintf(key, sizeof(key), "d%u", static_cast<unsigned>(i));
-    prefs.putFloat(key, historyRuntime.daily[i]);
+    prefs.putFloat(key, hr.daily[i]);
   }
   prefs.end();
-  historyRuntime.dirty = false;
-  historyRuntime.lastPersistMs = millis();
+  hr.dirty = false;
+  hr.lastPersistMs = millis();
 }
 
-String buildEnergyHistoryJson() {
+String buildEnergyHistoryJson(size_t index) {
   String body;
   body.reserve(128);
   body += F("[");
@@ -435,7 +527,7 @@ String buildEnergyHistoryJson() {
       body += F(",");
     }
     body += F("\"");
-    body += String(historyRuntime.daily[i], 3);
+    body += String(historyRuntime[index].daily[i], 3);
     body += F("\"");
   }
   body += F("]");
@@ -447,146 +539,255 @@ void updateHistoryRuntime(uint32_t nowMs) {
     return;
   }
 
-  if (!historyRuntime.loaded) {
-    loadHistoryRuntime();
-  }
-
-  const float energy = currentMeterEnergyDelta();
-  if (isnan(energy)) {
-    return;
-  }
-
-  const uint32_t dayKey = currentDayKeyFromEpoch(time(nullptr));
-  if (historyRuntime.dayKey == 0 || historyRuntime.baselineEnergy != historyRuntime.baselineEnergy) {
-    historyRuntime.dayKey = dayKey;
-    historyRuntime.baselineEnergy = energy;
-    historyRuntime.daily[0] = 0.0f;
-    historyRuntime.dirty = true;
-  } else if (dayKey != 0 && dayKey != historyRuntime.dayKey) {
-    const float completedDay = energy - historyRuntime.baselineEnergy;
-    for (int i = 6; i > 0; --i) {
-      historyRuntime.daily[i] = historyRuntime.daily[i - 1];
+  for (size_t m = 0; m < 3; m++) {
+    HistoryRuntime& hr = historyRuntime[m];
+    if (!hr.loaded) {
+      loadHistoryRuntime(m);
     }
-    historyRuntime.daily[0] = completedDay > 0 ? completedDay : 0.0f;
-    historyRuntime.dayKey = dayKey;
-    historyRuntime.baselineEnergy = energy;
-    historyRuntime.dirty = true;
-  } else {
-    const float currentDay = energy - historyRuntime.baselineEnergy;
-    historyRuntime.daily[0] = currentDay > 0 ? currentDay : 0.0f;
-    historyRuntime.dirty = true;
-  }
 
-  if (historyRuntime.dirty && nowMs - historyRuntime.lastPersistMs >= 30000UL) {
-    saveHistoryRuntime();
+    const float energy = currentMeterEnergyDelta(m);
+    if (isnan(energy)) {
+      continue;
+    }
+
+    const uint32_t dayKey = currentDayKeyFromEpoch(time(nullptr));
+    if (hr.dayKey == 0 || hr.baselineEnergy != hr.baselineEnergy) {
+      hr.dayKey = dayKey;
+      hr.baselineEnergy = energy;
+      hr.daily[0] = 0.0f;
+      hr.dirty = true;
+    } else if (dayKey != 0 && dayKey != hr.dayKey) {
+      const float completedDay = energy - hr.baselineEnergy;
+      for (int i = 6; i > 0; --i) {
+        hr.daily[i] = hr.daily[i - 1];
+      }
+      hr.daily[0] = completedDay > 0 ? completedDay : 0.0f;
+      hr.dayKey = dayKey;
+      hr.baselineEnergy = energy;
+      hr.dirty = true;
+    } else {
+      const float currentDay = energy - hr.baselineEnergy;
+      hr.daily[0] = currentDay > 0 ? currentDay : 0.0f;
+      hr.dirty = true;
+    }
+
+    if (hr.dirty && nowMs - hr.lastPersistMs >= 30000UL) {
+      saveHistoryRuntime(m);
+    }
   }
 }
 
-String buildRelayStateText() {
+String getFormattedTimestamp();
+
+String buildRelayStateText(size_t index) {
+  if (index >= 4) return String("invalid");
   if (!currentProtectionConfig.relay_enabled) {
     return String("disabled");
   }
-  if (relayLockedOut) {
-    return String("locked");
+  if (relayState[index] == 2) {
+    return String("TRIP");
   }
-  return relayActualState ? String("on") : String("off");
+  return (relayState[index] == 1) ? String("ON") : String("OFF");
 }
 
-bool canTurnRelayOn() {
+String buildRelayStateText() {
+  return buildRelayStateText(0);
+}
+
+void publishMqttControlState() {
+  if (!activeMqttClient || !(*activeMqttClient).connected()) {
+    return;
+  }
+  const String topic = getMqttBaseTopic() + "/control-state";
+  String body;
+  body.reserve(128);
+  body += F("{\"timestamp\":\"");
+  body += getFormattedTimestamp();
+  body += F("\",\"r1\":"); body += String(relayState[0]);
+  body += F(",\"r2\":"); body += String(relayState[1]);
+  body += F(",\"r3\":"); body += String(relayState[2]);
+  body += F(",\"r4\":"); body += String(relayState[3]);
+  body += F("}");
+
+  (*activeMqttClient).publish(topic.c_str(), body.c_str(), true);
+  Serial.print("Published MQTT control-state: ");
+  Serial.println(body);
+
+  // Per-relay state as a single character: "0"=OFF, "1"=ON, "2"=TRIP.
+  for (size_t i = 0; i < 4; i++) {
+    const String switchStateTopic = mqttSwitchStateTopic(i);
+    const String statePayload = String(relayState[i]);
+    (*activeMqttClient).publish(switchStateTopic.c_str(), statePayload.c_str(), true);
+  }
+}
+
+bool canTurnRelayOn(size_t index) {
+  if (index >= 4) return false;
   if (!currentProtectionConfig.relay_enabled) {
     return false;
   }
-  if (relayLockedOut && millis() < relayTripUntilMs) {
+  if (relayState[index] == 2 && millis() < relayTripUntilMs[index]) {
     return false;
   }
   return true;
 }
 
-void requestRelayState(bool on, const char* reason) {
+void requestRelayState(size_t index, uint8_t state, const char* reason, bool notifyMqtt = true) {
+  if (index >= 4) return;
   if (!currentProtectionConfig.relay_enabled) {
-    setRelayOutput(false);
-    relayRequestedState = false;
+    setRelayOutput(index, 0);
+    relayRequestedState[index] = 0;
     Serial.println("Relay request ignored: relay disabled");
+    if (notifyMqtt) publishMqttControlState();
     return;
   }
 
-  if (on && !canTurnRelayOn()) {
-    Serial.print("Relay ON blocked: ");
+  if (state == 1 && !canTurnRelayOn(index)) {
+    Serial.print("Relay R");
+    Serial.print(index + 1);
+    Serial.print(" ON blocked: ");
     Serial.println(reason);
     return;
   }
 
-  relayRequestedState = on;
-  setRelayOutput(on);
-  Serial.print("Relay state set: ");
-  Serial.print(on ? "ON" : "OFF");
+  const uint8_t targetState = (state == 1) ? 1 : 0;
+  relayRequestedState[index] = targetState;
+  setRelayOutput(index, targetState);
+  ConfigManager::saveRelayStates(relayRequestedState);
+
+  Serial.print("Relay R");
+  Serial.print(index + 1);
+  Serial.print(" state set: ");
+  Serial.print(targetState == 1 ? "ON" : "OFF");
   Serial.print(" reason=");
   Serial.println(reason);
+
+  if (notifyMqtt) {
+    publishMqttControlState();
+  }
 }
 
-void tripRelay(const char* reason, uint32_t nowMs) {
-  relayLockedOut = true;
-  relayTripUntilMs = nowMs + static_cast<uint32_t>(currentProtectionConfig.auto_retry_delay_sec) * 1000UL;
-  relayOvercurrentSinceMs = 0;
-  relayRequestedState = false;
-  setRelayOutput(false);
-  Serial.print("Relay tripped: ");
+void tripRelay(size_t index, const char* reason, uint32_t nowMs) {
+  if (index >= 4) return;
+  relayTripUntilMs[index] = nowMs + static_cast<uint32_t>(currentProtectionConfig.auto_retry_delay_sec) * 1000UL;
+  relayOvercurrentSinceMs[index] = 0;
+  relayRequestedState[index] = 0;
+  setRelayOutput(index, 2); // 2 = TRIP
+
+  Serial.print("Relay R");
+  Serial.print(index + 1);
+  Serial.print(" TRIPPED: ");
   Serial.println(reason);
+
+  publishMqttControlState();
+}
+
+float maxMeterCurrent() {
+  float maxCurrent = NAN;
+  for (size_t m = 0; m < 3; m++) {
+    const float c = meterSnapshots[m].current;
+    if (isnan(c)) continue;
+    if (isnan(maxCurrent) || c > maxCurrent) {
+      maxCurrent = c;
+    }
+  }
+  return maxCurrent;
+}
+
+bool anyMeterOffline() {
+  for (size_t m = 0; m < 3; m++) {
+    if (!meterSnapshots[m].online) return true;
+  }
+  return false;
+}
+
+bool anyMeterStale(uint32_t nowMs, uint32_t staleAfterMs) {
+  for (size_t m = 0; m < 3; m++) {
+    const MeterSnapshot& s = meterSnapshots[m];
+    if (!s.online && s.lastSuccessMs > 0 && nowMs - s.lastSuccessMs > staleAfterMs) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void updateProtectionRuntime(uint32_t nowMs) {
   if (!currentProtectionConfig.relay_enabled) {
-    if (relayActualState) {
-      setRelayOutput(false);
+    for (size_t i = 0; i < 4; i++) {
+      if (relayState[i] != 0) {
+        setRelayOutput(i, 0);
+      }
+      relayRequestedState[i] = 0;
+      relayTripUntilMs[i] = 0;
+      relayOvercurrentSinceMs[i] = 0;
     }
-    relayRequestedState = false;
-    relayLockedOut = false;
-    relayTripUntilMs = 0;
-    relayOvercurrentSinceMs = 0;
     return;
   }
 
-  if (relayLockedOut) {
-    if (currentProtectionConfig.auto_retry_enabled && nowMs >= relayTripUntilMs) {
-      const bool safeCurrent = isnan(meterSnapshot.current) || meterSnapshot.current <= currentProtectionConfig.current_limit_a;
-      const bool meterOk = meterSnapshot.online;
-      if (safeCurrent && meterOk) {
-        relayLockedOut = false;
-        if (relayRequestedState) {
-          setRelayOutput(true);
+  // 1. Auto-retry for tripped relays
+  for (size_t i = 0; i < 4; i++) {
+    if (relayState[i] == 2) {
+      if (currentProtectionConfig.auto_retry_enabled && nowMs >= relayTripUntilMs[i]) {
+        const float cur = (i < 3) ? meterSnapshots[i].current : maxMeterCurrent();
+        const bool safeCurrent = isnan(cur) || cur <= currentProtectionConfig.current_limit_a;
+        const bool meterOk = (i < 3) ? meterSnapshots[i].online : !anyMeterOffline();
+        if (safeCurrent && meterOk) {
+          Serial.print("Relay R"); Serial.print(i + 1); Serial.println(" auto-retry unlocked");
+          setRelayOutput(i, relayRequestedState[i]);
+          publishMqttControlState();
         }
-        Serial.println("Relay auto-retry unlocked");
       }
     }
-    if (relayLockedOut) {
-      setRelayOutput(false);
-      return;
+  }
+
+  // 2. Stale meter protection (only if explicitly enabled and meter previously communicated)
+  if (currentProtectionConfig.trip_on_meter_stale && anyMeterStale(nowMs, currentProtectionConfig.trip_delay_ms)) {
+    for (size_t m = 0; m < 3; m++) {
+      const MeterSnapshot& s = meterSnapshots[m];
+      if (!s.online && s.lastSuccessMs > 0 && nowMs - s.lastSuccessMs > currentProtectionConfig.trip_delay_ms) {
+        if (relayState[m] != 2) {
+          tripRelay(m, "meter offline/stale", nowMs);
+        }
+      }
+    }
+    if (relayState[3] != 2) {
+      tripRelay(3, "master meter offline/stale", nowMs);
     }
   }
 
-  const bool meterStale = meterSnapshot.lastSuccessMs > 0 && nowMs - meterSnapshot.lastSuccessMs > currentProtectionConfig.trip_delay_ms;
-  if (currentProtectionConfig.trip_on_meter_stale && !meterSnapshot.online && meterStale) {
-    tripRelay("meter stale", nowMs);
-    return;
-  }
-
-  if (relayRequestedState) {
-    const bool currentValid = !isnan(meterSnapshot.current);
-    if (currentValid && meterSnapshot.current > currentProtectionConfig.current_limit_a) {
-      if (relayOvercurrentSinceMs == 0) {
-        relayOvercurrentSinceMs = nowMs;
-      } else if (nowMs - relayOvercurrentSinceMs >= currentProtectionConfig.trip_delay_ms) {
-        tripRelay("overcurrent", nowMs);
-        return;
+  // 3. Overcurrent protection per meter
+  for (size_t m = 0; m < 3; m++) {
+    const float cur = meterSnapshots[m].current;
+    if (!isnan(cur) && cur > currentProtectionConfig.current_limit_a) {
+      if (relayOvercurrentSinceMs[m] == 0) {
+        relayOvercurrentSinceMs[m] = nowMs;
+      } else if (nowMs - relayOvercurrentSinceMs[m] >= currentProtectionConfig.trip_delay_ms) {
+        if (relayState[m] != 2) {
+          char reasonBuf[64];
+          snprintf(reasonBuf, sizeof(reasonBuf), "overcurrent (%.2fA > %dA)", cur, currentProtectionConfig.current_limit_a);
+          tripRelay(m, reasonBuf, nowMs);
+        }
       }
     } else {
-      relayOvercurrentSinceMs = 0;
+      relayOvercurrentSinceMs[m] = 0;
     }
-  } else {
-    relayOvercurrentSinceMs = 0;
   }
 
-  setRelayOutput(relayRequestedState);
+  // 4. Master relay overcurrent protection
+  float maxCur = maxMeterCurrent();
+  if (!isnan(maxCur) && maxCur > currentProtectionConfig.current_limit_a) {
+    if (relayOvercurrentSinceMs[3] == 0) {
+      relayOvercurrentSinceMs[3] = nowMs;
+    } else if (nowMs - relayOvercurrentSinceMs[3] >= currentProtectionConfig.trip_delay_ms) {
+      if (relayState[3] != 2) {
+        char reasonBuf[64];
+        snprintf(reasonBuf, sizeof(reasonBuf), "master overcurrent (%.2fA > %dA)", maxCur, currentProtectionConfig.current_limit_a);
+        tripRelay(3, reasonBuf, nowMs);
+      }
+    }
+  } else {
+    relayOvercurrentSinceMs[3] = 0;
+  }
 }
 
 String mqttCommandTopic() {
@@ -601,6 +802,15 @@ String mqttTelemetryTopic() {
   return getMqttBaseTopic() + "/telemetry";
 }
 
+// Per-relay boolean control topics, e.g. trofis/enms/nocola_1/control/switch_1
+String mqttSwitchTopic(size_t index) {
+  return getMqttBaseTopic() + "/control/switch_" + String(index + 1);
+}
+
+String mqttSwitchStateTopic(size_t index) {
+  return mqttSwitchTopic(index) + "/state";
+}
+
 void publishMqttState();
 
 void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
@@ -611,21 +821,60 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
     message += static_cast<char>(payload[i]);
   }
   message.trim();
-  message.toLowerCase();
 
   Serial.print("MQTT message: ");
   Serial.print(incomingTopic);
   Serial.print(" -> ");
   Serial.println(message);
 
-  if (message.indexOf("set_relay") >= 0 || message.indexOf("\"action\":\"set_relay\"") >= 0) {
-    requestRelayState(true, "mqtt");
-    publishMqttState();
+  // Per-relay boolean switch topics: trofis/enms/<device>/control/switch_N,
+  // payload is a bare "0" or "1". Matched by exact topic, not by payload
+  // content, so it doesn't interact with the generic parsing below.
+  for (size_t i = 0; i < 4; i++) {
+    if (incomingTopic == mqttSwitchTopic(i)) {
+      if (message == "1") {
+        requestRelayState(i, 1, "mqtt_switch");
+      } else if (message == "0") {
+        requestRelayState(i, 0, "mqtt_switch");
+      } else {
+        Serial.print("MQTT switch topic ignored non-boolean payload: ");
+        Serial.println(message);
+      }
+      return;
+    }
+  }
+
+  String upperMsg = message;
+  upperMsg.toUpperCase();
+
+  // Parse R1=1, R1=0, R2=1, R2=0, R3=1, R3=0, R4=1, R4=0
+  for (size_t r = 1; r <= 4; r++) {
+    String tag1 = "R" + String(r) + "=1";
+    String tag0 = "R" + String(r) + "=0";
+    String json1 = "\"R" + String(r) + "\":1";
+    String json0 = "\"R" + String(r) + "\":0";
+
+    if (upperMsg.indexOf(tag1) >= 0 || upperMsg.indexOf(json1) >= 0) {
+      requestRelayState(r - 1, 1, "mqtt");
+      return;
+    }
+    if (upperMsg.indexOf(tag0) >= 0 || upperMsg.indexOf(json0) >= 0) {
+      requestRelayState(r - 1, 0, "mqtt");
+      return;
+    }
+  }
+
+  // Parse legacy set_relay / reset_relay
+  // Check RESET_RELAY first: "RESET_RELAY" contains "SET_RELAY" as a substring,
+  // so checking SET_RELAY first would misfire on reset commands.
+  if (upperMsg.indexOf("RESET_RELAY") >= 0 || upperMsg.indexOf("\"ACTION\":\"RESET_RELAY\"") >= 0) {
+    for (size_t r = 0; r < 4; r++) requestRelayState(r, 0, "mqtt_legacy", false);
+    publishMqttControlState();
     return;
   }
-  if (message.indexOf("reset_relay") >= 0 || message.indexOf("\"action\":\"reset_relay\"") >= 0) {
-    requestRelayState(false, "mqtt");
-    publishMqttState();
+  if (upperMsg.indexOf("SET_RELAY") >= 0 || upperMsg.indexOf("\"ACTION\":\"SET_RELAY\"") >= 0) {
+    for (size_t r = 0; r < 4; r++) requestRelayState(r, 1, "mqtt_legacy", false);
+    publishMqttControlState();
     return;
   }
 }
@@ -695,41 +944,112 @@ bool connectMqtt(uint32_t nowMs) {
     return false;
   }
 
-  (*activeMqttClient).subscribe(mqttCommandTopic().c_str());
-  (*activeMqttClient).subscribe((getMqttBaseTopic() + "/relay/set").c_str());
+  const String cmdTopic = mqttCommandTopic();
+  const String relaySetTopic = getMqttBaseTopic() + "/relay/set";
+  const bool subCmdOk = (*activeMqttClient).subscribe(cmdTopic.c_str());
+  const bool subRelayOk = (*activeMqttClient).subscribe(relaySetTopic.c_str());
   mqttConnected = true;
   Serial.println("MQTT connected");
+  Serial.print("MQTT subscribed: ");
+  Serial.print(cmdTopic);
+  Serial.print(subCmdOk ? " (ok)" : " (FAILED)");
+  Serial.print(", ");
+  Serial.print(relaySetTopic);
+  Serial.println(subRelayOk ? " (ok)" : " (FAILED)");
+
+  for (size_t i = 0; i < 4; i++) {
+    const String switchTopic = mqttSwitchTopic(i);
+    const bool subSwitchOk = (*activeMqttClient).subscribe(switchTopic.c_str());
+    Serial.print("MQTT subscribed: ");
+    Serial.print(switchTopic);
+    Serial.println(subSwitchOk ? " (ok)" : " (FAILED)");
+  }
   publishMqttState();
+  publishMqttControlState();
   return true;
 }
 
-String buildMqttPayload() {
+String getFormattedTimestamp() {
+  if (!timeSynced) {
+    return String("not_synced");
+  }
+  time_t nowEpoch = time(nullptr);
+  struct tm timeInfo {};
+  if (!localtime_r(&nowEpoch, &timeInfo)) {
+    return String("not_synced");
+  }
+  char buffer[32] = {};
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:00", &timeInfo);
+  return String(buffer);
+}
+
+String buildMqttEnergyPayload(const MeterSnapshot& snapshot, uint8_t slaveId) {
   String body;
-  body.reserve(512);
-  body += F("{\"uid\":\"");
-  body += getDeviceUid();
-  body += F("\",\"rtc\":\"");
-  body += getRtcString();
-  body += F("\",\"relay_state\":\"");
-  body += relayActualState ? F("1") : F("0");
-  body += F("\",\"meter_data\":{");
-  body += F("\"voltage\":[\"");
-  body += String(meterSnapshot.voltage, 2);
-  body += F("\",\"V\"],\"current\":[\"");
-  body += String(meterSnapshot.current, 2);
-  body += F("\",\"A\"],\"power\":[\"");
-  body += String(meterSnapshot.power, 2);
-  body += F("\",\"kW\"],\"frequency\":[\"");
-  body += String(meterSnapshot.frequency, 2);
-  body += F("\",\"Hz\"],\"pf\":[\"");
-  body += String(meterSnapshot.pf, 2);
-  body += F("\",\"\"],\"energy\":[\"");
-  body += String(meterSnapshot.energy, 3);
-  body += F("\",\"kWh\"],\"co2\":[\"");
-  const float co2 = meterSnapshot.valid ? (meterSnapshot.energy * currentDeviceConfig.co2_factor_kg_per_kwh) : 0.0f;
-  body += String(co2, 3);
-  body += F("\",\"kg\"]},\"energy_history\":");
-  body += buildEnergyHistoryJson();
+  body.reserve(1024);
+  body += F("{\"timestamp\":\"");
+  body += getFormattedTimestamp();
+  body += F("\",\"slave_id\":");
+  body += String(slaveId);
+
+  auto formatVal = [&snapshot](float val, int decimals) -> String {
+    if (!snapshot.online || isnan(val)) return String("0.") + String("000").substring(0, decimals);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.*f", decimals, val);
+    return String(buf);
+  };
+
+  body += F(",\"voltage\":{");
+  body += F("\"ua\":\""); body += formatVal(snapshot.ua, 1);
+  body += F("\",\"ub\":\""); body += formatVal(snapshot.ub, 1);
+  body += F("\",\"uc\":\""); body += formatVal(snapshot.uc, 1);
+  body += F("\",\"uab\":\""); body += formatVal(snapshot.uab, 1);
+  body += F("\",\"ubc\":\""); body += formatVal(snapshot.ubc, 1);
+  body += F("\",\"uca\":\""); body += formatVal(snapshot.uca, 1);
+  body += F("\"},\"current\":{");
+  body += F("\"ia\":\""); body += formatVal(snapshot.ia, 3);
+  body += F("\",\"ib\":\""); body += formatVal(snapshot.ib, 3);
+  body += F("\",\"ic\":\""); body += formatVal(snapshot.ic, 3);
+  body += F("\"},\"power\":{");
+  body += F("\"active\":{");
+  body += F("\"pa\":\""); body += formatVal(snapshot.pa, 1);
+  body += F("\",\"pb\":\""); body += formatVal(snapshot.pb, 1);
+  body += F("\",\"pc\":\""); body += formatVal(snapshot.pc, 1);
+  body += F("\",\"total\":\""); body += formatVal(snapshot.p_total, 1);
+  body += F("\"},\"reactive\":{");
+  body += F("\"qa\":\""); body += formatVal(snapshot.qa, 1);
+  body += F("\",\"qb\":\""); body += formatVal(snapshot.qb, 1);
+  body += F("\",\"qc\":\""); body += formatVal(snapshot.qc, 1);
+  body += F("\",\"total\":\""); body += formatVal(snapshot.q_total, 1);
+  body += F("\"},\"apparent\":{");
+  body += F("\"sa\":\""); body += formatVal(snapshot.sa, 1);
+  body += F("\",\"sb\":\""); body += formatVal(snapshot.sb, 1);
+  body += F("\",\"sc\":\""); body += formatVal(snapshot.sc, 1);
+  body += F("\",\"total\":\""); body += formatVal(snapshot.s_total, 1);
+  body += F("\"}},\"power_factor\":{");
+  body += F("\"pf1\":\""); body += formatVal(snapshot.pf1, 3);
+  body += F("\",\"pf2\":\""); body += formatVal(snapshot.pf2, 3);
+  body += F("\",\"pf3\":\""); body += formatVal(snapshot.pf3, 3);
+  body += F("\",\"avg\":\""); body += formatVal(snapshot.pf_avg, 3);
+  body += F("\"},\"frequency\":\"");
+  body += formatVal(snapshot.frequency, 2);
+  body += F("\"}");
+  return body;
+}
+
+String buildMqttKwhPayload(const MeterSnapshot& snapshot, uint8_t slaveId) {
+  String body;
+  body.reserve(256);
+  float kwh = isnan(snapshot.kwh_total) ? 0.0f : snapshot.kwh_total;
+  int32_t wh = static_cast<int32_t>(round(kwh * 1000.0f));
+
+  body += F("{\"timestamp\":\"");
+  body += getFormattedTimestamp();
+  body += F("\",\"slave_id\":");
+  body += String(slaveId);
+  body += F(",\"kwh\":");
+  body += String(kwh, 2);
+  body += F(",\"wh\":");
+  body += String(wh);
   body += F("}");
   return body;
 }
@@ -739,9 +1059,22 @@ void publishMqttState() {
     return;
   }
 
-  const String payload = buildMqttPayload();
-  (*activeMqttClient).publish(mqttStateTopic().c_str(), payload.c_str(), true);
-  (*activeMqttClient).publish(mqttTelemetryTopic().c_str(), payload.c_str(), false);
+  // Publish birth/online message on base state topic
+  const String statePayload = F("{\"connected\":true}");
+  (*activeMqttClient).publish(mqttStateTopic().c_str(), statePayload.c_str(), true);
+
+  // Publish telemetry payloads for each of the 3 meters
+  for (size_t m = 0; m < 3; m++) {
+    const uint8_t slaveId = currentModbusConfig.slave_id[m] == 0 ? (m + 1) : currentModbusConfig.slave_id[m];
+    const String energyTopic = getMqttBaseTopic() + "/elc_data/slave_" + String(slaveId);
+    const String kwhTopic = getMqttBaseTopic() + "/elc_wh/slave_" + String(slaveId);
+
+    const String energyPayload = buildMqttEnergyPayload(meterSnapshots[m], slaveId);
+    (*activeMqttClient).publish(energyTopic.c_str(), energyPayload.c_str(), false);
+
+    const String kwhPayload = buildMqttKwhPayload(meterSnapshots[m], slaveId);
+    (*activeMqttClient).publish(kwhTopic.c_str(), kwhPayload.c_str(), false);
+  }
 }
 
 void updateMqttRuntime(uint32_t nowMs) {
@@ -793,44 +1126,49 @@ void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
   driver->clearBuffer();
   driver->setFont(u8g2_font_6x12_tf);
 
-  switch (pageIndex % 4) {
-    case 0:
-      driver->drawStr(0, 12, "SEMS AIoT");
-      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.voltage, 1, "V").c_str());
-      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.current, 1, "A").c_str());
-      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.power, 1, "kW").c_str());
-      break;
-    case 1:
-      driver->drawStr(0, 12, "Energy / Power");
-      driver->drawStr(0, 28, formatFloatValue(meterSnapshot.energy, 3, "kWh").c_str());
-      driver->drawStr(0, 42, formatFloatValue(meterSnapshot.frequency, 1, "Hz").c_str());
-      driver->drawStr(0, 56, formatFloatValue(meterSnapshot.pf, 2, "PF").c_str());
-      break;
-    case 2: {
-      driver->drawStr(0, 12, "Network / MQTT");
-      // Show best available IP
-      String ipStr;
-      if (ethLinkUp) {
-        ipStr = "ETH:" + Ethernet.localIP().toString();
-      } else if (wifiConnected) {
-        ipStr = "WiFi:" + WiFi.localIP().toString();
-      } else if (configApStarted) {
-        ipStr = "AP:192.168.4.1";
-      } else {
-        ipStr = "no network";
-      }
-      driver->drawStr(0, 28, ipStr.c_str());
-      String netStatus = String(wifiConnected ? "W+" : "W-") + " " + String(mqttConnected ? "MQTT+" : "MQTT-");
-      driver->drawStr(0, 42, netStatus.c_str());
-      driver->drawStr(0, 56, getMqttBaseTopic().c_str());
-      break;
+  const uint8_t page = pageIndex % 8;
+
+  if (page < 6) {
+    const size_t m = page / 2;
+    const MeterSnapshot& snapshot = meterSnapshots[m];
+    const uint8_t slaveId = currentModbusConfig.slave_id[m];
+    char header[20];
+    if (page % 2 == 0) {
+      snprintf(header, sizeof(header), "Meter %u (id %u)", static_cast<unsigned>(m + 1), slaveId);
+      driver->drawStr(0, 12, header);
+      driver->drawStr(0, 28, formatFloatValue(snapshot.voltage, 1, "V").c_str());
+      driver->drawStr(0, 42, formatFloatValue(snapshot.current, 1, "A").c_str());
+      driver->drawStr(0, 56, formatFloatValue(snapshot.power, 1, "kW").c_str());
+    } else {
+      snprintf(header, sizeof(header), "M%u Energy/Freq/PF", static_cast<unsigned>(m + 1));
+      driver->drawStr(0, 12, header);
+      driver->drawStr(0, 28, formatFloatValue(snapshot.energy, 3, "kWh").c_str());
+      driver->drawStr(0, 42, formatFloatValue(snapshot.frequency, 1, "Hz").c_str());
+      driver->drawStr(0, 56, formatFloatValue(snapshot.pf, 2, "PF").c_str());
     }
-    default:
-      driver->drawStr(0, 12, "Relay / Fault");
-      driver->drawStr(0, 28, buildRelayStateText().c_str());
-      driver->drawStr(0, 42, relayLockedOut ? "lockout active" : "ready");
-      driver->drawStr(0, 56, meterSnapshot.online ? "meter ok" : "meter off");
-      break;
+  } else if (page == 6) {
+    driver->drawStr(0, 12, "Network / MQTT");
+    // Show best available IP
+    String ipStr;
+    if (ethLinkUp) {
+      ipStr = "ETH:" + Ethernet.localIP().toString();
+    } else if (wifiConnected) {
+      ipStr = "WiFi:" + WiFi.localIP().toString();
+    } else if (configApStarted) {
+      ipStr = "AP:192.168.4.1";
+    } else {
+      ipStr = "no network";
+    }
+    driver->drawStr(0, 28, ipStr.c_str());
+    String netStatus = String(wifiConnected ? "W+" : "W-") + " " + String(mqttConnected ? "MQTT+" : "MQTT-");
+    driver->drawStr(0, 42, netStatus.c_str());
+    driver->drawStr(0, 56, getMqttBaseTopic().c_str());
+  } else {
+    driver->drawStr(0, 12, "Relay / Fault");
+    driver->drawStr(0, 28, buildRelayStateText().c_str());
+    bool anyTripped = (relayState[0] == 2 || relayState[1] == 2 || relayState[2] == 2 || relayState[3] == 2);
+    driver->drawStr(0, 42, anyTripped ? "trip active" : "ready");
+    driver->drawStr(0, 56, anyMeterOffline() ? "meter off" : "meter ok");
   }
 
   driver->sendBuffer();
@@ -854,29 +1192,32 @@ void updateDisplayRuntime(uint32_t nowMs) {
   }
 
   displayLastUpdateMs = nowMs;
-  displayPage = (displayPage + 1) % 4;
+  displayPage = (displayPage + 1) % 8;
   drawDisplayPage(&display, displayPage);
 }
 
 void loadFeatureRuntime() {
-  loadHistoryRuntime();
-  setRelayOutput(false);
-  relayRequestedState = false;
-  relayActualState = false;
-  relayLockedOut = false;
-  relayTripUntilMs = 0;
-  relayOvercurrentSinceMs = 0;
+  for (size_t m = 0; m < 3; m++) {
+    loadHistoryRuntime(m);
+  }
+  ConfigManager::loadRelayStates(relayRequestedState);
+  for (size_t r = 0; r < 4; r++) {
+    uint8_t initSt = (currentProtectionConfig.relay_enabled && relayRequestedState[r] == 1) ? 1 : 0;
+    setRelayOutput(r, initSt);
+    relayTripUntilMs[r] = 0;
+    relayOvercurrentSinceMs[r] = 0;
+  }
 }
 
-void resetMeterSnapshot() {
-  meterSnapshot.online = false;
-  meterSnapshot.valid = false;
-  meterSnapshot.voltage = NAN;
-  meterSnapshot.current = NAN;
-  meterSnapshot.power = NAN;
-  meterSnapshot.frequency = NAN;
-  meterSnapshot.pf = NAN;
-  meterSnapshot.energy = NAN;
+void resetMeterSnapshot(MeterSnapshot& snapshot) {
+  snapshot.online = false;
+  snapshot.valid = false;
+  snapshot.voltage = NAN;
+  snapshot.current = NAN;
+  snapshot.power = NAN;
+  snapshot.frequency = NAN;
+  snapshot.pf = NAN;
+  snapshot.energy = NAN;
 }
 
 uint16_t modbusCrc16(const uint8_t* data, size_t length) {
@@ -923,14 +1264,37 @@ void applyModbusPortConfig(const ModbusConfig& cfg) {
 
   Serial.print("Modbus UART2 ready: baud=");
   Serial.print(cfg.baudrate);
-  Serial.print(" slave=");
-  Serial.print(cfg.slave_id);
+  Serial.print(" slaves=");
+  Serial.print(cfg.slave_id[0]);
+  Serial.print(",");
+  Serial.print(cfg.slave_id[1]);
+  Serial.print(",");
+  Serial.print(cfg.slave_id[2]);
   Serial.print(" parity=");
   Serial.print(cfg.parity);
   Serial.print(" stop_bits=");
   Serial.println(cfg.stop_bits);
   Serial2.setTimeout(cfg.timeout_ms);
   currentModbusConfig = cfg;
+}
+
+// Keeps the web UI and MQTT responsive during Modbus blocking waits: relay
+// on/off requests must not be stuck behind a slow/timed-out RS485 read.
+void serviceDuringModbusWait() {
+  if (configWebStarted) {
+    configServer.handleClient();
+  }
+  if ((*activeMqttClient).connected()) {
+    (*activeMqttClient).loop();
+  }
+}
+
+void delayServicing(uint32_t ms) {
+  const uint32_t until = millis() + ms;
+  do {
+    serviceDuringModbusWait();
+    delay(1);
+  } while (millis() < until);
 }
 
 bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
@@ -959,6 +1323,7 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
 
   const uint32_t deadline = millis() + timeoutMs;
   while (Serial2.available() < 3 && millis() < deadline) {
+    serviceDuringModbusWait();
     delay(1);
   }
   if (Serial2.available() < 3) {
@@ -976,6 +1341,7 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
 
   if (header[1] & 0x80) {
     while (Serial2.available() < 2 && millis() < deadline) {
+      serviceDuringModbusWait();
       delay(1);
     }
     if (Serial2.available() < 2) {
@@ -995,6 +1361,7 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
   }
 
   while (Serial2.available() < byteCount + 2 && millis() < deadline) {
+    serviceDuringModbusWait();
     delay(1);
   }
   if (Serial2.available() < byteCount + 2) {
@@ -1010,7 +1377,7 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
     return false;
   }
 
-  uint8_t frame[3 + 64];
+  uint8_t frame[3 + 128];
   frame[0] = header[0];
   frame[1] = header[1];
   frame[2] = header[2];
@@ -1041,75 +1408,159 @@ bool readSchneiderFloat(uint8_t slaveId, uint16_t startRegister, float& value, u
   return true;
 }
 
+void pollOneModbusMeter(MeterSnapshot& snapshot, uint8_t slaveId, uint32_t timeoutMs, uint32_t nowMs) {
+  snapshot.lastPollMs = nowMs;
+  snapshot.online = false;
+  snapshot.valid = false;
+
+  uint8_t buf1[68]; // 34 registers * 2 bytes = 68 bytes (0x4000 s/d 0x4021)
+  uint8_t buf2[60]; // 30 registers * 2 bytes = 60 bytes (0x4022 s/d 0x403F)
+  uint16_t exceptionCode = 0;
+
+  // Block 1: 0x4000 count 34
+  bool ok1 = modbusReadHoldingRegisters(slaveId, 0x4000, 34, buf1, sizeof(buf1), exceptionCode, timeoutMs);
+
+  // Delay 100ms to allow RS485 bus settling (servicing web/MQTT while we wait)
+  delayServicing(100);
+
+  // Block 2: 0x4022 count 30
+  bool ok2 = modbusReadHoldingRegisters(slaveId, 0x4022, 30, buf2, sizeof(buf2), exceptionCode, timeoutMs);
+
+  if (ok1 && ok2) {
+    snapshot.online = true;
+    snapshot.valid = true;
+    snapshot.lastSuccessMs = nowMs;
+
+    auto readVal1 = [&](uint16_t reg, float multiplier) -> float {
+      uint16_t offset = (reg - 0x4000) * 2;
+      int32_t raw = (static_cast<int32_t>(buf1[offset]) << 24) |
+                    (static_cast<int32_t>(buf1[offset + 1]) << 16) |
+                    (static_cast<int32_t>(buf1[offset + 2]) << 8) |
+                    static_cast<int32_t>(buf1[offset + 3]);
+      return raw * multiplier;
+    };
+
+    auto readVal2 = [&](uint16_t reg, float multiplier) -> float {
+      uint16_t offset = (reg - 0x4022) * 2;
+      int32_t raw = (static_cast<int32_t>(buf2[offset]) << 24) |
+                    (static_cast<int32_t>(buf2[offset + 1]) << 16) |
+                    (static_cast<int32_t>(buf2[offset + 2]) << 8) |
+                    static_cast<int32_t>(buf2[offset + 3]);
+      return raw * multiplier;
+    };
+
+    // Blok 1 values (0x4000 to 0x4021)
+    snapshot.ua = readVal1(0x4000, 0.1f);
+    snapshot.ub = readVal1(0x4002, 0.1f);
+    snapshot.uc = readVal1(0x4004, 0.1f);
+    snapshot.uab = readVal1(0x4006, 0.1f);
+    snapshot.ubc = readVal1(0x4008, 0.1f);
+    snapshot.uca = readVal1(0x400A, 0.1f);
+    snapshot.ia = readVal1(0x400C, 0.001f);
+    snapshot.ib = readVal1(0x400E, 0.001f);
+    snapshot.ic = readVal1(0x4010, 0.001f);
+    snapshot.pa = readVal1(0x4012, 0.1f);
+    snapshot.pb = readVal1(0x4014, 0.1f);
+    snapshot.pc = readVal1(0x4016, 0.1f);
+    snapshot.p_total = readVal1(0x4018, 0.1f);
+    snapshot.qa = readVal1(0x401A, 0.1f);
+    snapshot.qb = readVal1(0x401C, 0.1f);
+    snapshot.qc = readVal1(0x401E, 0.1f);
+    snapshot.q_total = readVal1(0x4020, 0.1f);
+
+    // Blok 2 values (0x4022 to 0x403F)
+    snapshot.sa = readVal2(0x4022, 0.1f);
+    snapshot.sb = readVal2(0x4024, 0.1f);
+    snapshot.sc = readVal2(0x4026, 0.1f);
+    snapshot.s_total = readVal2(0x4028, 0.1f);
+    snapshot.pf1 = readVal2(0x402A, 0.001f);
+    snapshot.pf2 = readVal2(0x402C, 0.001f);
+    snapshot.pf3 = readVal2(0x402E, 0.001f);
+    snapshot.pf_avg = readVal2(0x4030, 0.001f);
+    snapshot.frequency = readVal2(0x4032, 0.01f);
+    snapshot.kwh_total = readVal2(0x4034, 0.01f);
+    snapshot.kvarh_total = readVal2(0x4036, 0.01f);
+    snapshot.kwh_forward = readVal2(0x4038, 0.01f);
+    snapshot.kwh_backward = readVal2(0x403A, 0.01f);
+    snapshot.kvarh_forward = readVal2(0x403C, 0.01f);
+    snapshot.kvarh_backward = readVal2(0x403E, 0.01f);
+
+    // Compatibility fields
+    snapshot.voltage = snapshot.ua;
+    snapshot.current = snapshot.ia;
+    snapshot.power = snapshot.p_total / 1000.0f; // W -> kW
+    snapshot.pf = snapshot.pf_avg;
+    snapshot.energy = snapshot.kwh_total;
+
+    Serial.print("Modbus meter ok: slave=");
+    Serial.print(slaveId);
+    Serial.print(" V_A=");
+    Serial.print(snapshot.voltage, 1);
+    Serial.print(" I_A=");
+    Serial.print(snapshot.current, 3);
+    Serial.print(" P_tot=");
+    Serial.print(snapshot.power, 3);
+    Serial.print(" F=");
+    Serial.print(snapshot.frequency, 2);
+    Serial.print(" E=");
+    Serial.println(snapshot.energy, 2);
+  } else {
+    snapshot.lastErrorMs = nowMs;
+    snapshot.lastErrorCode = 1;
+    snapshot.online = false;
+    snapshot.valid = false;
+    Serial.print("Modbus meter read failed: slave=");
+    Serial.print(slaveId);
+    Serial.print(" ok1=");
+    Serial.print(ok1 ? "true" : "false");
+    Serial.print(", ok2=");
+    Serial.println(ok2 ? "true" : "false");
+  }
+}
+
+static uint8_t modbusPollStep = 0;
+static uint32_t lastModbusStepMs = 0;
+
 void pollModbusMeter(uint32_t nowMs) {
   const ModbusConfig cfg = currentModbusConfigLoaded ? currentModbusConfig : ConfigManager::loadModbusConfig();
   currentModbusConfig = cfg;
   currentModbusConfigLoaded = true;
 
   if (currentMode != AppMode::Normal) {
-    resetMeterSnapshot();
+    for (size_t m = 0; m < 3; m++) {
+      resetMeterSnapshot(meterSnapshots[m]);
+    }
+    modbusPollStep = 0;
     return;
   }
 
   applyModbusPortConfig(cfg);
 
-  if (nowMs - lastModbusPollMs < cfg.poll_interval_ms) {
+  if (modbusPollStep == 0) {
+    if (nowMs - lastModbusPollMs >= cfg.poll_interval_ms) {
+      modbusPollStep = 1;
+      lastModbusStepMs = nowMs;
+    }
     return;
   }
-  lastModbusPollMs = nowMs;
 
-  meterSnapshot.lastPollMs = nowMs;
-  meterSnapshot.online = false;
-  meterSnapshot.valid = false;
+  if (nowMs - lastModbusStepMs < 50) {
+    return;
+  }
+  lastModbusStepMs = nowMs;
 
-  const uint8_t slaveId = cfg.slave_id == 0 ? 1 : cfg.slave_id;
-  const uint16_t voltageReg = 3027;
-  const uint16_t currentReg = 2999;
-  const uint16_t powerReg = 3053;
-  const uint16_t frequencyReg = 3109;
-  const uint16_t energyReg = 2675;
-
-  float voltage = NAN;
-  float current = NAN;
-  float power = NAN;
-  float frequency = NAN;
-  float energy = NAN;
-
-  bool ok = true;
-  ok = ok && readSchneiderFloat(slaveId, voltageReg, voltage, cfg.timeout_ms);
-  ok = ok && readSchneiderFloat(slaveId, currentReg, current, cfg.timeout_ms);
-  ok = ok && readSchneiderFloat(slaveId, powerReg, power, cfg.timeout_ms);
-  ok = ok && readSchneiderFloat(slaveId, frequencyReg, frequency, cfg.timeout_ms);
-  ok = ok && readSchneiderFloat(slaveId, energyReg, energy, cfg.timeout_ms);
-
-  if (ok) {
-    meterSnapshot.online = true;
-    meterSnapshot.valid = true;
-    meterSnapshot.lastSuccessMs = nowMs;
-    meterSnapshot.voltage = voltage;
-    meterSnapshot.current = current;
-    meterSnapshot.power = power;
-    meterSnapshot.frequency = frequency;
-    meterSnapshot.energy = energy;
-    Serial.print("Modbus meter ok: V=");
-    Serial.print(voltage, 2);
-    Serial.print(" I=");
-    Serial.print(current, 2);
-    Serial.print(" P=");
-    Serial.print(power, 2);
-    Serial.print(" F=");
-    Serial.print(frequency, 2);
-    Serial.print(" E=");
-    Serial.println(energy, 3);
-  } else {
-    meterSnapshot.lastErrorMs = nowMs;
-    meterSnapshot.lastErrorCode = 1;
-    meterSnapshot.online = false;
-    meterSnapshot.valid = false;
-    Serial.println("Modbus meter read failed");
+  size_t m = modbusPollStep - 1;
+  if (m < 3) {
+    const uint8_t slaveId = cfg.slave_id[m] == 0 ? static_cast<uint8_t>(m + 1) : cfg.slave_id[m];
+    pollOneModbusMeter(meterSnapshots[m], slaveId, cfg.timeout_ms, nowMs);
+    modbusPollStep++;
   }
 
-  updateHistoryRuntime(nowMs);
+  if (modbusPollStep > 3) {
+    modbusPollStep = 0;
+    lastModbusPollMs = nowMs;
+    updateHistoryRuntime(nowMs);
+  }
 }
 
 void startNtpSync() {
@@ -1401,11 +1852,37 @@ String buildMqttConfigPage() {
   page += htmlEscape(String(cfg.password));
   page += F("\"><label for=\"mqtt_client_id\">Client ID</label><input id=\"mqtt_client_id\" maxlength=\"64\" placeholder=\"pm1611\" value=\"");
   page += htmlEscape(String(cfg.client_id));
-  page += F("\"><label for=\"mqtt_base_topic\">Base Topic</label><input id=\"mqtt_base_topic\" maxlength=\"64\" placeholder=\"pm1611\" value=\"");
-  page += htmlEscape(String(cfg.base_topic));
+  String baseTopicStr = String(cfg.base_topic);
+  baseTopicStr.trim();
+  if (baseTopicStr.length() == 0 || baseTopicStr == "sems" || baseTopicStr == "semsiot") {
+    baseTopicStr = "trofis/enms";
+  }
+  page += F("\"><label for=\"mqtt_base_topic\">Base Topic Prefix</label><input id=\"mqtt_base_topic\" maxlength=\"64\" placeholder=\"trofis/enms\" value=\"");
+  page += htmlEscape(baseTopicStr);
   page += F("\"><label for=\"mqtt_publish_interval\">Publish Interval (sec)</label><input id=\"mqtt_publish_interval\" type=\"number\" min=\"1\" max=\"3600\" value=\"");
   page += String(cfg.publish_interval_sec);
-  page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
+  
+  page += F("<section class=\"panel\"><h2>MQTT Topics Preview & Format Notes</h2><div class=\"muted\">");
+  page += F("<p style=\"background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0;\">");
+  page += F("<strong>Topic Formation Rule:</strong><br>");
+  page += F("<code>[Base Topic Prefix] / [Device Name] / [elc_data | elc_wh] / slave_[slave_id]</code></p>");
+  page += F("<p><strong>Active Prefix:</strong> <code>");
+  page += htmlEscape(getMqttBaseTopic());
+  page += F("</code></p><p><strong>Target Topics per Slave:</strong></p><ul>");
+  for (size_t m = 0; m < 3; m++) {
+    const uint8_t slaveId = currentModbusConfig.slave_id[m] == 0 ? static_cast<uint8_t>(m + 1) : currentModbusConfig.slave_id[m];
+    page += F("<li><strong>Slave ");
+    page += String(slaveId);
+    page += F(" Energy Sesaat:</strong> <code>");
+    page += htmlEscape(getMqttBaseTopic() + "/elc_data/slave_" + String(slaveId));
+    page += F("</code></li><li><strong>Slave ");
+    page += String(slaveId);
+    page += F(" kWh Kumulatif:</strong> <code>");
+    page += htmlEscape(getMqttBaseTopic() + "/elc_wh/slave_" + String(slaveId));
+    page += F("</code></li>");
+  }
+  page += F("</ul></div></section></main>");
   page += F("<script>async function saveMqttConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("mqtt_enabled:document.getElementById('mqtt_enabled').checked?'1':'0',");
   page += F("mqtt_host:document.getElementById('mqtt_host').value,mqtt_port:document.getElementById('mqtt_port').value,");
@@ -1431,8 +1908,12 @@ String buildModbusConfigPage() {
   page += F(">19200</option><option value=\"38400\"");
   page += cfg.baudrate == 38400 ? F(" selected") : F("");
   page += F(">38400</option></select>");
-  page += F("<label for=\"modbus_slave_id\">Slave Device Address</label><input id=\"modbus_slave_id\" type=\"number\" min=\"1\" max=\"247\" value=\"");
-  page += String(cfg.slave_id);
+  page += F("<label for=\"modbus_slave_id_1\">Slave 1 Address</label><input id=\"modbus_slave_id_1\" type=\"number\" min=\"1\" max=\"247\" value=\"");
+  page += String(cfg.slave_id[0]);
+  page += F("\"><label for=\"modbus_slave_id_2\">Slave 2 Address</label><input id=\"modbus_slave_id_2\" type=\"number\" min=\"1\" max=\"247\" value=\"");
+  page += String(cfg.slave_id[1]);
+  page += F("\"><label for=\"modbus_slave_id_3\">Slave 3 Address</label><input id=\"modbus_slave_id_3\" type=\"number\" min=\"1\" max=\"247\" value=\"");
+  page += String(cfg.slave_id[2]);
   page += F("\"><label for=\"modbus_parity\">Parity</label><select id=\"modbus_parity\">");
   page += F("<option value=\"0\"");
   page += cfg.parity == 0 ? F(" selected") : F("");
@@ -1455,12 +1936,13 @@ String buildModbusConfigPage() {
   page += String(cfg.retry_count);
   page += F("\"><label for=\"modbus_profile\">Meter Profile</label><select id=\"modbus_profile\"><option value=\"0\"");
   page += cfg.meter_profile == 0 ? F(" selected") : F("");
-  page += F(">Schneider EM6400 / PM2xxx</option><option value=\"1\"");
+  page += F(">Renatta AX9L</option><option value=\"1\"");
   page += cfg.meter_profile == 1 ? F(" selected") : F("");
   page += F(">Generic float32</option></select>");
   page += F("<div class=\"actions\"><button onclick=\"saveModbusConfig()\">Save Modbus Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
   page += F("<script>async function saveModbusConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
-  page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id:document.getElementById('modbus_slave_id').value,");
+  page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id_1:document.getElementById('modbus_slave_id_1').value,");
+  page += F("modbus_slave_id_2:document.getElementById('modbus_slave_id_2').value,modbus_slave_id_3:document.getElementById('modbus_slave_id_3').value,");
   page += F("modbus_parity:document.getElementById('modbus_parity').value,modbus_stop_bits:document.getElementById('modbus_stop_bits').value,");
   page += F("modbus_poll_interval:document.getElementById('modbus_poll_interval').value,modbus_timeout:document.getElementById('modbus_timeout').value,");
   page += F("modbus_retry_count:document.getElementById('modbus_retry_count').value,modbus_profile:document.getElementById('modbus_profile').value});");
@@ -1473,12 +1955,57 @@ String buildModbusConfigPage() {
 String buildProtectionConfigPage() {
   const ProtectionConfig& cfg = currentProtectionConfig;
   String page = buildPageHeader("Protection Configuration");
-  page.reserve(4000);
-  page += F("<section class=\"panel\"><h2>Relay Protection Settings</h2>");
+  page.reserve(6500);
+
+  const uint8_t defPins[4] = {2, 15, 14, 13};
+
+  // 1. Realtime 4-Channel Relay Control Panel
+  page += F("<section class=\"panel\"><h2>⚡ Realtime Relay Control</h2>");
+  page += F("<div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:14px 0\">");
+  for (size_t r = 0; r < 4; r++) {
+    uint8_t pin = (cfg.relay_pin[r] == 0) ? defPins[r] : cfg.relay_pin[r];
+    page += F("<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center\">");
+    page += F("<div style=\"font-weight:700\">Relay "); page += String(r + 1); page += F("</div>");
+    page += F("<div class=\"muted\" style=\"font-size:12px\">GPIO "); page += String(pin); page += F("</div>");
+    page += F("<div id=\"st_badge_"); page += String(r + 1); page += F("\" class=\"tag\" style=\"margin:6px 0;display:inline-block\">OFF</div>");
+    page += F("<div><label class=\"sw\"><input type=\"checkbox\" id=\"r_sw_"); page += String(r + 1);
+    page += F("\" onchange=\"toggleRelay("); page += String(r + 1); page += F(",this.checked)\"><span class=\"sl\"></span></label></div>");
+    page += F("</div>");
+  }
+  page += F("</div>");
+  page += F("<div class=\"actions\"><button type=\"button\" onclick=\"toggleAllRelays(true)\">ALL ON</button><button type=\"button\" onclick=\"toggleAllRelays(false)\">ALL OFF</button></div>");
+  page += F("</section>");
+
+  // 2. Relay Settings & Pin Mapping Panel
+  page += F("<section class=\"panel\"><h2>Relay Protection & Pin Mapping Settings</h2>");
   page += F("<label><input type=\"checkbox\" id=\"relay_enabled\"");
   page += cfg.relay_enabled ? F(" checked") : F("");
-  page += F("> Enable Relay Output</label>");
-  page += F("<label for=\"current_limit\">Current Limit (A)</label><input id=\"current_limit\" type=\"number\" min=\"1\" max=\"63\" value=\"");
+  page += F("> Enable Relay Output System</label>");
+
+  const uint8_t availPins[] = {2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
+
+  for (size_t r = 0; r < 4; r++) {
+    uint8_t curPin = (cfg.relay_pin[r] == 0) ? defPins[r] : cfg.relay_pin[r];
+    page += F("<label for=\"relay_pin_");
+    page += String(r + 1);
+    page += F("\">Relay ");
+    page += String(r + 1);
+    page += F(" GPIO Pin</label><select id=\"relay_pin_");
+    page += String(r + 1);
+    page += F("\">");
+    for (uint8_t p : availPins) {
+      page += F("<option value=\"");
+      page += String(p);
+      page += F("\"");
+      if (p == curPin) page += F(" selected");
+      page += F(">GPIO ");
+      page += String(p);
+      page += F("</option>");
+    }
+    page += F("</select>");
+  }
+
+  page += F("<label for=\"current_limit\">Current Limit per Meter (A)</label><input id=\"current_limit\" type=\"number\" min=\"1\" max=\"63\" value=\"");
   page += String(cfg.current_limit_a);
   page += F("\"><label for=\"trip_delay\">Trip Delay (ms)</label><input id=\"trip_delay\" type=\"number\" min=\"100\" max=\"10000\" value=\"");
   page += String(cfg.trip_delay_ms);
@@ -1495,14 +2022,27 @@ String buildProtectionConfigPage() {
   page += F("\"><label><input type=\"checkbox\" id=\"trip_on_stale\"");
   page += cfg.trip_on_meter_stale ? F(" checked") : F("");
   page += F("> Trip on Meter Stale</label>");
-  page += F("<div class=\"actions\"><button onclick=\"saveProtectionConfig()\">Save Protection Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
-  page += F("<script>async function saveProtectionConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
-  page += F("relay_enabled:document.getElementById('relay_enabled').checked?'1':'0',current_limit:document.getElementById('current_limit').value,");
+  page += F("<div class=\"actions\"><button onclick=\"saveProtectionConfig()\">Save Protection Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
+
+  // JavaScript for saving config, live fetching, and toggling relays
+  page += F("<script>");
+  page += F("let isToggling=false;");
+  page += F("function applyRelayStates(d){if(!d||!d.ok)return;const st=[d.r1,d.r2,d.r3,d.r4];for(let i=1;i<=4;i++){const s=st[i-1];const sw=document.getElementById('r_sw_'+i);const bg=document.getElementById('st_badge_'+i);if(!sw||!bg)continue;if(s===1){sw.checked=true;bg.textContent='ON';bg.style.background='#d1fae5';bg.style.color='#065f46';}else if(s===2){sw.checked=false;bg.textContent='TRIP';bg.style.background='#fee2e2';bg.style.color='#991b1b';}else{sw.checked=false;bg.textContent='OFF';bg.style.background='#eef2f6';bg.style.color='#475467';}}}");
+  page += F("async function fetchRelayStates(){if(isToggling)return;try{const r=await fetch('/api/relay/state',{cache:'no-store'});const d=await r.json();applyRelayStates(d);}catch(e){}}");
+  page += F("async function toggleRelay(r,on){isToggling=true;const bg=document.getElementById('st_badge_'+r);if(bg){bg.textContent=on?'ON':'OFF';bg.style.background=on?'#d1fae5':'#eef2f6';bg.style.color=on?'#065f46':'#475467';}const act=on?'set':'reset';try{const res=await fetch('/api/relay/set',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'relay='+r+'&action='+act});const d=await res.json();applyRelayStates(d);}catch(e){fetchRelayStates();}finally{isToggling=false;}}");
+  page += F("async function toggleAllRelays(on){isToggling=true;for(let i=1;i<=4;i++){const sw=document.getElementById('r_sw_'+i);const bg=document.getElementById('st_badge_'+i);if(sw)sw.checked=on;if(bg){bg.textContent=on?'ON':'OFF';bg.style.background=on?'#d1fae5':'#eef2f6';bg.style.color=on?'#065f46':'#475467';}}const act=on?'set':'reset';try{const res=await fetch('/api/relay/set',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'relay=0&action='+act});const d=await res.json();applyRelayStates(d);}catch(e){fetchRelayStates();}finally{isToggling=false;}}");
+  page += F("setInterval(fetchRelayStates,3000);fetchRelayStates();");
+  page += F("async function saveProtectionConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
+  page += F("relay_enabled:document.getElementById('relay_enabled').checked?'1':'0',");
+  page += F("relay_pin_1:document.getElementById('relay_pin_1').value,relay_pin_2:document.getElementById('relay_pin_2').value,");
+  page += F("relay_pin_3:document.getElementById('relay_pin_3').value,relay_pin_4:document.getElementById('relay_pin_4').value,");
+  page += F("current_limit:document.getElementById('current_limit').value,");
   page += F("trip_delay:document.getElementById('trip_delay').value,reset_mode:document.getElementById('reset_mode').value,");
   page += F("auto_retry_enabled:document.getElementById('auto_retry_enabled').checked?'1':'0',auto_retry_delay:document.getElementById('auto_retry_delay').value,");
   page += F("trip_on_stale:document.getElementById('trip_on_stale').checked?'1':'0'});try{const r=await fetch('/api/protection/save',{method:'POST',");
   page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
-  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += F("catch(e){s.textContent='Save failed'}}");
+  page += F("</script>");
   page += buildPageFooter();
   return page;
 }
@@ -1562,7 +2102,7 @@ String buildHistoryConfigPage() {
 String buildSystemConfigPage() {
   const SystemConfig& cfg = currentSystemConfig;
   String page = buildPageHeader("System Configuration");
-  page.reserve(3500);
+  page.reserve(5500);
   page += F("<section class=\"panel\"><h2>System Settings</h2>");
   page += F("<label for=\"ntp_server1\">NTP Server 1</label><input id=\"ntp_server1\" maxlength=\"64\" placeholder=\"pool.ntp.org\" value=\"");
   page += htmlEscape(String(cfg.ntp_server1));
@@ -1571,12 +2111,42 @@ String buildSystemConfigPage() {
   page += F("\"><label><input type=\"checkbox\" id=\"debug_enabled\"");
   page += cfg.debug_enabled ? F(" checked") : F("");
   page += F("> Enable Debug Logging</label>");
-  page += F("<div class=\"actions\"><button onclick=\"saveSystemConfig()\">Save System Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<div class=\"actions\"><button onclick=\"saveSystemConfig()\">Save System Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
+
+  // Firmware Update (OTA) panel
+  page += F("<section class=\"panel\"><h2>Firmware Update (OTA)</h2>");
+  page += F("<label for=\"ota_file\">Select firmware (.bin) file</label>");
+  page += F("<input type=\"file\" id=\"ota_file\" accept=\".bin\" style=\"margin-bottom:15px; display:block; width:100%; border:1px solid #cbd5e1; padding:8px; border-radius:4px; background:#f8fafc; color:#1e293b;\">");
+  page += F("<div class=\"actions\"><button onclick=\"startOtaUpdate()\">Upload & Flash Firmware</button></div>");
+  page += F("<div id=\"ota_progress_container\" style=\"display:none; margin-top:15px; background:#e2e8f0; border-radius:4px; overflow:hidden; height:20px;\">");
+  page += F("<div id=\"ota_progress_bar\" style=\"background:#3b82f6; width:0%; height:100%; text-align:center; color:#fff; font-size:12px; line-height:20px; transition:width 0.2s;\">0%</div>");
+  page += F("</div><p id=\"otaState\" class=\"muted\">Ready.</p></section></main>");
+
   page += F("<script>async function saveSystemConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("ntp_server1:document.getElementById('ntp_server1').value,ntp_server2:document.getElementById('ntp_server2').value,");
   page += F("debug_enabled:document.getElementById('debug_enabled').checked?'1':'0'});try{const r=await fetch('/api/system/save',{method:'POST',");
   page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
-  page += F("catch(e){s.textContent='Save failed'}}</script>");
+  page += F("catch(e){s.textContent='Save failed'}}");
+
+  // OTA JS functions
+  page += F("function startOtaUpdate(){");
+  page += F("const fi=document.getElementById('ota_file');const s=document.getElementById('otaState');");
+  page += F("const c=document.getElementById('ota_progress_container');const b=document.getElementById('ota_progress_bar');");
+  page += F("if(fi.files.length===0){alert('Please select a firmware .bin file first!');return;}");
+  page += F("const file=fi.files[0];const fd=new FormData();fd.append('update',file);");
+  page += F("s.textContent='Uploading firmware...';c.style.display='block';b.style.width='0%';b.textContent='0%';b.style.background='#3b82f6';");
+  page += F("const xhr=new XMLHttpRequest();xhr.open('POST','/api/update',true);");
+  page += F("xhr.upload.onprogress=function(e){if(e.lengthComputable){const pct=Math.round((e.loaded/e.total)*100);b.style.width=pct+'%';b.textContent=pct+'%';}};");
+  page += F("xhr.onload=function(){if(xhr.status===200){const res=JSON.parse(xhr.responseText);if(res.ok){");
+  page += F("s.textContent='Update successful! Device is rebooting, please wait...';b.style.background='#10b981';");
+  page += F("setTimeout(()=>{document.body.insertAdjacentHTML('beforeend','<div style=\"position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(17,24,39,.86);color:#fff;font:600 18px/1.4 sans-serif;z-index:9999\">Rebooting after update...</div>');},1000);");
+  page += F("setTimeout(()=>{window.location.href='/';},8000);");
+  page += F("}else{s.textContent='Update failed: '+(res.error||'unknown');b.style.background='#ef4444';}}");
+  page += F("else{s.textContent='Upload failed with status '+xhr.status;b.style.background='#ef4444';}};");
+  page += F("xhr.onerror=function(){s.textContent='Upload error occurred!';b.style.background='#ef4444';};");
+  page += F("xhr.send(fd);}");
+  page += F("</script>");
+
   page += buildPageFooter();
   return page;
 }
@@ -1585,7 +2155,7 @@ String buildSystemConfigPage() {
 // CONFIG PAGE HANDLERS
 // ============================================================================
 bool requireConfigMode() {
-  if (currentMode == AppMode::Config || configApStarted || ethLinkUp) {
+  if (currentMode == AppMode::Config || configApStarted || ethLinkUp || webConfigUnlocked) {
     return true;
   }
 
@@ -1721,9 +2291,11 @@ void handleMqttConfigSaveApi() {
 void handleModbusConfigSaveApi() {
   ModbusConfig cfg = currentModbusConfig;
 
-  cfg.baudrate = configServer.hasArg("modbus_baudrate") ? configServer.arg("modbus_baudrate").toInt() : 19200;
-  cfg.slave_id = configServer.hasArg("modbus_slave_id") ? configServer.arg("modbus_slave_id").toInt() : 1;
-  cfg.parity = configServer.hasArg("modbus_parity") ? configServer.arg("modbus_parity").toInt() : 0;
+  cfg.baudrate = configServer.hasArg("modbus_baudrate") ? configServer.arg("modbus_baudrate").toInt() : 9600;
+  cfg.slave_id[0] = configServer.hasArg("modbus_slave_id_1") ? configServer.arg("modbus_slave_id_1").toInt() : 1;
+  cfg.slave_id[1] = configServer.hasArg("modbus_slave_id_2") ? configServer.arg("modbus_slave_id_2").toInt() : 2;
+  cfg.slave_id[2] = configServer.hasArg("modbus_slave_id_3") ? configServer.arg("modbus_slave_id_3").toInt() : 3;
+  cfg.parity = configServer.hasArg("modbus_parity") ? configServer.arg("modbus_parity").toInt() : 2;
   cfg.stop_bits = configServer.hasArg("modbus_stop_bits") ? configServer.arg("modbus_stop_bits").toInt() : 1;
   cfg.poll_interval_ms = configServer.hasArg("modbus_poll_interval") ? configServer.arg("modbus_poll_interval").toInt() : 1000;
   cfg.timeout_ms = configServer.hasArg("modbus_timeout") ? configServer.arg("modbus_timeout").toInt() : 1000;
@@ -1748,6 +2320,10 @@ void handleProtectionConfigSaveApi() {
   ProtectionConfig cfg = currentProtectionConfig;
 
   cfg.relay_enabled = configServer.hasArg("relay_enabled") && configServer.arg("relay_enabled") == "1";
+  cfg.relay_pin[0] = configServer.hasArg("relay_pin_1") ? configServer.arg("relay_pin_1").toInt() : 2;
+  cfg.relay_pin[1] = configServer.hasArg("relay_pin_2") ? configServer.arg("relay_pin_2").toInt() : 15;
+  cfg.relay_pin[2] = configServer.hasArg("relay_pin_3") ? configServer.arg("relay_pin_3").toInt() : 14;
+  cfg.relay_pin[3] = configServer.hasArg("relay_pin_4") ? configServer.arg("relay_pin_4").toInt() : 13;
   cfg.current_limit_a = configServer.hasArg("current_limit") ? configServer.arg("current_limit").toInt() : 16;
   cfg.trip_delay_ms = configServer.hasArg("trip_delay") ? configServer.arg("trip_delay").toInt() : 1000;
   cfg.reset_mode = configServer.hasArg("reset_mode") ? configServer.arg("reset_mode").toInt() : 0;
@@ -1758,8 +2334,15 @@ void handleProtectionConfigSaveApi() {
   bool ok = ConfigManager::saveProtectionConfig(cfg);
   if (ok) {
     currentProtectionConfig = cfg;
+    for (size_t r = 0; r < 4; r++) {
+      uint8_t pin = currentProtectionConfig.relay_pin[r];
+      pinMode(pin, OUTPUT);
+      setRelayOutput(r, relayState[r]);
+    }
     if (!currentProtectionConfig.relay_enabled) {
-      requestRelayState(false, "protection_disabled");
+      for (size_t r = 0; r < 4; r++) {
+        requestRelayState(r, 0, "protection_disabled");
+      }
     }
   }
   sendNoCacheHeader();
@@ -1802,7 +2385,9 @@ void handleHistoryConfigSaveApi() {
   bool ok = ConfigManager::saveHistoryConfig(cfg);
   if (ok) {
     currentHistoryConfig = cfg;
-    historyRuntime.loaded = false;
+    for (size_t m = 0; m < 3; m++) {
+      historyRuntime[m].loaded = false;
+    }
   }
   sendNoCacheHeader();
   if (ok) {
@@ -1840,21 +2425,29 @@ void handleSystemConfigSaveApi() {
 
 void handleRelayStateApi() {
   String body;
-  body.reserve(64);
+  body.reserve(128);
   body += F("{\"ok\":true,\"relay_enabled\":");
   body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
-  body += F(",\"relay_state\":\"");
-  body += relayActualState ? F("1") : F("0");
-  body += F("\",\"relay_requested\":\"");
-  body += relayRequestedState ? F("1") : F("0");
-  body += F("\",\"relay_locked\":");
-  body += relayLockedOut ? F("true") : F("false");
+  body += F(",\"r1\":"); body += String(relayState[0]);
+  body += F(",\"r2\":"); body += String(relayState[1]);
+  body += F(",\"r3\":"); body += String(relayState[2]);
+  body += F(",\"r4\":"); body += String(relayState[3]);
   body += F("}");
   sendNoCacheHeader();
   configServer.send(200, "application/json", body);
 }
 
 void handleRelaySetApi() {
+  size_t targetRelay = 0;
+  bool specifyRelay = false;
+  if (configServer.hasArg("relay")) {
+    targetRelay = configServer.arg("relay").toInt();
+    specifyRelay = true;
+  } else if (configServer.hasArg("r")) {
+    targetRelay = configServer.arg("r").toInt();
+    specifyRelay = true;
+  }
+
   String action;
   if (configServer.hasArg("action")) {
     action = configServer.arg("action");
@@ -1863,10 +2456,15 @@ void handleRelaySetApi() {
   }
   action.toLowerCase();
 
-  if (action.indexOf("set") >= 0 || action == "1" || action == "on" || action == "true") {
-    requestRelayState(true, "web");
+  uint8_t st = (action == "set" || action == "1" || action == "on" || action == "true") ? 1 : 0;
+
+  if (specifyRelay && targetRelay >= 1 && targetRelay <= 4) {
+    requestRelayState(targetRelay - 1, st, "web", true);
   } else {
-    requestRelayState(false, "web");
+    for (size_t r = 0; r < 4; r++) {
+      requestRelayState(r, st, "web", false);
+    }
+    publishMqttControlState();
   }
 
   handleRelayStateApi();
@@ -1912,18 +2510,20 @@ void handleStatusApi() {
   body += String(currentMqttConfig.port);
   body += F(",\"modbus_baudrate\":");
   body += String(currentModbusConfig.baudrate);
-  body += F(",\"modbus_slave_id\":");
-  body += String(currentModbusConfig.slave_id);
+  body += F(",\"modbus_slave_id_1\":");
+  body += String(currentModbusConfig.slave_id[0]);
+  body += F(",\"modbus_slave_id_2\":");
+  body += String(currentModbusConfig.slave_id[1]);
+  body += F(",\"modbus_slave_id_3\":");
+  body += String(currentModbusConfig.slave_id[2]);
   body += F(",\"modbus_profile\":");
   body += String(currentModbusConfig.meter_profile);
   body += F(",\"relay_enabled\":");
   body += currentProtectionConfig.relay_enabled ? F("true") : F("false");
-  body += F(",\"relay_state\":\"");
-  body += relayActualState ? F("1") : F("0");
-  body += F("\",\"relay_requested\":\"");
-  body += relayRequestedState ? F("1") : F("0");
-  body += F("\",\"relay_locked\":");
-  body += relayLockedOut ? F("true") : F("false");
+  body += F(",\"r1\":"); body += String(relayState[0]);
+  body += F(",\"r2\":"); body += String(relayState[1]);
+  body += F(",\"r3\":"); body += String(relayState[2]);
+  body += F(",\"r4\":"); body += String(relayState[3]);
   body += F(",\"display_enabled\":");
   body += currentDisplayConfig.enabled ? F("true") : F("false");
   body += F(",\"history_enabled\":");
@@ -1947,9 +2547,13 @@ void handleStatusApi() {
   body += F(",\"display_page\":");
   body += String(displayPage);
   body += F(",\"history_day_key\":\"");
-  body += formatDayKey(historyRuntime.dayKey);
-  body += F("\",\"energy_history\":");
-  body += buildEnergyHistoryJson();
+  body += formatDayKey(historyRuntime[0].dayKey);
+  body += F("\",\"energy_history\":[");
+  for (size_t m = 0; m < 3; m++) {
+    if (m > 0) body += F(",");
+    body += buildEnergyHistoryJson(m);
+  }
+  body += F("]");
   body += F(",\"sta_ip\":\"");
   body += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   body += F("\",\"eth_link\":");
@@ -1999,26 +2603,35 @@ void handleStatusApi() {
   body += F(",\"uptime_text\":\"");
   body += formatUptime(millis());
   body += F("\"");
-  body += F(",\"meter_online\":");
-  body += meterSnapshot.online ? F("true") : F("false");
-  body += F(",\"meter_valid\":");
-  body += meterSnapshot.valid ? F("true") : F("false");
-  body += F(",\"meter_voltage\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
-  body += F("\",\"meter_current\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
-  body += F("\",\"meter_power\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
-  body += F("\",\"meter_frequency\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
-  body += F("\",\"meter_pf\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
-  body += F("\",\"meter_energy\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
-  body += F("\",\"meter_last_poll_ms\":");
-  body += String(meterSnapshot.lastPollMs);
-  body += F(",\"meter_last_success_ms\":");
-  body += String(meterSnapshot.lastSuccessMs);
+  body += F(",\"meters\":[");
+  for (size_t m = 0; m < 3; m++) {
+    const MeterSnapshot& s = meterSnapshots[m];
+    if (m > 0) body += F(",");
+    body += F("{\"slave_id\":");
+    body += String(currentModbusConfig.slave_id[m]);
+    body += F(",\"online\":");
+    body += s.online ? F("true") : F("false");
+    body += F(",\"valid\":");
+    body += s.valid ? F("true") : F("false");
+    body += F(",\"voltage\":\"");
+    body += jsonEscape(formatFloatValue(s.voltage, 2, "V"));
+    body += F("\",\"current\":\"");
+    body += jsonEscape(formatFloatValue(s.current, 2, "A"));
+    body += F("\",\"power\":\"");
+    body += jsonEscape(formatFloatValue(s.power, 2, "kW"));
+    body += F("\",\"frequency\":\"");
+    body += jsonEscape(formatFloatValue(s.frequency, 2, "Hz"));
+    body += F("\",\"pf\":\"");
+    body += jsonEscape(formatFloatValue(s.pf, 2, ""));
+    body += F("\",\"energy\":\"");
+    body += jsonEscape(formatFloatValue(s.energy, 3, "kWh"));
+    body += F("\",\"last_poll_ms\":");
+    body += String(s.lastPollMs);
+    body += F(",\"last_success_ms\":");
+    body += String(s.lastSuccessMs);
+    body += F("}");
+  }
+  body += F("]");
   body += F(",\"relay_limit_a\":");
   body += String(currentProtectionConfig.current_limit_a);
   body += F(",\"relay_trip_delay_ms\":");
@@ -2036,28 +2649,36 @@ void handleMeterPage() {
 
 void handleMeterStatusApi() {
   String body;
-  body.reserve(256);
-  body += F("{\"online\":");
-  body += meterSnapshot.online ? F("true") : F("false");
-  body += F(",\"valid\":");
-  body += meterSnapshot.valid ? F("true") : F("false");
-  body += F(",\"voltage\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.voltage, 2, "V"));
-  body += F("\",\"current\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.current, 2, "A"));
-  body += F("\",\"power\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.power, 2, "kW"));
-  body += F("\",\"frequency\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.frequency, 2, "Hz"));
-  body += F("\",\"pf\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.pf, 2, ""));
-  body += F("\",\"energy\":\"");
-  body += jsonEscape(formatFloatValue(meterSnapshot.energy, 3, "kWh"));
-  body += F("\",\"last_poll_ms\":");
-  body += String(meterSnapshot.lastPollMs);
-  body += F(",\"last_success_ms\":");
-  body += String(meterSnapshot.lastSuccessMs);
-  body += F("}");
+  body.reserve(768);
+  body += F("{\"meters\":[");
+  for (size_t m = 0; m < 3; m++) {
+    const MeterSnapshot& s = meterSnapshots[m];
+    if (m > 0) body += F(",");
+    body += F("{\"slave_id\":");
+    body += String(currentModbusConfig.slave_id[m]);
+    body += F(",\"online\":");
+    body += s.online ? F("true") : F("false");
+    body += F(",\"valid\":");
+    body += s.valid ? F("true") : F("false");
+    body += F(",\"voltage\":\"");
+    body += jsonEscape(formatFloatValue(s.voltage, 2, "V"));
+    body += F("\",\"current\":\"");
+    body += jsonEscape(formatFloatValue(s.current, 2, "A"));
+    body += F("\",\"power\":\"");
+    body += jsonEscape(formatFloatValue(s.power, 2, "kW"));
+    body += F("\",\"frequency\":\"");
+    body += jsonEscape(formatFloatValue(s.frequency, 2, "Hz"));
+    body += F("\",\"pf\":\"");
+    body += jsonEscape(formatFloatValue(s.pf, 2, ""));
+    body += F("\",\"energy\":\"");
+    body += jsonEscape(formatFloatValue(s.energy, 3, "kWh"));
+    body += F("\",\"last_poll_ms\":");
+    body += String(s.lastPollMs);
+    body += F(",\"last_success_ms\":");
+    body += String(s.lastSuccessMs);
+    body += F("}");
+  }
+  body += F("]}");
 
   sendNoCacheHeader();
   configServer.send(200, "application/json", body);
@@ -2065,7 +2686,12 @@ void handleMeterStatusApi() {
 
 void handleWifiScanApi() {
   Serial.println("WiFi scan requested from setup UI");
-  const int count = WiFi.scanNetworks(false, true);
+  WiFi.mode(WIFI_AP_STA);
+  int count = WiFi.scanNetworks(false, false);
+  if (count < 0) {
+    delay(100);
+    count = WiFi.scanNetworks(false, false);
+  }
   String body;
   body.reserve(512 + (count > 0 ? count * 96 : 0));
   body += F("{\"ok\":true,\"count\":");
@@ -2096,17 +2722,38 @@ void handleWifiScanApi() {
 }
 
 void handleWifiSaveApi() {
-  if (!configServer.hasArg("ssid")) {
-    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}");
-    return;
+  String ssid = "";
+  String password = "";
+
+  if (configServer.hasArg("plain")) {
+    String plain = configServer.arg("plain");
+    int ssidIdx = plain.indexOf("\"ssid\"");
+    if (ssidIdx >= 0) {
+      int start = plain.indexOf('"', plain.indexOf(':', ssidIdx) + 1);
+      int end = plain.indexOf('"', start + 1);
+      if (start >= 0 && end > start) {
+        ssid = plain.substring(start + 1, end);
+      }
+    }
+    int passIdx = plain.indexOf("\"password\"");
+    if (passIdx >= 0) {
+      int start = plain.indexOf('"', plain.indexOf(':', passIdx) + 1);
+      int end = plain.indexOf('"', start + 1);
+      if (start >= 0 && end > start) {
+        password = plain.substring(start + 1, end);
+      }
+    }
   }
 
-  String ssid = configServer.arg("ssid");
-  String password = configServer.arg("password");
+  if (ssid.length() == 0 && configServer.hasArg("ssid")) {
+    ssid = configServer.arg("ssid");
+    password = configServer.hasArg("password") ? configServer.arg("password") : "";
+  }
+
   ssid.trim();
 
   if (ssid.length() == 0 || ssid.length() > 32) {
-    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_ssid\"}");
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"ssid_required\"}");
     return;
   }
 
@@ -2136,6 +2783,61 @@ void handleRebootApi() {
   sendNoCacheHeader();
   configServer.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
   Serial.println("Reboot requested from setup UI");
+}
+
+void handleUnlockApi() {
+  if (!configServer.hasArg("pin")) {
+    sendNoCacheHeader();
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"pin_required\"}");
+    return;
+  }
+  
+  String pin = configServer.arg("pin");
+  if (pin == "1234") {
+    webConfigUnlocked = true;
+    sendNoCacheHeader();
+    configServer.send(200, "application/json", "{\"ok\":true}");
+    Serial.println("Web UI config unlocked via PIN");
+  } else {
+    sendNoCacheHeader();
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"wrong_pin\"}");
+    Serial.println("Web UI config unlock attempt failed: invalid PIN");
+  }
+}
+
+void handleOtaResponse() {
+  if (!requireConfigMode()) return;
+  sendNoCacheHeader();
+  if (Update.hasError()) {
+    configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"update_failed\"}");
+  } else {
+    configServer.send(200, "application/json", "{\"ok\":true}");
+    rebootRequested = true;
+    rebootAtMs = millis() + 1000;
+  }
+}
+
+void handleOtaUpload() {
+  if (currentMode != AppMode::Config && !configApStarted && !ethLinkUp && !webConfigUnlocked) {
+    return;
+  }
+  HTTPUpload& upload = configServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("Update Start: %s\n", upload.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("Update Success: %u bytes\nRebooting...\n", upload.totalSize);
+    } else {
+      Update.printError(Serial);
+    }
+  }
 }
 
 void handleNotFound() {
@@ -2172,6 +2874,8 @@ void startConfigWebServer() {
   configServer.on("/api/relay/state", HTTP_GET, handleRelayStateApi);
   configServer.on("/api/relay/set", HTTP_POST, handleRelaySetApi);
   configServer.on("/api/reboot", HTTP_POST, handleRebootApi);
+  configServer.on("/api/unlock", HTTP_POST, handleUnlockApi);
+  configServer.on("/api/update", HTTP_POST, handleOtaResponse, handleOtaUpload);
   configServer.onNotFound(handleNotFound);
   configServer.begin();
 
@@ -2328,12 +3032,6 @@ void setup() {
   Serial.begin(kSerialBaud);
   delay(500);
 
-  pinMode(PinMap::kConfigButton, INPUT_PULLUP);
-  pinMode(PinMap::kBuiltinLed, OUTPUT);
-  pinMode(PinMap::kRelayOutput, OUTPUT);
-  setRelayOutput(false);
-  // setBuiltinLed(false);
-
   printBootBanner();
   printChipInfo();
   printButtonInfo();
@@ -2342,12 +3040,21 @@ void setup() {
   loadWifiConfig();
   currentModbusConfig = ConfigManager::loadModbusConfig();
   currentProtectionConfig = ConfigManager::loadProtectionConfig();
+
+  const uint8_t defPins[4] = {2, 15, 14, 13};
+  for (size_t r = 0; r < 4; r++) {
+    uint8_t pin = (currentProtectionConfig.relay_pin[r] == 0) ? defPins[r] : currentProtectionConfig.relay_pin[r];
+    pinMode(pin, OUTPUT);
+    setRelayOutput(r, 0);
+  }
   currentDisplayConfig = ConfigManager::loadDisplayConfig();
   currentHistoryConfig = ConfigManager::loadHistoryConfig();
   currentSystemConfig = ConfigManager::loadSystemConfig();
   currentModbusConfigLoaded = true;
   loadFeatureRuntime();
-  resetMeterSnapshot();
+  for (size_t m = 0; m < 3; m++) {
+    resetMeterSnapshot(meterSnapshots[m]);
+  }
   if (hasSavedWifi) {
     wifiConnecting = true;
     wifiConnectStartedMs = millis();

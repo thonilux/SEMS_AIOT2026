@@ -15,8 +15,8 @@ Ada **dua cara** mengontrol relay lewat MQTT. Boleh dipakai bersamaan — keduan
 
 ### 1.1 Kirim Perintah (Web/Backend → Device)
 
-| Fungsi | Topik MQTT | Aksi |
-| :--- | :--- | :--- |
+| Fungsi          | Topik MQTT                              | Aksi        |
+| :-------------- | :-------------------------------------- | :---------- |
 | Kontrol Relay 1 | `trofis/enms/nocola_1/control/switch_1` | **PUBLISH** |
 | Kontrol Relay 2 | `trofis/enms/nocola_1/control/switch_2` | **PUBLISH** |
 | Kontrol Relay 3 | `trofis/enms/nocola_1/control/switch_3` | **PUBLISH** |
@@ -24,15 +24,16 @@ Ada **dua cara** mengontrol relay lewat MQTT. Boleh dipakai bersamaan — keduan
 
 Payload **wajib tepat 1 karakter**:
 
-| Payload | Aksi |
-| :---: | :--- |
-| `1` | Relay ON |
-| `0` | Relay OFF |
+| Payload | Aksi                                                            |
+| :-----: | :-------------------------------------------------------------- |
+|   `1`   | Relay ON                                                        |
+|   `0`   | Relay OFF                                                       |
 | lainnya | Diabaikan (dicatat di serial log sebagai "non-boolean payload") |
 
 Device mencocokkan topik secara **exact match** — payload tidak diparsing sebagai teks bebas seperti pada topik `cmd`.
 
 Contoh:
+
 ```bash
 mosquitto_pub -h 128.199.206.166 -p 1883 -u labiot -P 'iotlabftuns2023' \
   -t 'trofis/enms/nocola_1/control/switch_1' -m "1" -q 1
@@ -40,8 +41,8 @@ mosquitto_pub -h 128.199.206.166 -p 1883 -u labiot -P 'iotlabftuns2023' \
 
 ### 1.2 Terima Feedback Status (Device → Web/Backend)
 
-| Fungsi | Topik MQTT | Aksi |
-| :--- | :--- | :--- |
+| Fungsi         | Topik MQTT                                    | Aksi          |
+| :------------- | :-------------------------------------------- | :------------ |
 | Status Relay 1 | `trofis/enms/nocola_1/control/switch_1/state` | **SUBSCRIBE** |
 | Status Relay 2 | `trofis/enms/nocola_1/control/switch_2/state` | **SUBSCRIBE** |
 | Status Relay 3 | `trofis/enms/nocola_1/control/switch_3/state` | **SUBSCRIBE** |
@@ -49,13 +50,14 @@ mosquitto_pub -h 128.199.206.166 -p 1883 -u labiot -P 'iotlabftuns2023' \
 
 Payload **1 karakter**, retained:
 
-| Payload | Arti |
-| :---: | :--- |
-| `0` | OFF |
-| `1` | ON |
-| `2` | TRIP (proteksi overcurrent/stale-meter aktif) |
+| Payload | Arti                                          |
+| :-----: | :-------------------------------------------- |
+|   `0`   | OFF                                           |
+|   `1`   | ON                                            |
+|   `2`   | TRIP (proteksi overcurrent/stale-meter aktif) |
 
 Contoh:
+
 ```bash
 mosquitto_sub -h 128.199.206.166 -p 1883 -u user_1 -P iotlabftuns2023 \
   -t "trofis/enms/nocola_1/control/switch_1/state"
@@ -67,33 +69,34 @@ mosquitto_sub -h 128.199.206.166 -p 1883 -u user_1 -P iotlabftuns2023 \
 
 ### 2.1 Kirim Perintah (Publish ke `trofis/enms/nocola_1/cmd`)
 
-Semua perintah *case-insensitive*, boleh string ringkas atau JSON.
+Semua perintah _case-insensitive_, boleh string ringkas atau JSON.
 
 **A. Kontrol channel individu**
 
 | Target Relay | Aksi | Payload (String) | Payload (JSON) |
-| :--- | :--- | :--- | :--- |
-| Relay 1 | ON | `R1=1` | `{"R1": 1}` |
-| Relay 1 | OFF | `R1=0` | `{"R1": 0}` |
-| Relay 2 | ON | `R2=1` | `{"R2": 1}` |
-| Relay 2 | OFF | `R2=0` | `{"R2": 0}` |
-| Relay 3 | ON | `R3=1` | `{"R3": 1}` |
-| Relay 3 | OFF | `R3=0` | `{"R3": 0}` |
-| Relay 4 | ON | `R4=1` | `{"R4": 1}` |
-| Relay 4 | OFF | `R4=0` | `{"R4": 0}` |
+| :----------- | :--- | :--------------- | :------------- |
+| Relay 1      | ON   | `R1=1`           | `{"R1": 1}`    |
+| Relay 1      | OFF  | `R1=0`           | `{"R1": 0}`    |
+| Relay 2      | ON   | `R2=1`           | `{"R2": 1}`    |
+| Relay 2      | OFF  | `R2=0`           | `{"R2": 0}`    |
+| Relay 3      | ON   | `R3=1`           | `{"R3": 1}`    |
+| Relay 3      | OFF  | `R3=0`           | `{"R3": 0}`    |
+| Relay 4      | ON   | `R4=1`           | `{"R4": 1}`    |
+| Relay 4      | OFF  | `R4=0`           | `{"R4": 0}`    |
 
 **B. Kontrol massal (bulk)**
 
-| Aksi | Payload (String) | Payload (JSON) |
-| :--- | :--- | :--- |
-| ALL ON | `SET_RELAY` | `{"action": "SET_RELAY"}` |
-| ALL OFF | `RESET_RELAY` | `{"action": "RESET_RELAY"}` |
+| Aksi    | Payload (String) | Payload (JSON)              |
+| :------ | :--------------- | :-------------------------- |
+| ALL ON  | `SET_RELAY`      | `{"action": "SET_RELAY"}`   |
+| ALL OFF | `RESET_RELAY`    | `{"action": "RESET_RELAY"}` |
 
 Ada juga alias legacy topik `trofis/enms/nocola_1/relay/set` yang menerima payload sama seperti `cmd`.
 
 ### 2.2 Terima Feedback (Subscribe ke `trofis/enms/nocola_1/control-state`)
 
 Payload JSON, dikirim setiap kali salah satu relay berubah status:
+
 ```json
 {
   "timestamp": "2026-08-05 01:44:00",
@@ -104,11 +107,11 @@ Payload JSON, dikirim setiap kali salah satu relay berubah status:
 }
 ```
 
-| Nilai (`int`) | Label | Deskripsi |
-| :---: | :--- | :--- |
-| `0` | OFF | Relay mati |
-| `1` | ON | Relay aktif |
-| `2` | TRIP | Proteksi overcurrent/stale-meter aktif, relay otomatis dimatikan |
+| Nilai (`int`) | Label | Deskripsi                                                        |
+| :-----------: | :---- | :--------------------------------------------------------------- |
+|      `0`      | OFF   | Relay mati                                                       |
+|      `1`      | ON    | Relay aktif                                                      |
+|      `2`      | TRIP  | Proteksi overcurrent/stale-meter aktif, relay otomatis dimatikan |
 
 ---
 
@@ -130,7 +133,7 @@ Device mempublikasikan **kedua** bentuk feedback (per-switch `.../state` di bagi
 Semua jalur perintah (baik `switch_N` maupun `cmd`) tunduk pada aturan proteksi yang sama di firmware:
 
 - **Relay Output System** harus **enabled** di halaman `/protection` — kalau tidak, semua perintah diabaikan dan relay dipaksa OFF.
-- Kalau relay sedang dalam status **TRIP** dan masih dalam jendela *auto-retry lockout*, perintah ON akan ditolak (dicatat di serial log sebagai "ON blocked") sampai lockout selesai atau kondisi aman kembali.
+- Kalau relay sedang dalam status **TRIP** dan masih dalam jendela _auto-retry lockout_, perintah ON akan ditolak (dicatat di serial log sebagai "ON blocked") sampai lockout selesai atau kondisi aman kembali.
 - Perintah OFF selalu diterima, kapan pun.
 
 ---
@@ -138,16 +141,16 @@ Semua jalur perintah (baik `switch_N` maupun `cmd`) tunduk pada aturan proteksi 
 ## 5. Contoh Snippet Implementasi (Node.js / MQTT Client)
 
 ```javascript
-const mqtt = require('mqtt');
-const client = mqtt.connect('mqtt://128.199.206.166:1883', {
-  username: 'labiot',
-  password: 'iotlabftuns2023',
+const mqtt = require("mqtt");
+const client = mqtt.connect("mqtt://128.199.206.166:1883", {
+  username: "labiot",
+  password: "iotlabftuns2023",
 });
 
-const PREFIX = 'trofis/enms/nocola_1';
+const PREFIX = "trofis/enms/nocola_1";
 
-client.on('connect', () => {
-  console.log('Connected to MQTT Broker');
+client.on("connect", () => {
+  console.log("Connected to MQTT Broker");
   // Subscribe ke feedback per-relay (rekomendasi)
   for (let i = 1; i <= 4; i++) {
     client.subscribe(`${PREFIX}/control/switch_${i}/state`);
@@ -157,13 +160,13 @@ client.on('connect', () => {
 // Kirim perintah ke satu relay (payload harus persis "1" atau "0")
 function controlRelay(relayIndex, turnOn) {
   const topic = `${PREFIX}/control/switch_${relayIndex}`;
-  const payload = turnOn ? '1' : '0';
+  const payload = turnOn ? "1" : "0";
   client.publish(topic, payload, { qos: 1 });
   console.log(`Command sent: ${topic} = ${payload}`);
 }
 
 // Terima feedback status
-client.on('message', (topic, message) => {
+client.on("message", (topic, message) => {
   const match = topic.match(/control\/switch_(\d)\/state$/);
   if (match) {
     const relayIndex = match[1];
@@ -178,4 +181,4 @@ client.on('message', (topic, message) => {
 
 ## 6. Catatan Penting: QoS
 
-Firmware ESP32 memakai library `PubSubClient`, yang **hanya mendukung QoS 0** — baik untuk `subscribe()` maupun `publish()`. Broker akan tetap menerima publish dari web dengan `-q 1`, tapi pengiriman ke device (dan publish balik dari device) selalu terjadi di QoS 0. Ini biasanya cukup andal di jaringan yang stabil, tapi bukan garansi *at-least-once delivery* end-to-end seperti QoS 1 sungguhan. Kalau garansi pengiriman jadi kebutuhan keras, ini butuh migrasi library MQTT di firmware (bukan sekadar ubah konfigurasi).
+Firmware ESP32 memakai library `PubSubClient`, yang **hanya mendukung QoS 0** — baik untuk `subscribe()` maupun `publish()`. Broker akan tetap menerima publish dari web dengan `-q 1`, tapi pengiriman ke device (dan publish balik dari device) selalu terjadi di QoS 0. Ini biasanya cukup andal di jaringan yang stabil, tapi bukan garansi _at-least-once delivery_ end-to-end seperti QoS 1 sungguhan. Kalau garansi pengiriman jadi kebutuhan keras, ini butuh migrasi library MQTT di firmware (bukan sekadar ubah konfigurasi).

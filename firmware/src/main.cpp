@@ -37,6 +37,10 @@ AppMode currentMode = AppMode::Normal;
 bool configApStarted = false;
 bool webConfigUnlocked = false;
 bool configWebStarted = false;
+// Send '0' over serial to silence periodic/routine logs (Modbus poll spam,
+// heartbeat, ETH link chatter); send '1' to turn them back on. Defaults ON
+// so nothing is hidden unless the user explicitly quiets it.
+bool verboseLog = true;
 bool rebootRequested = false;
 uint32_t rebootAtMs = 0;
 String savedWifiSsid;
@@ -163,6 +167,7 @@ void enterConfigMode();
 void startConfigAccessPoint(bool disconnectSta = true);
 bool isPinUsedByRelay(uint8_t pin);
 String mqttSwitchStateTopic(size_t index);
+String getConfigApSsid();
 
 bool isConfigButtonPressed() {
   const int rawState = digitalRead(PinMap::kConfigButton);
@@ -617,7 +622,12 @@ void publishMqttControlState() {
   for (size_t i = 0; i < 4; i++) {
     const String switchStateTopic = mqttSwitchStateTopic(i);
     const String statePayload = String(relayState[i]);
-    (*activeMqttClient).publish(switchStateTopic.c_str(), statePayload.c_str(), true);
+    const bool pubOk = (*activeMqttClient).publish(switchStateTopic.c_str(), statePayload.c_str(), true);
+    Serial.print("Published MQTT switch state: ");
+    Serial.print(switchStateTopic);
+    Serial.print(" = ");
+    Serial.print(statePayload);
+    Serial.println(pubOk ? " (ok)" : " (FAILED - broker rejected/write failed)");
   }
 }
 
@@ -1122,53 +1132,74 @@ void initDisplayRuntime() {
   Serial.println("LCD display ready");
 }
 
+// One relay's status as a short "Rn:STATE" token, e.g. "R1:ON", "R3:TRIP".
+String relayStatusToken(size_t index) {
+  char token[10];
+  snprintf(token, sizeof(token), "R%u:%s", static_cast<unsigned>(index + 1), buildRelayStateText(index).c_str());
+  return String(token);
+}
+
+// Dedicated setup-mode screen: shown instead of the normal page rotation
+// whenever the device is broadcasting its config AP, so the SSID/password/IP
+// needed to connect are readable directly off the device.
+void drawApInfoPage(U8G2* driver) {
+  driver->clearBuffer();
+  driver->setFont(u8g2_font_6x12_tf);
+
+  driver->drawStr(0, 12, "WiFi Setup Mode");
+  driver->drawStr(0, 28, getConfigApSsid().c_str());
+  char passLine[24];
+  snprintf(passLine, sizeof(passLine), "Pass: %s", kConfigApPassword);
+  driver->drawStr(0, 42, passLine);
+  driver->drawStr(0, 56, "192.168.4.1");
+
+  driver->sendBuffer();
+}
+
 void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
   driver->clearBuffer();
   driver->setFont(u8g2_font_6x12_tf);
 
-  const uint8_t page = pageIndex % 8;
+  const uint8_t page = pageIndex % 3;
 
-  if (page < 6) {
-    const size_t m = page / 2;
-    const MeterSnapshot& snapshot = meterSnapshots[m];
-    const uint8_t slaveId = currentModbusConfig.slave_id[m];
-    char header[20];
-    if (page % 2 == 0) {
-      snprintf(header, sizeof(header), "Meter %u (id %u)", static_cast<unsigned>(m + 1), slaveId);
-      driver->drawStr(0, 12, header);
-      driver->drawStr(0, 28, formatFloatValue(snapshot.voltage, 1, "V").c_str());
-      driver->drawStr(0, 42, formatFloatValue(snapshot.current, 1, "A").c_str());
-      driver->drawStr(0, 56, formatFloatValue(snapshot.power, 1, "kW").c_str());
-    } else {
-      snprintf(header, sizeof(header), "M%u Energy/Freq/PF", static_cast<unsigned>(m + 1));
-      driver->drawStr(0, 12, header);
-      driver->drawStr(0, 28, formatFloatValue(snapshot.energy, 3, "kWh").c_str());
-      driver->drawStr(0, 42, formatFloatValue(snapshot.frequency, 1, "Hz").c_str());
-      driver->drawStr(0, 56, formatFloatValue(snapshot.pf, 2, "PF").c_str());
+  if (page == 0) {
+    // Meter summary: device name + each meter's current kWh, or OFFLINE.
+    const char* devName = currentDeviceConfig.device_name[0] != '\0' ? currentDeviceConfig.device_name : "SEMS AIoT";
+    driver->drawStr(0, 12, devName);
+    for (size_t m = 0; m < 3; m++) {
+      const MeterSnapshot& snapshot = meterSnapshots[m];
+      char line[24];
+      if (snapshot.online) {
+        snprintf(line, sizeof(line), "M%u : %.2f kWh", static_cast<unsigned>(m + 1), snapshot.energy);
+      } else {
+        snprintf(line, sizeof(line), "M%u : OFFLINE", static_cast<unsigned>(m + 1));
+      }
+      driver->drawStr(0, 28 + static_cast<int>(m) * 14, line);
     }
-  } else if (page == 6) {
-    driver->drawStr(0, 12, "Network / MQTT");
-    // Show best available IP
+  } else if (page == 1) {
+    // Network status: IP, WiFi, MQTT — one fact per line.
+    driver->drawStr(0, 12, "NETWORK STATUS");
     String ipStr;
     if (ethLinkUp) {
-      ipStr = "ETH:" + Ethernet.localIP().toString();
+      ipStr = "IP: " + Ethernet.localIP().toString();
     } else if (wifiConnected) {
-      ipStr = "WiFi:" + WiFi.localIP().toString();
+      ipStr = "IP: " + WiFi.localIP().toString();
     } else if (configApStarted) {
-      ipStr = "AP:192.168.4.1";
+      ipStr = "IP: 192.168.4.1 (AP)";
     } else {
-      ipStr = "no network";
+      ipStr = "IP: -";
     }
     driver->drawStr(0, 28, ipStr.c_str());
-    String netStatus = String(wifiConnected ? "W+" : "W-") + " " + String(mqttConnected ? "MQTT+" : "MQTT-");
-    driver->drawStr(0, 42, netStatus.c_str());
-    driver->drawStr(0, 56, getMqttBaseTopic().c_str());
+    driver->drawStr(0, 42, wifiConnected ? "WiFi : Online" : "WiFi : Offline");
+    driver->drawStr(0, 56, mqttConnected ? "MQTT : Online" : "MQTT : Offline");
   } else {
-    driver->drawStr(0, 12, "Relay / Fault");
-    driver->drawStr(0, 28, buildRelayStateText().c_str());
-    bool anyTripped = (relayState[0] == 2 || relayState[1] == 2 || relayState[2] == 2 || relayState[3] == 2);
-    driver->drawStr(0, 42, anyTripped ? "trip active" : "ready");
-    driver->drawStr(0, 56, anyMeterOffline() ? "meter off" : "meter ok");
+    // Relay status: all 4 channels + overall meter health.
+    driver->drawStr(0, 12, "RELAY STATUS");
+    const String row1 = relayStatusToken(0) + "  " + relayStatusToken(1);
+    const String row2 = relayStatusToken(2) + "  " + relayStatusToken(3);
+    driver->drawStr(0, 28, row1.c_str());
+    driver->drawStr(0, 42, row2.c_str());
+    driver->drawStr(0, 56, anyMeterOffline() ? "Meter: OFFLINE" : "Meter: OK");
   }
 
   driver->sendBuffer();
@@ -1190,9 +1221,16 @@ void updateDisplayRuntime(uint32_t nowMs) {
   if (intervalMs > 0 && nowMs - displayLastUpdateMs < intervalMs) {
     return;
   }
-
   displayLastUpdateMs = nowMs;
-  displayPage = (displayPage + 1) % 8;
+
+  if (configApStarted) {
+    // Setup mode: show SSID/password/IP only, don't rotate through pages
+    // that have nothing useful to show while the device isn't on a network.
+    drawApInfoPage(&display);
+    return;
+  }
+
+  displayPage = (displayPage + 1) % 3;
   drawDisplayPage(&display, displayPage);
 }
 
@@ -1492,29 +1530,33 @@ void pollOneModbusMeter(MeterSnapshot& snapshot, uint8_t slaveId, uint32_t timeo
     snapshot.pf = snapshot.pf_avg;
     snapshot.energy = snapshot.kwh_total;
 
-    Serial.print("Modbus meter ok: slave=");
-    Serial.print(slaveId);
-    Serial.print(" V_A=");
-    Serial.print(snapshot.voltage, 1);
-    Serial.print(" I_A=");
-    Serial.print(snapshot.current, 3);
-    Serial.print(" P_tot=");
-    Serial.print(snapshot.power, 3);
-    Serial.print(" F=");
-    Serial.print(snapshot.frequency, 2);
-    Serial.print(" E=");
-    Serial.println(snapshot.energy, 2);
+    if (verboseLog) {
+      Serial.print("Modbus meter ok: slave=");
+      Serial.print(slaveId);
+      Serial.print(" V_A=");
+      Serial.print(snapshot.voltage, 1);
+      Serial.print(" I_A=");
+      Serial.print(snapshot.current, 3);
+      Serial.print(" P_tot=");
+      Serial.print(snapshot.power, 3);
+      Serial.print(" F=");
+      Serial.print(snapshot.frequency, 2);
+      Serial.print(" E=");
+      Serial.println(snapshot.energy, 2);
+    }
   } else {
     snapshot.lastErrorMs = nowMs;
     snapshot.lastErrorCode = 1;
     snapshot.online = false;
     snapshot.valid = false;
-    Serial.print("Modbus meter read failed: slave=");
-    Serial.print(slaveId);
-    Serial.print(" ok1=");
-    Serial.print(ok1 ? "true" : "false");
-    Serial.print(", ok2=");
-    Serial.println(ok2 ? "true" : "false");
+    if (verboseLog) {
+      Serial.print("Modbus meter read failed: slave=");
+      Serial.print(slaveId);
+      Serial.print(" ok1=");
+      Serial.print(ok1 ? "true" : "false");
+      Serial.print(", ok2=");
+      Serial.println(ok2 ? "true" : "false");
+    }
   }
 }
 
@@ -3012,7 +3054,7 @@ void updateEthernetRuntime(uint32_t nowMs) {
   }
 
   if (!ethLinkUp) {
-    Serial.println("ETH: link up, requesting DHCP...");
+    if (verboseLog) Serial.println("ETH: link up, requesting DHCP...");
     if (Ethernet.begin(nullptr, 8000) != 0) {
       ethLinkUp = true;
       ethConfigured = true;
@@ -3067,8 +3109,22 @@ void setup() {
   printModeInfo();
 }
 
+void handleVerboseLogSerialInput() {
+  while (Serial.available() > 0) {
+    const int c = Serial.read();
+    if (c == '0') {
+      verboseLog = false;
+      Serial.println("Verbose log OFF (routine Modbus/heartbeat/ETH logs silenced; send '1' to re-enable)");
+    } else if (c == '1') {
+      verboseLog = true;
+      Serial.println("Verbose log ON");
+    }
+  }
+}
+
 void loop() {
   const uint32_t nowMs = millis();
+  handleVerboseLogSerialInput();
   updateStatusLed(nowMs);
   updateEthernetRuntime(nowMs);
   handleWiFiLifecycle(nowMs);
@@ -3090,17 +3146,19 @@ void loop() {
     lastHeartbeatMs = nowMs;
     heartbeatCount++;
 
-    Serial.print("heartbeat=");
-    Serial.print(heartbeatCount);
-    Serial.print(" uptime_ms=");
-    Serial.print(nowMs);
-    Serial.print(" free_heap=");
-    Serial.print(ESP.getFreeHeap());
-    Serial.print(" mode=");
-    Serial.print(appModeToString(currentMode));
-    Serial.print(" wifi=");
-    Serial.print(wifiStatusToString(WiFi.status()));
-    Serial.print(" rtc=");
-    Serial.println(getRtcString());
+    if (verboseLog) {
+      Serial.print("heartbeat=");
+      Serial.print(heartbeatCount);
+      Serial.print(" uptime_ms=");
+      Serial.print(nowMs);
+      Serial.print(" free_heap=");
+      Serial.print(ESP.getFreeHeap());
+      Serial.print(" mode=");
+      Serial.print(appModeToString(currentMode));
+      Serial.print(" wifi=");
+      Serial.print(wifiStatusToString(WiFi.status()));
+      Serial.print(" rtc=");
+      Serial.println(getRtcString());
+    }
   }
 }

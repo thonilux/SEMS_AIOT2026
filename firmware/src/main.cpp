@@ -63,10 +63,34 @@ SystemConfig currentSystemConfig;
 bool currentModbusConfigLoaded = false;
 bool modbusPortReady = false;
 uint32_t lastModbusPollMs = 0;
+
+// ===== /configmod UART test-mode (hidden Modbus scan/mapping tool) =====
+// Serial2 is single-owner: while a test-mode scan session is active,
+// production polling (pollModbusMeter) is paused entirely so the two never
+// fight over the UART. An idle timeout auto-restores production settings if
+// an operator forgets to click "Restore Normal" (or the tab/network drops).
+bool modbusTestModeActive = false;
+uint32_t modbusTestModeLastActivityMs = 0;
+constexpr uint32_t kModbusTestModeIdleTimeoutMs = 5UL * 60UL * 1000UL;  // 5 minutes
+ModbusConfig modbusTestModeConfig;  // last-applied test UART params, not persisted
+bool modMapCacheDirty = true;       // set by /api/modmap/save so the Custom Mapping poll path picks up changes without reboot
+ModbusMapConfig cachedModMapConfig;
+bool modMapCacheLoaded = false;
 bool mqttConnected = false;
 bool mqttClientConfigured = false;
 uint32_t mqttLastReconnectAttemptMs = 0;
 uint32_t mqttLastPublishMs = 0;
+// /mqtt "Push Test Data" diagnostic — a manual publish to <base>/test that
+// the device also subscribes to, so a successful round-trip (publish ok +
+// echo received back) proves both directions work, not just that connect()
+// succeeded. Distinguishes "broker unreachable" from "connected but this
+// client isn't allowed to subscribe" (the nocola_2 symptom this exists for).
+bool mqttTestPublishOk = false;
+uint32_t mqttTestPublishMs = 0;
+String mqttTestPublishPayload;
+uint32_t mqttTestEchoMs = 0;
+String mqttTestEchoPayload;
+uint32_t mqttTestSeq = 0;
 WiFiClient mqttWifiTransport;
 // mqttEthTransport declared below after EthernetClient is available
 PubSubClient mqttWifiClient(mqttWifiTransport);
@@ -821,6 +845,32 @@ String mqttSwitchStateTopic(size_t index) {
   return mqttSwitchTopic(index) + "/state";
 }
 
+// Diagnostic loopback topic for the /mqtt "Push Test Data" button — see
+// mqttTestPublishOk et al. above.
+String mqttTestTopic() {
+  return getMqttBaseTopic() + "/test";
+}
+
+// PubSubClient::state() codes, per the library's own docs — surfaced in the
+// /mqtt diagnostics panel so a failure can be told apart (bad credentials vs.
+// broker unreachable vs. duplicate client ID kicking the connection) without
+// needing serial console access.
+const __FlashStringHelper* mqttStateToString(int state) {
+  switch (state) {
+    case -4: return F("MQTT_CONNECTION_TIMEOUT");
+    case -3: return F("MQTT_CONNECTION_LOST");
+    case -2: return F("MQTT_CONNECT_FAILED (broker unreachable)");
+    case -1: return F("MQTT_DISCONNECTED");
+    case 0:  return F("MQTT_CONNECTED");
+    case 1:  return F("MQTT_CONNECT_BAD_PROTOCOL");
+    case 2:  return F("MQTT_CONNECT_BAD_CLIENT_ID (duplicate Client ID?)");
+    case 3:  return F("MQTT_CONNECT_UNAVAILABLE");
+    case 4:  return F("MQTT_CONNECT_BAD_CREDENTIALS");
+    case 5:  return F("MQTT_CONNECT_UNAUTHORIZED (broker ACL denies this client)");
+    default: return F("UNKNOWN");
+  }
+}
+
 void publishMqttState();
 
 void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
@@ -836,6 +886,12 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print(incomingTopic);
   Serial.print(" -> ");
   Serial.println(message);
+
+  if (incomingTopic == mqttTestTopic()) {
+    mqttTestEchoPayload = message;
+    mqttTestEchoMs = millis();
+    return;
+  }
 
   // Per-relay boolean switch topics: trofis/enms/<device>/control/switch_N,
   // payload is a bare "0" or "1". Matched by exact topic, not by payload
@@ -974,6 +1030,13 @@ bool connectMqtt(uint32_t nowMs) {
     Serial.print(switchTopic);
     Serial.println(subSwitchOk ? " (ok)" : " (FAILED)");
   }
+
+  const String testTopic = mqttTestTopic();
+  const bool subTestOk = (*activeMqttClient).subscribe(testTopic.c_str());
+  Serial.print("MQTT subscribed: ");
+  Serial.print(testTopic);
+  Serial.println(subTestOk ? " (ok)" : " (FAILED)");
+
   publishMqttState();
   publishMqttControlState();
   return true;
@@ -1316,6 +1379,47 @@ void applyModbusPortConfig(const ModbusConfig& cfg) {
   currentModbusConfig = cfg;
 }
 
+// Temporarily reinitializes Serial2 with scan parameters from /configmod,
+// without touching the persisted/active ModbusConfig used by production
+// polling. pollModbusMeter() checks modbusTestModeActive and skips entirely
+// while this is in effect, so the two never contend for Serial2.
+void applyModbusTestModeConfig(uint32_t baudrate, uint8_t parity, uint8_t stopBits, uint16_t timeoutMs) {
+  Serial2.end();
+  delay(20);
+
+  ModbusConfig tmp = currentModbusConfig;
+  tmp.baudrate = baudrate;
+  tmp.parity = parity;
+  tmp.stop_bits = stopBits;
+  tmp.timeout_ms = timeoutMs;
+
+  Serial2.begin(baudrate, serialConfigFromModbus(tmp), PinMap::kRs485Rx, PinMap::kRs485Tx);
+  Serial2.setTimeout(timeoutMs);
+
+  modbusTestModeConfig = tmp;
+  modbusTestModeActive = true;
+  modbusTestModeLastActivityMs = millis();
+
+  Serial.print("Modbus TEST mode applied: baud=");
+  Serial.print(baudrate);
+  Serial.print(" parity=");
+  Serial.print(parity);
+  Serial.print(" stop_bits=");
+  Serial.println(stopBits);
+}
+
+// Ends the test-mode session and forces the next pollModbusMeter() call to
+// fully re-init Serial2 back to the active production ModbusConfig (via
+// applyModbusPortConfig's needsInit branch) — no duplicated init logic here.
+void restoreModbusNormalMode() {
+  if (!modbusTestModeActive) return;
+  Serial2.end();
+  delay(20);
+  modbusPortReady = false;
+  modbusTestModeActive = false;
+  Serial.println("Modbus test mode: restored to production UART settings");
+}
+
 // Keeps the web UI and MQTT responsive during Modbus blocking waits: relay
 // on/off requests must not be stuck behind a slow/timed-out RS485 read.
 void serviceDuringModbusWait() {
@@ -1335,7 +1439,11 @@ void delayServicing(uint32_t ms) {
   } while (millis() < until);
 }
 
-bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
+// Generalized register read shared by production polling and the /configmod
+// scan tool. functionCode is 0x03 (Holding Register) or 0x04 (Input
+// Register) — both share the exact same request/response frame shape
+// ("byte count + N*2 register bytes"), only the function byte differs.
+bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
   exceptionCode = 0;
   if (quantity == 0 || quantity > 64 || response == nullptr || responseLen < quantity * 2) {
     return false;
@@ -1343,7 +1451,7 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
 
   uint8_t request[8];
   request[0] = slaveId;
-  request[1] = 0x03;
+  request[1] = functionCode;
   request[2] = static_cast<uint8_t>(startRegister >> 8);
   request[3] = static_cast<uint8_t>(startRegister & 0xFF);
   request[4] = static_cast<uint8_t>(quantity >> 8);
@@ -1425,6 +1533,12 @@ bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_
   return expectedCrc == receivedCrc;
 }
 
+// Thin wrapper kept for the existing production call sites (pollOneModbusMeter,
+// readSchneiderFloat) — signature unchanged, always function code 0x03.
+bool modbusReadHoldingRegisters(uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
+  return modbusReadRegisters(0x03, slaveId, startRegister, quantity, response, responseLen, exceptionCode, timeoutMs);
+}
+
 float decodeFloat32BigEndian(const uint8_t* data) {
   const uint32_t bits = (static_cast<uint32_t>(data[0]) << 24) |
                         (static_cast<uint32_t>(data[1]) << 16) |
@@ -1433,6 +1547,42 @@ float decodeFloat32BigEndian(const uint8_t* data) {
   float value;
   memcpy(&value, &bits, sizeof(value));
   return value;
+}
+
+// Datatype: 0=UInt16, 1=Int16, 2=UInt32, 3=Int32, 4=Float32.
+// Register count needed to hold a given datatype.
+uint16_t modbusDataTypeQuantity(uint8_t datatype) {
+  return (datatype == 0 || datatype == 1) ? 1 : 2;
+}
+
+// Shared decode logic used by both the /configmod scan-read endpoint and the
+// "Custom Mapping" meter profile poll path. buf must hold at least
+// modbusDataTypeQuantity(datatype)*2 bytes, big-endian (matches the raw
+// int32 decode already used by pollOneModbusMeter's readVal1/readVal2).
+float decodeModbusValue(uint8_t datatype, const uint8_t* buf, float scale) {
+  switch (datatype) {
+    case 0: {  // UInt16
+      const uint16_t raw = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
+      return raw * scale;
+    }
+    case 1: {  // Int16
+      const int16_t raw = static_cast<int16_t>((static_cast<uint16_t>(buf[0]) << 8) | buf[1]);
+      return raw * scale;
+    }
+    case 2: {  // UInt32
+      const uint32_t raw = (static_cast<uint32_t>(buf[0]) << 24) | (static_cast<uint32_t>(buf[1]) << 16) |
+                            (static_cast<uint32_t>(buf[2]) << 8) | static_cast<uint32_t>(buf[3]);
+      return static_cast<float>(raw) * scale;
+    }
+    case 3: {  // Int32
+      const int32_t raw = (static_cast<int32_t>(buf[0]) << 24) | (static_cast<int32_t>(buf[1]) << 16) |
+                           (static_cast<int32_t>(buf[2]) << 8) | static_cast<int32_t>(buf[3]);
+      return static_cast<float>(raw) * scale;
+    }
+    case 4:  // Float32
+    default:
+      return decodeFloat32BigEndian(buf) * scale;
+  }
 }
 
 bool readSchneiderFloat(uint8_t slaveId, uint16_t startRegister, float& value, uint32_t timeoutMs) {
@@ -1446,7 +1596,109 @@ bool readSchneiderFloat(uint8_t slaveId, uint16_t startRegister, float& value, u
   return true;
 }
 
+void ensureModMapCacheLoaded() {
+  if (!modMapCacheLoaded || modMapCacheDirty) {
+    cachedModMapConfig = ConfigManager::loadModbusMapConfig();
+    modMapCacheLoaded = true;
+    modMapCacheDirty = false;
+  }
+}
+
+// Maps a saved mapping entry's field_key (the fixed dot-path set offered in
+// /configmod's "Field Name" dropdown) onto the matching MeterSnapshot field.
+// Custom/unrecognized keys are silently ignored here — they remain saved in
+// the mapping for future use but have no effect on the MQTT payload, since
+// MeterSnapshot only has these fixed fields.
+void applyMapEntryToSnapshot(const char* fieldKey, float value, MeterSnapshot& snapshot) {
+  if (strcmp(fieldKey, "voltage.ua") == 0) snapshot.ua = value;
+  else if (strcmp(fieldKey, "voltage.ub") == 0) snapshot.ub = value;
+  else if (strcmp(fieldKey, "voltage.uc") == 0) snapshot.uc = value;
+  else if (strcmp(fieldKey, "voltage.uab") == 0) snapshot.uab = value;
+  else if (strcmp(fieldKey, "voltage.ubc") == 0) snapshot.ubc = value;
+  else if (strcmp(fieldKey, "voltage.uca") == 0) snapshot.uca = value;
+  else if (strcmp(fieldKey, "current.ia") == 0) snapshot.ia = value;
+  else if (strcmp(fieldKey, "current.ib") == 0) snapshot.ib = value;
+  else if (strcmp(fieldKey, "current.ic") == 0) snapshot.ic = value;
+  else if (strcmp(fieldKey, "power.active.pa") == 0) snapshot.pa = value;
+  else if (strcmp(fieldKey, "power.active.pb") == 0) snapshot.pb = value;
+  else if (strcmp(fieldKey, "power.active.pc") == 0) snapshot.pc = value;
+  else if (strcmp(fieldKey, "power.active.total") == 0) snapshot.p_total = value;
+  else if (strcmp(fieldKey, "power.reactive.qa") == 0) snapshot.qa = value;
+  else if (strcmp(fieldKey, "power.reactive.qb") == 0) snapshot.qb = value;
+  else if (strcmp(fieldKey, "power.reactive.qc") == 0) snapshot.qc = value;
+  else if (strcmp(fieldKey, "power.reactive.total") == 0) snapshot.q_total = value;
+  else if (strcmp(fieldKey, "power.apparent.sa") == 0) snapshot.sa = value;
+  else if (strcmp(fieldKey, "power.apparent.sb") == 0) snapshot.sb = value;
+  else if (strcmp(fieldKey, "power.apparent.sc") == 0) snapshot.sc = value;
+  else if (strcmp(fieldKey, "power.apparent.total") == 0) snapshot.s_total = value;
+  else if (strcmp(fieldKey, "power_factor.pf1") == 0) snapshot.pf1 = value;
+  else if (strcmp(fieldKey, "power_factor.pf2") == 0) snapshot.pf2 = value;
+  else if (strcmp(fieldKey, "power_factor.pf3") == 0) snapshot.pf3 = value;
+  else if (strcmp(fieldKey, "power_factor.avg") == 0) snapshot.pf_avg = value;
+  else if (strcmp(fieldKey, "frequency") == 0) snapshot.frequency = value;
+  else if (strcmp(fieldKey, "energy.kwh_total") == 0) snapshot.kwh_total = value;
+}
+
+// Custom Mapping profile (meter_profile == 2): reads each saved mapping
+// entry for this slave individually (one register round-trip per entry,
+// rather than the two big batched block-reads used by the hardcoded Renatta
+// AX9L profile) and fills MeterSnapshot from the decoded values, so the
+// existing elc_data/elc_wh MQTT payloads are populated the same way as
+// before — no separate topic needed.
+void pollOneModbusMeterCustomMapping(MeterSnapshot& snapshot, uint8_t slaveId, uint32_t timeoutMs, uint32_t nowMs) {
+  snapshot.lastPollMs = nowMs;
+  snapshot.online = false;
+  snapshot.valid = false;
+
+  ensureModMapCacheLoaded();
+
+  bool anyOk = false;
+  bool anyEntryForSlave = false;
+  uint8_t buf[4];
+
+  for (uint8_t i = 0; i < cachedModMapConfig.count; i++) {
+    const ModbusMapEntry& entry = cachedModMapConfig.entries[i];
+    if (entry.slave_id != slaveId) continue;
+    anyEntryForSlave = true;
+
+    const uint16_t quantity = modbusDataTypeQuantity(entry.datatype);
+    uint16_t exceptionCode = 0;
+    const bool ok = modbusReadRegisters(entry.function, slaveId, entry.address, quantity, buf, sizeof(buf), exceptionCode, timeoutMs);
+    if (ok) {
+      const float value = decodeModbusValue(entry.datatype, buf, entry.scale);
+      applyMapEntryToSnapshot(entry.field_key, value, snapshot);
+      anyOk = true;
+    }
+    delayServicing(20);  // brief RS485 bus settling between individual reads
+  }
+
+  if (!anyEntryForSlave) {
+    snapshot.lastErrorMs = nowMs;
+    snapshot.lastErrorCode = 2;  // no mapping saved for this slave
+    return;
+  }
+
+  if (anyOk) {
+    snapshot.online = true;
+    snapshot.valid = true;
+    snapshot.lastSuccessMs = nowMs;
+    snapshot.voltage = snapshot.ua;
+    snapshot.current = snapshot.ia;
+    snapshot.power = isnan(snapshot.p_total) ? NAN : snapshot.p_total / 1000.0f;
+    snapshot.pf = snapshot.pf_avg;
+    snapshot.energy = snapshot.kwh_total;
+  } else {
+    snapshot.lastErrorMs = nowMs;
+    snapshot.lastErrorCode = 1;
+  }
+}
+
 void pollOneModbusMeter(MeterSnapshot& snapshot, uint8_t slaveId, uint32_t timeoutMs, uint32_t nowMs) {
+  if (currentModbusConfig.meter_profile == 2) {
+    pollOneModbusMeterCustomMapping(snapshot, slaveId, timeoutMs, nowMs);
+    return;
+  }
+
   snapshot.lastPollMs = nowMs;
   snapshot.online = false;
   snapshot.valid = false;
@@ -1572,6 +1824,14 @@ void pollModbusMeter(uint32_t nowMs) {
     for (size_t m = 0; m < 3; m++) {
       resetMeterSnapshot(meterSnapshots[m]);
     }
+    modbusPollStep = 0;
+    return;
+  }
+
+  if (modbusTestModeActive) {
+    // A /configmod test-mode session owns Serial2 exclusively; skip
+    // production polling entirely rather than corrupting in-flight reads
+    // on both sides.
     modbusPollStep = 0;
     return;
   }
@@ -1924,7 +2184,15 @@ String buildMqttConfigPage() {
     page += htmlEscape(getMqttBaseTopic() + "/elc_wh/slave_" + String(slaveId));
     page += F("</code></li>");
   }
-  page += F("</ul></div></section></main>");
+  page += F("</ul></div></section>");
+
+  page += F("<section class=\"panel\"><h2>Connection &amp; Push Test</h2>");
+  page += F("<p class=\"muted\">Diagnoses whether this device can only publish, or also subscribe — the broker may accept a connection but still deny that client's subscriptions (e.g. duplicate Client ID, or an ACL restriction), which looks identical to \"can't connect\" from the outside.</p>");
+  page += F("<p>Connected: <strong id=\"mt_connected\">checking...</strong> &nbsp; Broker RC: <span id=\"mt_rc\">-</span> &nbsp; Transport: <span id=\"mt_transport\">-</span></p>");
+  page += F("<p class=\"muted\">Client ID: <code id=\"mt_clientid\">-</code> &nbsp; Test Topic: <code id=\"mt_topic\">-</code></p>");
+  page += F("<div class=\"actions\"><button onclick=\"pushMqttTest()\">Push Test Data</button></div>");
+  page += F("<p id=\"mt_result\" class=\"muted\">Ready.</p></section></main>");
+
   page += F("<script>async function saveMqttConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("mqtt_enabled:document.getElementById('mqtt_enabled').checked?'1':'0',");
   page += F("mqtt_host:document.getElementById('mqtt_host').value,mqtt_port:document.getElementById('mqtt_port').value,");
@@ -1933,12 +2201,71 @@ String buildMqttConfigPage() {
   page += F("mqtt_publish_interval:document.getElementById('mqtt_publish_interval').value});try{const r=await fetch('/api/mqtt/save',{method:'POST',");
   page += F("headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}");
   page += F("catch(e){s.textContent='Save failed'}}</script>");
+
+  page += F(R"MQTTTESTJS(<script>
+let mtPollTimer = null;
+
+function mtApplyStatus(d) {
+  document.getElementById('mt_connected').textContent = d.mqtt_connected ? 'YES' : 'NO';
+  document.getElementById('mt_rc').textContent = d.rc + ' (' + d.rc_text + ')';
+  document.getElementById('mt_transport').textContent = d.transport;
+  document.getElementById('mt_clientid').textContent = d.client_id;
+  document.getElementById('mt_topic').textContent = d.test_topic;
+  return d;
+}
+
+async function refreshMqttTestStatus() {
+  try {
+    const r = await fetch('/api/mqtt/test_status', { cache: 'no-store' });
+    return mtApplyStatus(await r.json());
+  } catch (e) {
+    document.getElementById('mt_connected').textContent = 'unknown';
+    return null;
+  }
+}
+
+// After a push, the echo only arrives if the broker lets this client
+// subscribe to the test topic — poll briefly for it instead of assuming a
+// successful publish means a working round-trip.
+async function pushMqttTest() {
+  if (mtPollTimer) { clearInterval(mtPollTimer); mtPollTimer = null; }
+  const r0 = document.getElementById('mt_result');
+  r0.textContent = 'Publishing...';
+  try {
+    const pr = await fetch('/api/mqtt/test_publish', { method: 'POST' });
+    const pd = await pr.json();
+    if (!pd.ok) {
+      r0.textContent = pd.error === 'not_connected' ? 'Not connected to broker — cannot push.' : ('Publish failed (rc ' + pd.rc + ').');
+      refreshMqttTestStatus();
+      return;
+    }
+    r0.textContent = 'Published to ' + pd.topic + '. Waiting for echo (confirms subscribe works)...';
+  } catch (e) { r0.textContent = 'Publish request failed.'; return; }
+
+  let attempts = 0;
+  mtPollTimer = setInterval(async () => {
+    attempts++;
+    const d = await refreshMqttTestStatus();
+    if (d && d.round_trip_ok) {
+      clearInterval(mtPollTimer); mtPollTimer = null;
+      r0.textContent = 'Round-trip confirmed — publish and subscribe both work (echo received ' + d.echo_ms_ago + ' ms after push).';
+    } else if (attempts >= 8) {
+      clearInterval(mtPollTimer); mtPollTimer = null;
+      r0.textContent = 'Publish succeeded but no echo came back within ' + (attempts) + 's — this device likely cannot subscribe on this broker (check Client ID collision or broker ACL).';
+    }
+  }, 1000);
+}
+
+refreshMqttTestStatus();
+setInterval(refreshMqttTestStatus, 5000);
+</script>)MQTTTESTJS");
   page += buildPageFooter();
   return page;
 }
 
 String buildModbusConfigPage() {
   const ModbusConfig& cfg = currentModbusConfig;
+  const ModbusMapConfig modMapCfg = ConfigManager::loadModbusMapConfig();  // just for its (short) name label below
   String page = buildPageHeader("Modbus Configuration");
   page.reserve(4500);
   page += F("<section class=\"panel\"><h2>Modbus RTU Settings</h2>");
@@ -1980,7 +2307,15 @@ String buildModbusConfigPage() {
   page += cfg.meter_profile == 0 ? F(" selected") : F("");
   page += F(">Renatta AX9L</option><option value=\"1\"");
   page += cfg.meter_profile == 1 ? F(" selected") : F("");
-  page += F(">Generic float32</option></select>");
+  page += F(">Generic float32</option><option value=\"2\"");
+  page += cfg.meter_profile == 2 ? F(" selected") : F("");
+  page += F(">Custom Mapping");
+  if (strlen(modMapCfg.name) > 0) {
+    page += F(" (");
+    page += htmlEscape(modMapCfg.name);
+    page += F(")");
+  }
+  page += F("</option></select>");
   page += F("<div class=\"actions\"><button onclick=\"saveModbusConfig()\">Save Modbus Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section></main>");
   page += F("<script>async function saveModbusConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("modbus_baudrate:document.getElementById('modbus_baudrate').value,modbus_slave_id_1:document.getElementById('modbus_slave_id_1').value,");
@@ -1990,6 +2325,396 @@ String buildModbusConfigPage() {
   page += F("modbus_retry_count:document.getElementById('modbus_retry_count').value,modbus_profile:document.getElementById('modbus_profile').value});");
   page += F("try{const r=await fetch('/api/modbus/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});");
   page += F("const d=await r.json();s.textContent=d.ok?'Saved successfully':'Save failed'}catch(e){s.textContent='Save failed'}}</script>");
+  page += buildPageFooter();
+  return page;
+}
+
+// ============================================================================
+// /configmod — hidden Modbus register scan & mapping tool
+// ============================================================================
+// Never linked from <nav> anywhere (see buildPageHeader in WebUiPages.inc) —
+// reachable only by typing the URL directly. Still gated by
+// requireConfigMode() (PIN-unlock flow), same as every other config page.
+String buildModConfigPage() {
+  String page = buildPageHeader("Modbus Register Mapping");
+  page.reserve(9000);
+  page += F("<section class=\"panel\"><h2>UART Test Mode</h2>");
+  page += F("<p class=\"muted\">Applies temporarily for scanning only — does NOT change the active Modbus Configuration. Production meter polling is paused while a test session is active, and auto-restores after 5 minutes idle.</p>");
+  page += F("<p>Status: <span id=\"testStatus\">checking...</span></p>");
+  page += F("<label for=\"cm_baud\">Baudrate</label><select id=\"cm_baud\">");
+  page += F("<option value=\"4800\">4800</option><option value=\"9600\" selected>9600</option>");
+  page += F("<option value=\"19200\">19200</option><option value=\"38400\">38400</option>");
+  page += F("<option value=\"57600\">57600</option><option value=\"115200\">115200</option></select>");
+  page += F("<label for=\"cm_databits\">Data Bits</label><select id=\"cm_databits\"><option value=\"8\">8</option></select>");
+  page += F("<label for=\"cm_parity\">Parity</label><select id=\"cm_parity\">");
+  page += F("<option value=\"2\" selected>None</option><option value=\"0\">Even</option><option value=\"1\">Odd</option></select>");
+  page += F("<label for=\"cm_stopbits\">Stop Bit</label><select id=\"cm_stopbits\"><option value=\"1\" selected>1</option><option value=\"2\">2</option></select>");
+  page += F("<div class=\"actions\"><button onclick=\"applyTestUart()\">Apply Test UART</button><button type=\"button\" onclick=\"restoreUart()\">Restore Normal</button></div>");
+  page += F("<p id=\"uartMsg\" class=\"muted\">Ready.</p></section>");
+
+  page += F("<section class=\"panel\"><h2>Read Registers</h2>");
+  page += F("<p class=\"muted\">Modbus-Poll style block read: set Slave ID / Function / Address / Quantity and click Read — every register in the range is fetched in one request and listed below. Pick a Field Name per register (or select two adjacent registers and merge them into one 32-bit field) to add it to the Mapping Table.</p>");
+  page += F("<label for=\"cm_slave\">Slave ID</label><input id=\"cm_slave\" type=\"number\" min=\"1\" max=\"247\" value=\"1\">");
+  page += F("<label for=\"cm_function\">Function</label><select id=\"cm_function\" onchange=\"updatePlcPreview()\">");
+  page += F("<option value=\"3\" selected>03 - Holding Register</option><option value=\"4\">04 - Input Register</option></select>");
+  page += F("<label for=\"cm_address\">Address (decimal)</label><input id=\"cm_address\" type=\"number\" min=\"0\" max=\"65535\" value=\"0\" oninput=\"updatePlcPreview()\">");
+  page += F("<p class=\"muted\">PLC Address: <span id=\"cm_plc\">400001</span></p>");
+  page += F("<label for=\"cm_quantity\">Quantity</label><input id=\"cm_quantity\" type=\"number\" min=\"1\" max=\"32\" value=\"10\">");
+  page += F("<div class=\"actions\"><button onclick=\"readBlock()\">Read</button></div>");
+  page += F("<p id=\"readMsg\" class=\"muted\">Apply Test UART first, then click Read.</p>");
+  page += F("<div style=\"overflow-x:auto\"><table style=\"width:100%;border-collapse:collapse\" id=\"blockTable\">");
+  page += F("<thead><tr style=\"text-align:left;border-bottom:2px solid #cbd5e1\"><th style=\"padding:6px\"></th><th style=\"padding:6px\">PLC Address</th><th style=\"padding:6px\">UInt16</th><th style=\"padding:6px\">Int16</th><th style=\"padding:6px\">Field Name</th><th style=\"padding:6px\">Add as</th></tr></thead>");
+  page += F("<tbody id=\"blockTableBody\"></tbody></table></div>");
+  page += F("<div class=\"actions\"><label for=\"cm_mergetype\">Merge selected (2 adjacent) as</label><select id=\"cm_mergetype\"><option value=\"2\">UInt32</option><option value=\"3\" selected>Int32</option><option value=\"4\">Float32</option></select><button type=\"button\" onclick=\"mergeSelectedAsRow32()\">Merge Selected &rarr;</button></div>");
+  page += F("<p id=\"mergeMsg\" class=\"muted\"></p></section>");
+
+  page += F("<section class=\"panel\"><h2>Mapping Table</h2>");
+  page += F("<label for=\"cm_mapname\">Mapping Name</label><input id=\"cm_mapname\" type=\"text\" maxlength=\"39\" placeholder=\"e.g. Panel A Custom\">");
+  page += F("<p class=\"muted\"><span id=\"rowCount\">0</span>/24 entries used. \"Value\" is the raw decoded register; \"Data\" = Value x Faktor Pengali (matches your meter's datasheet unit, e.g. 0.1V, 0.001A).</p>");
+  page += F("<div style=\"overflow-x:auto\"><table style=\"width:100%;border-collapse:collapse\" id=\"mapTable\">");
+  page += F("<thead><tr style=\"text-align:left;border-bottom:2px solid #cbd5e1\"><th style=\"padding:6px\">PLC Address</th><th style=\"padding:6px\">Value</th><th style=\"padding:6px\">Field Name</th><th style=\"padding:6px\">Faktor Pengali</th><th style=\"padding:6px\">Data</th><th style=\"padding:6px\"></th></tr></thead>");
+  page += F("<tbody id=\"mapTableBody\"></tbody></table></div>");
+  page += F("<div class=\"actions\"><button onclick=\"saveMapping()\">Save Mapping</button></div>");
+  page += F("<p id=\"saveMsg\" class=\"muted\">Ready.</p></section></main>");
+
+  page += F(R"CFGMODJS(<script>
+const FIELD_KEYS = [
+  ["voltage.ua","Voltage A (ua)"],["voltage.ub","Voltage B (ub)"],["voltage.uc","Voltage C (uc)"],
+  ["voltage.uab","Voltage AB (uab)"],["voltage.ubc","Voltage BC (ubc)"],["voltage.uca","Voltage CA (uca)"],
+  ["current.ia","Current A (ia)"],["current.ib","Current B (ib)"],["current.ic","Current C (ic)"],
+  ["power.active.pa","Active Power A"],["power.active.pb","Active Power B"],["power.active.pc","Active Power C"],["power.active.total","Active Power Total"],
+  ["power.reactive.qa","Reactive Power A"],["power.reactive.qb","Reactive Power B"],["power.reactive.qc","Reactive Power C"],["power.reactive.total","Reactive Power Total"],
+  ["power.apparent.sa","Apparent Power A"],["power.apparent.sb","Apparent Power B"],["power.apparent.sc","Apparent Power C"],["power.apparent.total","Apparent Power Total"],
+  ["power_factor.pf1","Power Factor 1"],["power_factor.pf2","Power Factor 2"],["power_factor.pf3","Power Factor 3"],["power_factor.avg","Power Factor Avg"],
+  ["frequency","Frequency"],["energy.kwh_total","Energy kWh Total"]
+];
+let mappingRows = [];
+let nextRowId = 1;
+let pollActive = false;
+let pollTimer = null;
+
+function plcAddress(fn, addr) {
+  addr = parseInt(addr, 10);
+  if (isNaN(addr)) return '';
+  switch (String(fn)) {
+    case '1': return String(1 + addr).padStart(5, '0');
+    case '2': return String(10001 + addr);
+    case '3': return String(40001 + addr);
+    case '4': return String(30001 + addr);
+    default: return '';
+  }
+}
+
+function fmt(v) {
+  return (v === null || v === undefined || isNaN(v)) ? '-' : Number(v).toFixed(4);
+}
+
+function updatePlcPreview() {
+  const fn = document.getElementById('cm_function').value;
+  const addr = document.getElementById('cm_address').value;
+  document.getElementById('cm_plc').textContent = plcAddress(fn, addr) || '-';
+}
+
+function fieldKeySelectHtml(row) {
+  let html = '<select onchange="onFieldSelectChange(' + row.id + ',this.value)">';
+  html += '<option value="__custom__"' + (row.key === '__custom__' ? ' selected' : '') + '>Custom…</option>';
+  for (const [k, label] of FIELD_KEYS) {
+    html += '<option value="' + k + '"' + (row.key === k ? ' selected' : '') + '>' + label + '</option>';
+  }
+  html += '</select>';
+  if (row.key === '__custom__') {
+    html += '<br><input type="text" placeholder="custom.key" value="' + (row.customKey || '').replace(/"/g, '&quot;') + '" oninput="onCustomKeyInput(' + row.id + ',this.value)">';
+  }
+  return html;
+}
+
+// Full rebuild — only called when rows are added/removed/loaded, never on
+// every poll tick, so an in-progress Faktor Pengali edit or Field Name pick
+// never loses focus while continuous reading is running.
+function renderTable() {
+  const body = document.getElementById('mapTableBody');
+  body.innerHTML = mappingRows.map(row => {
+    const plc = plcAddress(row.fn, row.addr);
+    const sub = 'slave ' + row.slave + ' · fn' + String(row.fn).padStart(2, '0') + ' · addr ' + row.addr;
+    return '<tr style="border-bottom:1px solid #e5e7eb">' +
+      '<td style="padding:6px">' + plc + '<br><span class="muted" style="font-size:11px">' + sub + '</span></td>' +
+      '<td style="padding:6px" id="val_' + row.id + '">' + fmt(row.raw) + '</td>' +
+      '<td style="padding:6px">' + fieldKeySelectHtml(row) + '</td>' +
+      '<td style="padding:6px"><input type="number" step="any" value="' + row.factor + '" style="width:90px" oninput="onFactorInput(' + row.id + ',this.value)"></td>' +
+      '<td style="padding:6px" id="data_' + row.id + '">' + fmt(row.data) + '</td>' +
+      '<td style="padding:6px"><button type="button" onclick="removeRow(' + row.id + ')">Remove</button></td>' +
+      '</tr>';
+  }).join('');
+  document.getElementById('rowCount').textContent = mappingRows.length;
+}
+
+// Lightweight update used every poll tick — only touches the Value/Data
+// text cells directly, leaving selects/inputs (and their focus/cursor) alone.
+function updatePollValues() {
+  mappingRows.forEach(row => {
+    const ve = document.getElementById('val_' + row.id);
+    const de = document.getElementById('data_' + row.id);
+    if (ve) ve.textContent = fmt(row.raw);
+    if (de) de.textContent = fmt(row.data);
+  });
+}
+
+function onFieldSelectChange(id, val) {
+  const row = mappingRows.find(r => r.id === id);
+  if (row) { row.key = val; renderTable(); }
+}
+
+function onCustomKeyInput(id, val) {
+  const row = mappingRows.find(r => r.id === id);
+  if (row) row.customKey = val;
+}
+
+function onFactorInput(id, val) {
+  const row = mappingRows.find(r => r.id === id);
+  if (!row) return;
+  row.factor = parseFloat(val);
+  if (isNaN(row.factor)) row.factor = 0;
+  row.data = (row.raw === null || row.raw === undefined) ? null : row.raw * row.factor;
+  updatePollValues();
+}
+
+function removeRow(id) {
+  mappingRows = mappingRows.filter(r => r.id !== id);
+  renderTable();
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/modmap/status', { cache: 'no-store' });
+    const d = await r.json();
+    document.getElementById('testStatus').textContent = d.test_mode_active ? 'ACTIVE (production polling paused)' : 'INACTIVE (production polling normal)';
+    return d.test_mode_active;
+  } catch (e) {
+    document.getElementById('testStatus').textContent = 'unknown';
+    return false;
+  }
+}
+
+async function applyTestUart() {
+  const m = document.getElementById('uartMsg');
+  m.textContent = 'Applying...';
+  const body = new URLSearchParams({
+    baudrate: document.getElementById('cm_baud').value,
+    parity: document.getElementById('cm_parity').value,
+    stop_bits: document.getElementById('cm_stopbits').value,
+    timeout_ms: '1000'
+  });
+  try {
+    const r = await fetch('/api/modmap/uart/apply', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const d = await r.json();
+    m.textContent = d.ok ? 'Test UART applied. Continuous reading started.' : 'Apply failed';
+    if (d.ok) startPolling();
+  } catch (e) { m.textContent = 'Apply failed'; }
+  refreshStatus();
+}
+
+async function restoreUart() {
+  const m = document.getElementById('uartMsg');
+  m.textContent = 'Restoring...';
+  stopPolling();
+  try {
+    const r = await fetch('/api/modmap/uart/restore', { method: 'POST' });
+    const d = await r.json();
+    m.textContent = d.ok ? 'Restored to production settings.' : 'Restore failed';
+  } catch (e) { m.textContent = 'Restore failed'; }
+  refreshStatus();
+}
+
+let blockRows = [];      // last block-read result: {addr, uint16, int16, selected}
+let blockSlave = 1, blockFn = 3;
+
+function addMappingRow(slave, fn, addr, type) {
+  if (mappingRows.length >= 24) { document.getElementById('readMsg').textContent = 'Mapping table is full (24/24).'; return false; }
+  mappingRows.push({ id: nextRowId++, slave, fn, addr, type, factor: 1, raw: null, data: null, key: '__custom__', customKey: '' });
+  renderTable();
+  document.getElementById('readMsg').textContent = pollActive ? 'Added — value fills in on the next read sweep.' : 'Added — apply Test UART to start reading.';
+  return true;
+}
+
+function renderBlockTable() {
+  const body = document.getElementById('blockTableBody');
+  body.innerHTML = blockRows.map(row => {
+    const plc = plcAddress(blockFn, row.addr);
+    return '<tr style="border-bottom:1px solid #e5e7eb">' +
+      '<td style="padding:6px"><input type="checkbox" ' + (row.selected ? 'checked' : '') + ' onchange="onBlockRowSelect(' + row.addr + ',this.checked)"></td>' +
+      '<td style="padding:6px">' + plc + '<br><span class="muted" style="font-size:11px">addr ' + row.addr + '</span></td>' +
+      '<td style="padding:6px">' + row.uint16 + '</td>' +
+      '<td style="padding:6px">' + row.int16 + '</td>' +
+      '<td style="padding:6px"><select onchange="onBlockFieldChange(' + row.addr + ',this.value)"><option value="__custom__"' + (row.key === '__custom__' ? ' selected' : '') + '>Custom…</option>' +
+        FIELD_KEYS.map(([k, label]) => '<option value="' + k + '"' + (row.key === k ? ' selected' : '') + '>' + label + '</option>').join('') + '</select></td>' +
+      '<td style="padding:6px"><select id="type_' + row.addr + '" style="width:80px"><option value="0">UInt16</option><option value="1">Int16</option></select>' +
+        '<button type="button" onclick="addBlockRowAsSingle(' + row.addr + ')">Add</button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function onBlockRowSelect(addr, checked) {
+  const row = blockRows.find(r => r.addr === addr);
+  if (row) row.selected = checked;
+}
+
+function onBlockFieldChange(addr, val) {
+  const row = blockRows.find(r => r.addr === addr);
+  if (row) row.key = val;
+}
+
+// Adds a single register from the block-read table into the Mapping Table,
+// as UInt16 or Int16 per that row's "Add as" selector (there's no way to
+// change datatype after a row lands in the Mapping Table, so it must be
+// chosen here).
+function addBlockRowAsSingle(addr) {
+  const row = blockRows.find(r => r.addr === addr);
+  if (!row) return;
+  const typeSel = document.getElementById('type_' + addr);
+  const type = typeSel ? parseInt(typeSel.value, 10) : 0;
+  if (addMappingRow(blockSlave, blockFn, addr, type)) {
+    const mrow = mappingRows[mappingRows.length - 1];
+    mrow.key = row.key;
+    renderTable();
+  }
+}
+
+function mergeSelectedAsRow32() {
+  const msg = document.getElementById('mergeMsg');
+  const selected = blockRows.filter(r => r.selected).sort((a, b) => a.addr - b.addr);
+  if (selected.length !== 2 || selected[1].addr !== selected[0].addr + 1) {
+    msg.textContent = 'Select exactly 2 adjacent registers to merge.';
+    return;
+  }
+  const type = parseInt(document.getElementById('cm_mergetype').value, 10);
+  if (addMappingRow(blockSlave, blockFn, selected[0].addr, type)) {
+    const mrow = mappingRows[mappingRows.length - 1];
+    mrow.key = selected[0].key !== '__custom__' ? selected[0].key : selected[1].key;
+    renderTable();
+    selected.forEach(r => r.selected = false);
+    renderBlockTable();
+    msg.textContent = 'Merged addr ' + selected[0].addr + '+' + selected[1].addr + ' into Mapping Table.';
+  }
+}
+
+async function readBlock() {
+  const msg = document.getElementById('readMsg');
+  msg.textContent = 'Reading...';
+  blockSlave = parseInt(document.getElementById('cm_slave').value, 10);
+  blockFn = parseInt(document.getElementById('cm_function').value, 10);
+  const addr = parseInt(document.getElementById('cm_address').value, 10);
+  const qty = parseInt(document.getElementById('cm_quantity').value, 10);
+  const body = new URLSearchParams({ slave_id: blockSlave, function: blockFn, address: addr, quantity: qty });
+  try {
+    const r = await fetch('/api/modmap/read_block', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const d = await r.json();
+    if (d.ok) {
+      blockRows = d.registers.map(reg => ({ addr: reg.addr, uint16: reg.uint16, int16: reg.int16, selected: false, key: '__custom__' }));
+      renderBlockTable();
+      msg.textContent = 'Read ' + blockRows.length + ' register(s). Pick a Field Name and Add, or select two adjacent rows to merge as 32-bit.';
+    } else if (d.error === 'test_mode_not_active') {
+      msg.textContent = 'Apply Test UART first, then click Read.';
+    } else {
+      msg.textContent = 'Read failed: ' + (d.error || 'unknown') + (d.exception_code ? (' (exception ' + d.exception_code + ')') : '');
+    }
+  } catch (e) { msg.textContent = 'Read failed.'; }
+}
+
+// Continuously reads every row in the table, one register at a time (the
+// ESP32's web server handles one request at a time, so reads are sequenced
+// rather than fired in parallel), then waits briefly before the next sweep —
+// runs until stopPolling() is called (Restore Normal) or the server reports
+// the test-mode session ended (e.g. the 5-minute idle safety net fired).
+async function pollLoop() {
+  if (!pollActive) return;
+  for (const row of mappingRows) {
+    if (!pollActive) break;
+    try {
+      const body = new URLSearchParams({ slave_id: row.slave, function: row.fn, address: row.addr, datatype: row.type });
+      const r = await fetch('/api/modmap/read', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+      const d = await r.json();
+      if (d.ok) {
+        row.raw = d.decoded;
+        row.data = row.raw * row.factor;
+      } else {
+        row.raw = null;
+        row.data = null;
+        if (d.error === 'test_mode_not_active') {
+          document.getElementById('uartMsg').textContent = 'Test mode ended (idle timeout or restored elsewhere).';
+          stopPolling();
+          refreshStatus();
+          return;
+        }
+      }
+    } catch (e) {
+      row.raw = null;
+      row.data = null;
+    }
+  }
+  updatePollValues();
+  if (pollActive) pollTimer = setTimeout(pollLoop, 400);
+}
+
+function startPolling() {
+  if (pollActive) return;
+  pollActive = true;
+  pollLoop();
+}
+
+function stopPolling() {
+  pollActive = false;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+async function saveMapping() {
+  const m = document.getElementById('saveMsg');
+  m.textContent = 'Saving...';
+  const params = new URLSearchParams();
+  params.set('map_name', document.getElementById('cm_mapname').value || '');
+  params.set('count', mappingRows.length);
+  mappingRows.forEach((row, i) => {
+    const key = row.key === '__custom__' ? (row.customKey || 'custom') : row.key;
+    params.set('f' + i + '_key', key);
+    params.set('f' + i + '_slave', row.slave);
+    params.set('f' + i + '_fn', row.fn);
+    params.set('f' + i + '_addr', row.addr);
+    params.set('f' + i + '_type', row.type);
+    params.set('f' + i + '_scale', row.factor);
+  });
+  try {
+    const r = await fetch('/api/modmap/save', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params });
+    const d = await r.json();
+    m.textContent = d.ok ? ('Saved ' + d.saved + ' entries.') : ('Save failed: ' + (d.error || 'unknown'));
+  } catch (e) { m.textContent = 'Save failed'; }
+}
+
+async function loadMapping() {
+  try {
+    const r = await fetch('/api/modmap/load', { cache: 'no-store' });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('cm_mapname').value = d.name || '';
+      if (Array.isArray(d.entries)) {
+        mappingRows = d.entries.map(e => ({
+          id: nextRowId++, slave: e.slave, fn: e.fn, addr: e.addr, type: e.type, factor: e.scale,
+          raw: null, data: null, key: FIELD_KEYS.some(fk => fk[0] === e.key) ? e.key : '__custom__',
+          customKey: FIELD_KEYS.some(fk => fk[0] === e.key) ? '' : e.key
+        }));
+        renderTable();
+      }
+    }
+  } catch (e) {}
+}
+
+async function init() {
+  updatePlcPreview();
+  const active = await refreshStatus();
+  await loadMapping();
+  if (active) startPolling();  // reopening the page mid-session resumes live reading
+}
+init();
+</script>)CFGMODJS");
+
   page += buildPageFooter();
   return page;
 }
@@ -2223,6 +2948,13 @@ void handleModbusConfigPage() {
   configServer.send(200, "text/html", buildModbusConfigPage());
 }
 
+// Hidden — never linked from <nav>; reachable only by typing /configmod.
+void handleModConfigPage() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+  configServer.send(200, "text/html", buildModConfigPage());
+}
+
 void handleProtectionConfigPage() {
   sendNoCacheHeader();
   if (!requireConfigMode()) return;
@@ -2330,6 +3062,98 @@ void handleMqttConfigSaveApi() {
   }
 }
 
+// Publishes a small stamped JSON payload to <base>/test, which the device
+// itself is also subscribed to (see connectMqtt). Publish success only
+// proves the TCP/MQTT session is up; whether the echo actually comes back
+// (checked by the frontend polling /api/mqtt/test_status afterwards) is what
+// proves the broker allows this client to *subscribe* too — the exact gap
+// reported for nocola_2.
+void handleMqttTestPublishApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  if (!(*activeMqttClient).connected()) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"not_connected\"}");
+    return;
+  }
+
+  mqttTestSeq++;
+  String payload;
+  payload.reserve(96);
+  payload += F("{\"seq\":");
+  payload += String(mqttTestSeq);
+  payload += F(",\"device\":\"");
+  payload += jsonEscape(getMqttClientId());
+  payload += F("\",\"uptime_ms\":");
+  payload += String(millis());
+  payload += F("}");
+
+  const String topic = mqttTestTopic();
+  const bool pubOk = (*activeMqttClient).publish(topic.c_str(), payload.c_str());
+
+  mqttTestPublishOk = pubOk;
+  mqttTestPublishMs = millis();
+  mqttTestPublishPayload = payload;
+  // Clear any stale echo from a previous push so test_status can't report a
+  // false round-trip against this new attempt.
+  mqttTestEchoPayload = "";
+  mqttTestEchoMs = 0;
+
+  String body;
+  body.reserve(96);
+  body += F("{\"ok\":");
+  body += pubOk ? F("true") : F("false");
+  body += F(",\"topic\":\"");
+  body += jsonEscape(topic);
+  body += F("\",\"rc\":");
+  body += String((*activeMqttClient).state());
+  body += F("}");
+  configServer.send(200, "application/json", body);
+}
+
+// Polled by the /mqtt page after Push Test Data to see whether the broker
+// echoed the message back (proving subscribe works, not just publish).
+void handleMqttTestStatusApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  const int rc = (*activeMqttClient).state();
+  const uint32_t nowMs = millis();
+  const bool haveEcho = mqttTestEchoMs != 0;
+  const bool roundTripOk = haveEcho && mqttTestEchoPayload == mqttTestPublishPayload;
+
+  String body;
+  body.reserve(384);
+  body += F("{\"mqtt_connected\":");
+  body += mqttConnected ? F("true") : F("false");
+  body += F(",\"rc\":");
+  body += String(rc);
+  body += F(",\"rc_text\":\"");
+  body += jsonEscape(String(mqttStateToString(rc)));
+  body += F("\",\"client_id\":\"");
+  body += jsonEscape(getMqttClientId());
+  body += F("\",\"transport\":\"");
+  body += (activeMqttClient == &mqttEthClient) ? F("Ethernet") : F("WiFi");
+  body += F("\",\"test_topic\":\"");
+  body += jsonEscape(mqttTestTopic());
+  body += F("\",\"last_publish_ok\":");
+  body += mqttTestPublishOk ? F("true") : F("false");
+  body += F(",\"last_publish_payload\":\"");
+  body += jsonEscape(mqttTestPublishPayload);
+  body += F("\",\"last_publish_ms_ago\":");
+  body += mqttTestPublishMs == 0 ? F("null") : String(nowMs - mqttTestPublishMs);
+  body += F(",\"echo_received\":");
+  body += haveEcho ? F("true") : F("false");
+  body += F(",\"echo_payload\":\"");
+  body += jsonEscape(mqttTestEchoPayload);
+  body += F("\",\"echo_ms_ago\":");
+  body += haveEcho ? String(nowMs - mqttTestEchoMs) : F("null");
+  body += F(",\"round_trip_ok\":");
+  body += roundTripOk ? F("true") : F("false");
+  body += F("}");
+  configServer.send(200, "application/json", body);
+}
+
 void handleModbusConfigSaveApi() {
   ModbusConfig cfg = currentModbusConfig;
 
@@ -2356,6 +3180,254 @@ void handleModbusConfigSaveApi() {
   } else {
     configServer.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
   }
+}
+
+// ============================================================================
+// /configmod API HANDLERS — hidden Modbus scan & mapping tool
+// ============================================================================
+// All handlers here explicitly call requireConfigMode(), even the POST
+// endpoints (unlike some existing */save APIs) — deliberate hardening since
+// this tool can transiently disrupt production polling.
+
+void handleModMapUartApplyApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  const uint32_t baudrate = configServer.hasArg("baudrate") ? configServer.arg("baudrate").toInt() : 9600;
+  const uint8_t parity = configServer.hasArg("parity") ? configServer.arg("parity").toInt() : 2;
+  const uint8_t stopBits = configServer.hasArg("stop_bits") ? configServer.arg("stop_bits").toInt() : 1;
+  const uint16_t timeoutMs = configServer.hasArg("timeout_ms") ? configServer.arg("timeout_ms").toInt() : 1000;
+
+  applyModbusTestModeConfig(baudrate, parity, stopBits, timeoutMs);
+  configServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleModMapUartRestoreApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  restoreModbusNormalMode();
+  configServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Reads a contiguous block of raw 16-bit registers in a single Modbus
+// transaction (Modbus-Poll-style "Slave ID / Function / Address / Quantity"
+// read) and returns each register's raw value undecoded — combining two
+// adjacent registers into a 32-bit field is a separate client-side step
+// (see mergeAsRow32 in the page script), not done here.
+void handleModMapReadBlockApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  if (!modbusTestModeActive) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"test_mode_not_active\"}");
+    return;
+  }
+  modbusTestModeLastActivityMs = millis();
+
+  const uint8_t slaveId = configServer.hasArg("slave_id") ? configServer.arg("slave_id").toInt() : 0;
+  const uint8_t function = configServer.hasArg("function") ? configServer.arg("function").toInt() : 3;
+  const uint16_t address = configServer.hasArg("address") ? configServer.arg("address").toInt() : 0;
+  const uint16_t quantity = configServer.hasArg("quantity") ? configServer.arg("quantity").toInt() : 0;
+
+  if (slaveId == 0 || slaveId > 247 || (function != 3 && function != 4) ||
+      quantity == 0 || quantity > 32 || (uint32_t)address + quantity > 65536UL) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_params\"}");
+    return;
+  }
+
+  uint8_t buf[64] = {0};
+  uint16_t exceptionCode = 0;
+  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms);
+
+  if (!ok) {
+    String body;
+    body.reserve(96);
+    body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
+    body += String(exceptionCode);
+    body += F("}");
+    configServer.send(200, "application/json", body);
+    return;
+  }
+
+  String body;
+  body.reserve(32 + quantity * 24);
+  body += F("{\"ok\":true,\"registers\":[");
+  for (uint16_t i = 0; i < quantity; i++) {
+    const uint16_t raw = (static_cast<uint16_t>(buf[i * 2]) << 8) | buf[i * 2 + 1];
+    const int16_t signedRaw = static_cast<int16_t>(raw);
+    if (i > 0) body += F(",");
+    body += F("{\"addr\":");
+    body += String(address + i);
+    body += F(",\"uint16\":");
+    body += String(raw);
+    body += F(",\"int16\":");
+    body += String(signedRaw);
+    body += F("}");
+  }
+  body += F("]}");
+  configServer.send(200, "application/json", body);
+}
+
+void handleModMapReadApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  if (!modbusTestModeActive) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"test_mode_not_active\"}");
+    return;
+  }
+  modbusTestModeLastActivityMs = millis();
+
+  const uint8_t slaveId = configServer.hasArg("slave_id") ? configServer.arg("slave_id").toInt() : 0;
+  const uint8_t function = configServer.hasArg("function") ? configServer.arg("function").toInt() : 3;
+  const uint16_t address = configServer.hasArg("address") ? configServer.arg("address").toInt() : 0;
+  const uint8_t datatype = configServer.hasArg("datatype") ? configServer.arg("datatype").toInt() : 3;
+  const float scale = configServer.hasArg("scale") ? configServer.arg("scale").toFloat() : 1.0f;
+
+  if (slaveId == 0 || slaveId > 247 || (function != 3 && function != 4) || datatype > 4) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_params\"}");
+    return;
+  }
+
+  const uint16_t quantity = modbusDataTypeQuantity(datatype);
+  uint8_t buf[4] = {0, 0, 0, 0};
+  uint16_t exceptionCode = 0;
+  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms);
+
+  String body;
+  body.reserve(160);
+  if (!ok) {
+    body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
+    body += String(exceptionCode);
+    body += F("}");
+    configServer.send(200, "application/json", body);
+    return;
+  }
+
+  const float decoded = decodeModbusValue(datatype, buf, scale);
+  char rawHex[9] = {0};
+  const uint8_t rawBytes = quantity * 2;
+  for (uint8_t i = 0; i < rawBytes; i++) {
+    snprintf(rawHex + (i * 2), 3, "%02X", buf[i]);
+  }
+
+  body += F("{\"ok\":true,\"raw_hex\":\"");
+  body += rawHex;
+  body += F("\",\"decoded\":");
+  body += String(decoded, 6);
+  body += F(",\"exception_code\":0}");
+  configServer.send(200, "application/json", body);
+}
+
+void handleModMapSaveApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  const uint8_t count = configServer.hasArg("count") ? configServer.arg("count").toInt() : 0;
+  if (count > kModbusMapMaxEntries) {
+    configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"too_many_entries\"}");
+    return;
+  }
+
+  ModbusMapConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.count = 0;
+  if (configServer.hasArg("map_name")) {
+    String mapName = configServer.arg("map_name");
+    mapName.trim();
+    strncpy(cfg.name, mapName.c_str(), sizeof(cfg.name) - 1);
+  }
+
+  for (uint8_t i = 0; i < count; i++) {
+    const String prefix = "f" + String(i) + "_";
+    if (!configServer.hasArg(prefix + "key") || !configServer.hasArg(prefix + "slave") ||
+        !configServer.hasArg(prefix + "fn") || !configServer.hasArg(prefix + "addr") ||
+        !configServer.hasArg(prefix + "type") || !configServer.hasArg(prefix + "scale")) {
+      continue;
+    }
+
+    const uint8_t slaveId = configServer.arg(prefix + "slave").toInt();
+    const uint8_t function = configServer.arg(prefix + "fn").toInt();
+    const uint8_t datatype = configServer.arg(prefix + "type").toInt();
+    if (slaveId == 0 || slaveId > 247 || (function != 3 && function != 4) || datatype > 4) continue;
+
+    String key = configServer.arg(prefix + "key");
+    key.trim();
+    if (key.length() == 0) continue;
+
+    ModbusMapEntry& entry = cfg.entries[cfg.count];
+    memset(&entry, 0, sizeof(entry));
+    strncpy(entry.field_key, key.c_str(), sizeof(entry.field_key) - 1);
+    entry.slave_id = slaveId;
+    entry.function = function;
+    entry.address = static_cast<uint16_t>(configServer.arg(prefix + "addr").toInt());
+    entry.datatype = datatype;
+    entry.scale = configServer.arg(prefix + "scale").toFloat();
+    if (entry.scale == 0.0f) entry.scale = 1.0f;
+    cfg.count++;
+  }
+
+  const bool ok = ConfigManager::saveModbusMapConfig(cfg);
+  if (ok) {
+    modMapCacheDirty = true;
+  }
+
+  String body;
+  body.reserve(64);
+  if (ok) {
+    body += F("{\"ok\":true,\"saved\":");
+    body += String(cfg.count);
+    body += F("}");
+  } else {
+    body = F("{\"ok\":false,\"error\":\"save_failed\"}");
+  }
+  configServer.send(ok ? 200 : 500, "application/json", body);
+}
+
+void handleModMapLoadApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  const ModbusMapConfig cfg = ConfigManager::loadModbusMapConfig();
+  String body;
+  body.reserve(cfg.count * 96 + 64);
+  body += F("{\"ok\":true,\"name\":\"");
+  body += jsonEscape(cfg.name);
+  body += F("\",\"entries\":[");
+  for (uint8_t i = 0; i < cfg.count; i++) {
+    const ModbusMapEntry& entry = cfg.entries[i];
+    if (i > 0) body += F(",");
+    body += F("{\"key\":\"");
+    body += jsonEscape(entry.field_key);
+    body += F("\",\"slave\":");
+    body += String(entry.slave_id);
+    body += F(",\"fn\":");
+    body += String(entry.function);
+    body += F(",\"addr\":");
+    body += String(entry.address);
+    body += F(",\"type\":");
+    body += String(entry.datatype);
+    body += F(",\"scale\":");
+    body += String(entry.scale, 6);
+    body += F("}");
+  }
+  body += F("]}");
+  configServer.send(200, "application/json", body);
+}
+
+void handleModMapStatusApi() {
+  sendNoCacheHeader();
+  if (!requireConfigMode()) return;
+
+  String body;
+  body.reserve(96);
+  body += F("{\"test_mode_active\":");
+  body += modbusTestModeActive ? F("true") : F("false");
+  body += F(",\"baudrate\":");
+  body += String(modbusTestModeActive ? modbusTestModeConfig.baudrate : currentModbusConfig.baudrate);
+  body += F("}");
+  configServer.send(200, "application/json", body);
 }
 
 void handleProtectionConfigSaveApi() {
@@ -2908,7 +3980,18 @@ void startConfigWebServer() {
   configServer.on("/api/wifi/save", HTTP_POST, handleWifiSaveApi);
   configServer.on("/api/device/save", HTTP_POST, handleDeviceConfigSaveApi);
   configServer.on("/api/mqtt/save", HTTP_POST, handleMqttConfigSaveApi);
+  configServer.on("/api/mqtt/test_publish", HTTP_POST, handleMqttTestPublishApi);
+  configServer.on("/api/mqtt/test_status", HTTP_GET, handleMqttTestStatusApi);
   configServer.on("/api/modbus/save", HTTP_POST, handleModbusConfigSaveApi);
+  // Hidden Modbus scan/mapping tool — no <nav> link anywhere, URL-only access.
+  configServer.on("/configmod", HTTP_GET, handleModConfigPage);
+  configServer.on("/api/modmap/uart/apply", HTTP_POST, handleModMapUartApplyApi);
+  configServer.on("/api/modmap/uart/restore", HTTP_POST, handleModMapUartRestoreApi);
+  configServer.on("/api/modmap/read", HTTP_POST, handleModMapReadApi);
+  configServer.on("/api/modmap/read_block", HTTP_POST, handleModMapReadBlockApi);
+  configServer.on("/api/modmap/save", HTTP_POST, handleModMapSaveApi);
+  configServer.on("/api/modmap/load", HTTP_GET, handleModMapLoadApi);
+  configServer.on("/api/modmap/status", HTTP_GET, handleModMapStatusApi);
   configServer.on("/api/protection/save", HTTP_POST, handleProtectionConfigSaveApi);
   configServer.on("/api/display/save", HTTP_POST, handleDisplayConfigSaveApi);
   configServer.on("/api/history/save", HTTP_POST, handleHistoryConfigSaveApi);
@@ -3129,6 +4212,9 @@ void loop() {
   updateEthernetRuntime(nowMs);
   handleWiFiLifecycle(nowMs);
   handleConfigButton(nowMs);
+  if (modbusTestModeActive && nowMs - modbusTestModeLastActivityMs >= kModbusTestModeIdleTimeoutMs) {
+    restoreModbusNormalMode();
+  }
   pollModbusMeter(nowMs);
   updateProtectionRuntime(nowMs);
   updateMqttRuntime(nowMs);

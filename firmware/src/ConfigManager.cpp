@@ -147,6 +147,116 @@ bool ConfigManager::saveModbusConfig(const ModbusConfig& cfg) {
   return ok;
 }
 
+// ===== MODBUS REGISTER MAPPING (/configmod) =====
+// Stored as a single line-based blob string (Preferences has no native
+// array/struct support): one entry per line, fields pipe-delimited:
+//   field_key|slave_id|function|address|datatype|scale
+ModbusMapConfig ConfigManager::loadModbusMapConfig() {
+  Preferences prefs;
+  prefs.begin(NS_MODMAP, true);
+  String blob = prefs.getString("map", "");
+  String name = prefs.getString("name", "");
+  prefs.end();
+
+  ModbusMapConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.count = 0;
+  strncpy(cfg.name, name.c_str(), sizeof(cfg.name) - 1);
+
+  int lineStart = 0;
+  const int blobLen = blob.length();
+  while (lineStart < blobLen && cfg.count < kModbusMapMaxEntries) {
+    int lineEnd = blob.indexOf('\n', lineStart);
+    if (lineEnd < 0) lineEnd = blobLen;
+    String line = blob.substring(lineStart, lineEnd);
+    lineStart = lineEnd + 1;
+    line.trim();
+    if (line.length() == 0) continue;
+
+    // Split into exactly 6 pipe-delimited fields.
+    int fieldStart = 0;
+    String fields[6];
+    bool malformed = false;
+    for (int f = 0; f < 6; f++) {
+      int sep = (f < 5) ? line.indexOf('|', fieldStart) : line.length();
+      if (sep < 0) {
+        malformed = true;
+        break;
+      }
+      fields[f] = line.substring(fieldStart, sep);
+      fieldStart = sep + 1;
+    }
+    if (malformed) continue;
+
+    const uint8_t slaveId = static_cast<uint8_t>(fields[1].toInt());
+    const uint8_t function = static_cast<uint8_t>(fields[2].toInt());
+    const uint8_t datatype = static_cast<uint8_t>(fields[4].toInt());
+    if (slaveId == 0 || slaveId > 247) continue;
+    if (function != 3 && function != 4) continue;
+    if (datatype > 4) continue;
+    if (fields[0].length() == 0) continue;
+
+    ModbusMapEntry& entry = cfg.entries[cfg.count];
+    memset(&entry, 0, sizeof(entry));
+    strncpy(entry.field_key, fields[0].c_str(), sizeof(entry.field_key) - 1);
+    entry.slave_id = slaveId;
+    entry.function = function;
+    entry.address = static_cast<uint16_t>(fields[3].toInt());
+    entry.datatype = datatype;
+    entry.scale = fields[5].toFloat();
+    if (entry.scale == 0.0f) entry.scale = 1.0f;
+    cfg.count++;
+  }
+
+  return cfg;
+}
+
+bool ConfigManager::saveModbusMapConfig(const ModbusMapConfig& cfg) {
+  if (cfg.count > kModbusMapMaxEntries) return false;
+
+  String blob;
+  blob.reserve(cfg.count * 64 + 16);
+  for (uint8_t i = 0; i < cfg.count; i++) {
+    const ModbusMapEntry& entry = cfg.entries[i];
+    if (entry.slave_id == 0 || entry.slave_id > 247) continue;
+    if (entry.function != 3 && entry.function != 4) continue;
+    if (entry.datatype > 4) continue;
+
+    // Sanitize field_key: strip the delimiter characters so a stray '|' or
+    // '\n' in a custom key can't corrupt the blob format.
+    String key = String(entry.field_key);
+    key.replace("|", "_");
+    key.replace("\n", "_");
+    key.replace("\r", "_");
+    if (key.length() == 0) continue;
+    if (key.length() > 39) key = key.substring(0, 39);
+
+    blob += key;
+    blob += '|';
+    blob += String(entry.slave_id);
+    blob += '|';
+    blob += String(entry.function);
+    blob += '|';
+    blob += String(entry.address);
+    blob += '|';
+    blob += String(entry.datatype);
+    blob += '|';
+    blob += String(entry.scale, 6);
+    blob += '\n';
+  }
+
+  String name = String(cfg.name);
+  name.trim();
+  if (name.length() > 39) name = name.substring(0, 39);
+
+  Preferences prefs;
+  if (!prefs.begin(NS_MODMAP, false)) return false;
+  bool ok = prefs.putString("map", blob) >= 0;
+  ok &= prefs.putString("name", name) >= 0;
+  prefs.end();
+  return ok;
+}
+
 // ===== PROTECTION CONFIG =====
 ProtectionConfig ConfigManager::loadProtectionConfig() {
   Preferences prefs;

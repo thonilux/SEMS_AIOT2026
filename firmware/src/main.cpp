@@ -1439,11 +1439,23 @@ void delayServicing(uint32_t ms) {
   } while (millis() < until);
 }
 
+// Populated on a failed modbusReadRegisters() call (optional, /configmod
+// diagnostics only) so "timeout_or_crc" can be told apart into its actual
+// causes — no response at all vs. a different slave answering vs. a frame
+// that arrived but failed CRC (wiring noise / parity mismatch).
+struct ModbusReadDiag {
+  bool anyBytesReceived = false;
+  uint8_t respondingSlaveId = 0;
+  bool slaveIdMismatch = false;
+  bool crcMismatch = false;
+  uint16_t bytesReceived = 0;
+};
+
 // Generalized register read shared by production polling and the /configmod
 // scan tool. functionCode is 0x03 (Holding Register) or 0x04 (Input
 // Register) — both share the exact same request/response frame shape
 // ("byte count + N*2 register bytes"), only the function byte differs.
-bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs) {
+bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRegister, uint16_t quantity, uint8_t* response, size_t responseLen, uint16_t& exceptionCode, uint32_t timeoutMs, ModbusReadDiag* diag = nullptr) {
   exceptionCode = 0;
   if (quantity == 0 || quantity > 64 || response == nullptr || responseLen < quantity * 2) {
     return false;
@@ -1473,6 +1485,10 @@ bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRe
     delay(1);
   }
   if (Serial2.available() < 3) {
+    if (diag) {
+      diag->bytesReceived = Serial2.available();
+      diag->anyBytesReceived = diag->bytesReceived > 0;
+    }
     return false;
   }
 
@@ -1481,7 +1497,13 @@ bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRe
     return false;
   }
 
+  if (diag) {
+    diag->anyBytesReceived = true;
+    diag->respondingSlaveId = header[0];
+  }
+
   if (header[0] != slaveId) {
+    if (diag) diag->slaveIdMismatch = true;
     return false;
   }
 
@@ -1530,7 +1552,9 @@ bool modbusReadRegisters(uint8_t functionCode, uint8_t slaveId, uint16_t startRe
   memcpy(frame + 3, response, byteCount);
   const uint16_t expectedCrc = modbusCrc16(frame, 3 + byteCount);
   const uint16_t receivedCrc = static_cast<uint16_t>(crcBytes[0]) | (static_cast<uint16_t>(crcBytes[1]) << 8);
-  return expectedCrc == receivedCrc;
+  const bool crcOk = expectedCrc == receivedCrc;
+  if (diag && !crcOk) diag->crcMismatch = true;
+  return crcOk;
 }
 
 // Thin wrapper kept for the existing production call sites (pollOneModbusMeter,
@@ -2349,6 +2373,7 @@ String buildModConfigPage() {
   page += F("<label for=\"cm_parity\">Parity</label><select id=\"cm_parity\">");
   page += F("<option value=\"2\" selected>None</option><option value=\"0\">Even</option><option value=\"1\">Odd</option></select>");
   page += F("<label for=\"cm_stopbits\">Stop Bit</label><select id=\"cm_stopbits\"><option value=\"1\" selected>1</option><option value=\"2\">2</option></select>");
+  page += F("<label for=\"cm_timeout\">Timeout (ms)</label><input id=\"cm_timeout\" type=\"number\" min=\"100\" max=\"10000\" value=\"1000\">");
   page += F("<div class=\"actions\"><button onclick=\"applyTestUart()\">Apply Test UART</button><button type=\"button\" onclick=\"restoreUart()\">Restore Normal</button></div>");
   page += F("<p id=\"uartMsg\" class=\"muted\">Ready.</p></section>");
 
@@ -2502,7 +2527,7 @@ async function applyTestUart() {
     baudrate: document.getElementById('cm_baud').value,
     parity: document.getElementById('cm_parity').value,
     stop_bits: document.getElementById('cm_stopbits').value,
-    timeout_ms: '1000'
+    timeout_ms: document.getElementById('cm_timeout').value
   });
   try {
     const r = await fetch('/api/modmap/uart/apply', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
@@ -2615,7 +2640,7 @@ async function readBlock() {
     } else if (d.error === 'test_mode_not_active') {
       msg.textContent = 'Apply Test UART first, then click Read.';
     } else {
-      msg.textContent = 'Read failed: ' + (d.error || 'unknown') + (d.exception_code ? (' (exception ' + d.exception_code + ')') : '');
+      msg.textContent = 'Read failed: ' + (d.detail || d.error || 'unknown') + (d.exception_code ? (' (exception ' + d.exception_code + ')') : '');
     }
   } catch (e) { msg.textContent = 'Read failed.'; }
 }
@@ -3215,6 +3240,29 @@ void handleModMapUartRestoreApi() {
 // read) and returns each register's raw value undecoded — combining two
 // adjacent registers into a 32-bit field is a separate client-side step
 // (see mergeAsRow32 in the page script), not done here.
+// Turns a failed-read ModbusReadDiag into an actionable detail string for the
+// /configmod UI, instead of a bare "timeout_or_crc" that can't tell "nothing
+// answered" apart from "something answered but garbled" or "wrong slave".
+String modbusReadDiagDetail(const ModbusReadDiag& diag, uint8_t expectedSlaveId) {
+  if (!diag.anyBytesReceived) {
+    return F("no_response — check RS485 A/B wiring, baudrate/parity, and that Slave ID matches the meter");
+  }
+  if (diag.slaveIdMismatch) {
+    String s;
+    s.reserve(64);
+    s += F("wrong_slave_responded (got id ");
+    s += String(diag.respondingSlaveId);
+    s += F(", expected ");
+    s += String(expectedSlaveId);
+    s += F(") — another device is answering on this bus");
+    return s;
+  }
+  if (diag.crcMismatch) {
+    return F("crc_mismatch — a response arrived but failed CRC check; likely wiring noise, parity mismatch, or baudrate mismatch");
+  }
+  return F("partial_response — response started but didn't complete before timeout; try a longer Timeout");
+}
+
 void handleModMapReadBlockApi() {
   sendNoCacheHeader();
   if (!requireConfigMode()) return;
@@ -3238,14 +3286,17 @@ void handleModMapReadBlockApi() {
 
   uint8_t buf[64] = {0};
   uint16_t exceptionCode = 0;
-  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms);
+  ModbusReadDiag diag;
+  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms, &diag);
 
   if (!ok) {
     String body;
-    body.reserve(96);
+    body.reserve(192);
     body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
     body += String(exceptionCode);
-    body += F("}");
+    body += F(",\"detail\":\"");
+    body += jsonEscape(modbusReadDiagDetail(diag, slaveId));
+    body += F("\"}");
     configServer.send(200, "application/json", body);
     return;
   }
@@ -3293,14 +3344,17 @@ void handleModMapReadApi() {
   const uint16_t quantity = modbusDataTypeQuantity(datatype);
   uint8_t buf[4] = {0, 0, 0, 0};
   uint16_t exceptionCode = 0;
-  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms);
+  ModbusReadDiag diag;
+  const bool ok = modbusReadRegisters(function, slaveId, address, quantity, buf, sizeof(buf), exceptionCode, modbusTestModeConfig.timeout_ms, &diag);
 
   String body;
-  body.reserve(160);
+  body.reserve(192);
   if (!ok) {
     body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
     body += String(exceptionCode);
-    body += F("}");
+    body += F(",\"detail\":\"");
+    body += jsonEscape(modbusReadDiagDetail(diag, slaveId));
+    body += F("\"}");
     configServer.send(200, "application/json", body);
     return;
   }

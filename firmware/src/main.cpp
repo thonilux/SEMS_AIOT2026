@@ -842,9 +842,9 @@ String mqttTelemetryTopic() {
   return getMqttBaseTopic() + "/telemetry";
 }
 
-// Per-relay boolean control topics, e.g. trofis/enms/nocola_1/control/switch_1
+// Per-relay boolean control topics, e.g. trofis/enms/nocola_1/control/slave_1
 String mqttSwitchTopic(size_t index) {
-  return getMqttBaseTopic() + "/control/switch_" + String(index + 1);
+  return getMqttBaseTopic() + "/control/slave_" + String(index + 1);
 }
 
 String mqttSwitchStateTopic(size_t index) {
@@ -899,7 +899,7 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  // Per-relay boolean switch topics: trofis/enms/<device>/control/switch_N,
+  // Per-relay boolean switch topics: trofis/enms/<device>/control/slave_N,
   // payload is a bare "0" or "1". Matched by exact topic, not by payload
   // content, so it doesn't interact with the generic parsing below.
   for (size_t i = 0; i < 4; i++) {
@@ -3130,7 +3130,7 @@ void handleDeviceConfigSaveApi() {
   }
 
   // device_name feeds getMqttBaseTopic() (see line ~420), so every MQTT
-  // topic — /cmd, /relay/set, /control/switch_N, /test, /state, etc. —
+  // topic — /cmd, /relay/set, /control/slave_N, /test, /state, etc. —
   // shifts the moment this changes. Force a reconnect so the client
   // re-subscribes under the new topics instead of sitting connected with
   // subscriptions still pinned to the old device name (silently breaking

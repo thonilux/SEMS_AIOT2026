@@ -4504,6 +4504,25 @@ void updateEthernetRuntime(uint32_t nowMs) {
 }  // namespace
 
 void setup() {
+  // Drive every relay pin to its OFF level before anything else — Serial
+  // init, delay(500), NVS reads for the other config namespaces, etc. all
+  // cost tens-to-hundreds of ms during which an active-LOW relay pin left
+  // floating/undriven can read as ON, clicking the relay briefly at every
+  // boot/reset. Doing this first shrinks that firmware-side window to
+  // ~nothing; it can't remove the very first ROM-bootloader-level glitch
+  // before user code even runs — that part needs an external pull-up
+  // (to 3.3V) on each relay control line so the pin defaults HIGH (=OFF
+  // for this active-LOW board) while it's floating.
+  {
+    const uint8_t defPins[4] = {2, 15, 14, 13};
+    currentProtectionConfig = ConfigManager::loadProtectionConfig();
+    for (size_t r = 0; r < 4; r++) {
+      uint8_t pin = (currentProtectionConfig.relay_pin[r] == 0) ? defPins[r] : currentProtectionConfig.relay_pin[r];
+      pinMode(pin, OUTPUT);
+      setRelayOutput(r, 0);
+    }
+  }
+
   Serial.begin(kSerialBaud);
   delay(500);
 
@@ -4514,14 +4533,6 @@ void setup() {
   currentMqttConfig = ConfigManager::loadMqttConfig();
   loadWifiConfig();
   currentModbusConfig = ConfigManager::loadModbusConfig();
-  currentProtectionConfig = ConfigManager::loadProtectionConfig();
-
-  const uint8_t defPins[4] = {2, 15, 14, 13};
-  for (size_t r = 0; r < 4; r++) {
-    uint8_t pin = (currentProtectionConfig.relay_pin[r] == 0) ? defPins[r] : currentProtectionConfig.relay_pin[r];
-    pinMode(pin, OUTPUT);
-    setRelayOutput(r, 0);
-  }
   currentDisplayConfig = ConfigManager::loadDisplayConfig();
   currentHistoryConfig = ConfigManager::loadHistoryConfig();
   currentSystemConfig = ConfigManager::loadSystemConfig();

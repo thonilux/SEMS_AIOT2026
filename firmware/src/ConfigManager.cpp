@@ -270,6 +270,10 @@ ProtectionConfig ConfigManager::loadProtectionConfig() {
   cfg.relay_pin[1] = prefs.getUChar("r_pin1", 15);
   cfg.relay_pin[2] = prefs.getUChar("r_pin2", 14);
   cfg.relay_pin[3] = prefs.getUChar("r_pin3", 13);
+  cfg.relay_slave_id[0] = prefs.getUChar("r_sid0", 1);
+  cfg.relay_slave_id[1] = prefs.getUChar("r_sid1", 2);
+  cfg.relay_slave_id[2] = prefs.getUChar("r_sid2", 3);
+  cfg.relay_slave_id[3] = prefs.getUChar("r_sid3", 4);
   cfg.current_limit_a = prefs.getUChar("curr_limit", 16);
   cfg.trip_delay_ms = prefs.getUInt("trip_delay_ms", 1000);
   cfg.reset_mode = prefs.getUChar("reset_mode", 0);
@@ -291,6 +295,10 @@ bool ConfigManager::saveProtectionConfig(const ProtectionConfig& cfg) {
   ok &= prefs.putUChar("r_pin1", cfg.relay_pin[1]) > 0;
   ok &= prefs.putUChar("r_pin2", cfg.relay_pin[2]) > 0;
   ok &= prefs.putUChar("r_pin3", cfg.relay_pin[3]) > 0;
+  ok &= prefs.putUChar("r_sid0", cfg.relay_slave_id[0]) > 0;
+  ok &= prefs.putUChar("r_sid1", cfg.relay_slave_id[1]) > 0;
+  ok &= prefs.putUChar("r_sid2", cfg.relay_slave_id[2]) > 0;
+  ok &= prefs.putUChar("r_sid3", cfg.relay_slave_id[3]) > 0;
   ok &= prefs.putUChar("curr_limit", cfg.current_limit_a) > 0;
   ok &= prefs.putUInt("trip_delay_ms", cfg.trip_delay_ms) > 0;
   ok &= prefs.putUChar("reset_mode", cfg.reset_mode) > 0;

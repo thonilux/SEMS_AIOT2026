@@ -842,9 +842,15 @@ String mqttTelemetryTopic() {
   return getMqttBaseTopic() + "/telemetry";
 }
 
-// Per-relay boolean control topics, e.g. trofis/enms/nocola_1/control/slave_1
+// Per-relay boolean control topics, e.g. trofis/enms/nocola_1/control/slave_1.
+// The slave_N suffix is configurable per relay (ProtectionConfig::relay_slave_id,
+// default {1,2,3,4}) so it can be remapped independently of the Modbus meter
+// slave IDs — e.g. relays mapped to slave_4/5/6 to match a site's numbering.
 String mqttSwitchTopic(size_t index) {
-  return getMqttBaseTopic() + "/control/slave_" + String(index + 1);
+  const uint8_t slaveId = (index < 4 && currentProtectionConfig.relay_slave_id[index] != 0)
+                               ? currentProtectionConfig.relay_slave_id[index]
+                               : static_cast<uint8_t>(index + 1);
+  return getMqttBaseTopic() + "/control/slave_" + String(slaveId);
 }
 
 String mqttSwitchStateTopic(size_t index) {
@@ -2900,6 +2906,21 @@ String buildProtectionConfigPage() {
     page += F("</select>");
   }
 
+  page += F("<hr style=\"margin:14px 0;border:none;border-top:1px solid #e2e8f0\">");
+  page += F("<div class=\"muted\" style=\"font-size:12px;margin-bottom:6px\">MQTT control topic per relay: &lt;base&gt;/control/slave_&lt;N&gt; — independent from the Modbus meter slave IDs.</div>");
+  for (size_t r = 0; r < 4; r++) {
+    const uint8_t curSid = (cfg.relay_slave_id[r] == 0) ? static_cast<uint8_t>(r + 1) : cfg.relay_slave_id[r];
+    page += F("<label for=\"relay_slave_id_");
+    page += String(r + 1);
+    page += F("\">Relay ");
+    page += String(r + 1);
+    page += F(" MQTT slave_N</label><input id=\"relay_slave_id_");
+    page += String(r + 1);
+    page += F("\" type=\"number\" min=\"1\" max=\"247\" value=\"");
+    page += String(curSid);
+    page += F("\">");
+  }
+
   page += F("<label for=\"current_limit\">Current Limit per Meter (A)</label><input id=\"current_limit\" type=\"number\" min=\"1\" max=\"63\" value=\"");
   page += String(cfg.current_limit_a);
   page += F("\"><label for=\"trip_delay\">Trip Delay (ms)</label><input id=\"trip_delay\" type=\"number\" min=\"100\" max=\"10000\" value=\"");
@@ -2931,6 +2952,8 @@ String buildProtectionConfigPage() {
   page += F("relay_enabled:document.getElementById('relay_enabled').checked?'1':'0',");
   page += F("relay_pin_1:document.getElementById('relay_pin_1').value,relay_pin_2:document.getElementById('relay_pin_2').value,");
   page += F("relay_pin_3:document.getElementById('relay_pin_3').value,relay_pin_4:document.getElementById('relay_pin_4').value,");
+  page += F("relay_slave_id_1:document.getElementById('relay_slave_id_1').value,relay_slave_id_2:document.getElementById('relay_slave_id_2').value,");
+  page += F("relay_slave_id_3:document.getElementById('relay_slave_id_3').value,relay_slave_id_4:document.getElementById('relay_slave_id_4').value,");
   page += F("current_limit:document.getElementById('current_limit').value,");
   page += F("trip_delay:document.getElementById('trip_delay').value,reset_mode:document.getElementById('reset_mode').value,");
   page += F("auto_retry_enabled:document.getElementById('auto_retry_enabled').checked?'1':'0',auto_retry_delay:document.getElementById('auto_retry_delay').value,");
@@ -3666,6 +3689,10 @@ void handleProtectionConfigSaveApi() {
   cfg.relay_pin[1] = configServer.hasArg("relay_pin_2") ? configServer.arg("relay_pin_2").toInt() : 15;
   cfg.relay_pin[2] = configServer.hasArg("relay_pin_3") ? configServer.arg("relay_pin_3").toInt() : 14;
   cfg.relay_pin[3] = configServer.hasArg("relay_pin_4") ? configServer.arg("relay_pin_4").toInt() : 13;
+  cfg.relay_slave_id[0] = configServer.hasArg("relay_slave_id_1") ? configServer.arg("relay_slave_id_1").toInt() : 1;
+  cfg.relay_slave_id[1] = configServer.hasArg("relay_slave_id_2") ? configServer.arg("relay_slave_id_2").toInt() : 2;
+  cfg.relay_slave_id[2] = configServer.hasArg("relay_slave_id_3") ? configServer.arg("relay_slave_id_3").toInt() : 3;
+  cfg.relay_slave_id[3] = configServer.hasArg("relay_slave_id_4") ? configServer.arg("relay_slave_id_4").toInt() : 4;
   cfg.current_limit_a = configServer.hasArg("current_limit") ? configServer.arg("current_limit").toInt() : 16;
   cfg.trip_delay_ms = configServer.hasArg("trip_delay") ? configServer.arg("trip_delay").toInt() : 1000;
   cfg.reset_mode = configServer.hasArg("reset_mode") ? configServer.arg("reset_mode").toInt() : 0;
@@ -3673,9 +3700,25 @@ void handleProtectionConfigSaveApi() {
   cfg.auto_retry_delay_sec = configServer.hasArg("auto_retry_delay") ? configServer.arg("auto_retry_delay").toInt() : 300;
   cfg.trip_on_meter_stale = configServer.hasArg("trip_on_stale") && configServer.arg("trip_on_stale") == "1";
 
+  // relay_slave_id feeds mqttSwitchTopic() (control/slave_N per relay), so a
+  // change here shifts which topics the device is subscribed to. Force a
+  // reconnect so it re-subscribes under the new topics instead of sitting
+  // connected with subscriptions still pinned to the old slave_N mapping.
+  bool relaySlaveIdChanged = false;
+  for (size_t r = 0; r < 4; r++) {
+    if (currentProtectionConfig.relay_slave_id[r] != cfg.relay_slave_id[r]) {
+      relaySlaveIdChanged = true;
+      break;
+    }
+  }
+
   bool ok = ConfigManager::saveProtectionConfig(cfg);
   if (ok) {
     currentProtectionConfig = cfg;
+    if (relaySlaveIdChanged && (*activeMqttClient).connected()) {
+      (*activeMqttClient).disconnect();
+      mqttConnected = false;
+    }
     for (size_t r = 0; r < 4; r++) {
       uint8_t pin = currentProtectionConfig.relay_pin[r];
       pinMode(pin, OUTPUT);

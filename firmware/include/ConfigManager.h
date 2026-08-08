@@ -66,6 +66,9 @@ struct ModbusMapConfig {
 struct ProtectionConfig {
   bool relay_enabled;
   uint8_t relay_pin[4];         // Pins for Relay 1, 2, 3, 4 (default: {2, 15, 14, 13})
+  uint8_t relay_slave_id[4];    // MQTT control/state topic suffix per relay (default: {1, 2, 3, 4}) —
+                                 // independent from ModbusConfig::slave_id, lets relay topics be
+                                 // remapped (e.g. slave_4/5/6) without touching meter polling.
   uint8_t current_limit_a;
   uint32_t trip_delay_ms;
   uint8_t reset_mode;           // 0=MANUAL, 1=AUTO

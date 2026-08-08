@@ -103,6 +103,11 @@ uint32_t displayLastUpdateMs = 0;
 uint8_t displayPage = 0;
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, /* reset= */ U8X8_PIN_NONE);
 
+// OLED navigation state (upstream rebuild-2026 behaviour)
+bool oledInMenu        = false;
+uint8_t oledMenuCursor = 0;     // 0=Config/Normal Mode, 1=View Info, 2=Exit
+bool oledInfoModeActive = false; // true while manually paging info screens
+
 bool ethLinkUp = false;
 bool ethConfigured = false;
 EthernetClient mqttEthTransport;
@@ -1042,6 +1047,9 @@ bool connectMqtt(uint32_t nowMs) {
   return true;
 }
 
+// Real wall-clock HH:MM:SS — no forced ":00". As long as NTP is synced,
+// the minute always reflects the actual local time the payload was built,
+// whether that's a scheduled tick or a manual "Push Data Now".
 String getFormattedTimestamp() {
   if (!timeSynced) {
     return String("not_synced");
@@ -1052,7 +1060,7 @@ String getFormattedTimestamp() {
     return String("not_synced");
   }
   char buffer[32] = {};
-  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:00", &timeInfo);
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeInfo);
   return String(buffer);
 }
 
@@ -1268,6 +1276,46 @@ void drawDisplayPage(U8G2* driver, uint8_t pageIndex) {
   driver->sendBuffer();
 }
 
+// Draw the 3-option Setting Menu overlay.
+// Called from updateDisplayRuntime when oledInMenu==true.
+static void drawSettingMenu(uint32_t nowMs) {
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x12_tf);
+
+  // Header
+  display.setFont(u8g2_font_helvB08_tf);
+  display.drawStr(0, 10, "SETTING MENU");
+  display.drawHLine(0, 14, 128);
+  display.setFont(u8g2_font_6x12_tf);
+
+  // Option 0: Config/Normal Mode toggle
+  const bool inCfg = (currentMode == AppMode::Config);
+  if (oledMenuCursor == 0) display.drawStr(2, 27, "> 1. Boot Mode");
+  else                     display.drawStr(10, 27, "1. Boot Mode");
+  display.drawStr(98, 27, inCfg ? "[CFG]" : "[NRM]");
+
+  // Option 1: View Info
+  if (oledMenuCursor == 1) display.drawStr(2, 39, "> 2. View Info");
+  else                     display.drawStr(10, 39, "2. View Info");
+
+  // Option 2: Exit
+  if (oledMenuCursor == 2) display.drawStr(2, 51, "> 3. Exit");
+  else                     display.drawStr(10, 51, "3. Exit");
+
+  // Bottom bar: hold-progress or hint
+  display.drawHLine(0, 55, 128);
+  display.setFont(u8g2_font_5x7_tf);
+  const uint32_t pressDur = (configButtonPressedSinceMs > 0) ? (nowMs - configButtonPressedSinceMs) : 0;
+  if (pressDur > 0) {
+    // Fill progress bar proportional to 2s hold
+    uint8_t bar = static_cast<uint8_t>(min(pressDur * 128 / 2000UL, 128UL));
+    display.drawBox(0, 57, bar, 7);
+  } else {
+    display.drawStr(2, 63, "Tap:Next | Hold 2s:Select");
+  }
+  display.sendBuffer();
+}
+
 void updateDisplayRuntime(uint32_t nowMs) {
   if (!currentDisplayConfig.enabled) {
     return;
@@ -1280,21 +1328,37 @@ void updateDisplayRuntime(uint32_t nowMs) {
     }
   }
 
-  const uint32_t intervalMs = static_cast<uint32_t>(currentDisplayConfig.rotation_interval_sec) * 1000UL;
-  if (intervalMs > 0 && nowMs - displayLastUpdateMs < intervalMs) {
-    return;
-  }
-  displayLastUpdateMs = nowMs;
-
-  if (configApStarted) {
-    // Setup mode: show SSID/password/IP only, don't rotate through pages
-    // that have nothing useful to show while the device isn't on a network.
+  // Config AP info screen takes priority over all navigation modes.
+  if (configApStarted && !oledInMenu && !oledInfoModeActive) {
+    if (nowMs - displayLastUpdateMs < 1000UL) return;
+    displayLastUpdateMs = nowMs;
     drawApInfoPage(&display);
     return;
   }
 
-  displayPage = (displayPage + 1) % 3;
-  drawDisplayPage(&display, displayPage);
+  // Setting Menu: redraw every heartbeat tick or while button is held.
+  if (oledInMenu) {
+    if (nowMs - displayLastUpdateMs < 200UL) return;
+    displayLastUpdateMs = nowMs;
+    drawSettingMenu(nowMs);
+    return;
+  }
+
+  // Info Mode (manual paging, pages 1-2): refresh every second.
+  if (oledInfoModeActive) {
+    if (nowMs - displayLastUpdateMs < 1000UL) return;
+    displayLastUpdateMs = nowMs;
+    drawDisplayPage(&display, displayPage);
+    return;
+  }
+
+  // Default: Dashboard (page 0) — auto-refresh every second.
+  if (displayPage != 0) {
+    displayPage = 0;
+  }
+  if (nowMs - displayLastUpdateMs < 1000UL) return;
+  displayLastUpdateMs = nowMs;
+  drawDisplayPage(&display, 0);
 }
 
 void loadFeatureRuntime() {
@@ -1890,8 +1954,12 @@ void pollModbusMeter(uint32_t nowMs) {
 }
 
 void startNtpSync() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("NTP skipped: WiFi is not connected");
+  // NTP needs *some* IP-capable link, WiFi STA or Ethernet — not WiFi
+  // specifically. Devices running LAN-only (no WiFi STA) used to never
+  // reach this far because the check below only looked at WiFi.status(),
+  // so timeSynced stayed false forever and every payload read "not_synced".
+  if (WiFi.status() != WL_CONNECTED && !ethLinkUp) {
+    Serial.println("NTP skipped: no network link (WiFi/ETH) up yet");
     return;
   }
 
@@ -2210,12 +2278,14 @@ String buildMqttConfigPage() {
   }
   page += F("</ul></div></section>");
 
-  page += F("<section class=\"panel\"><h2>Connection &amp; Push Test</h2>");
-  page += F("<p class=\"muted\">Diagnoses whether this device can only publish, or also subscribe — the broker may accept a connection but still deny that client's subscriptions (e.g. duplicate Client ID, or an ACL restriction), which looks identical to \"can't connect\" from the outside.</p>");
+  page += F("<section class=\"panel\"><h2>Connection &amp; Push Data</h2>");
+  page += F("<p class=\"muted\">Push Data Now publishes the real state/energy/kWh/control-state payloads to their actual production topics immediately, without waiting for the Publish Interval — the same publish the periodic loop does, just triggered on demand. It also re-arms the interval countdown from this moment.</p>");
   page += F("<p>Connected: <strong id=\"mt_connected\">checking...</strong> &nbsp; Broker RC: <span id=\"mt_rc\">-</span> &nbsp; Transport: <span id=\"mt_transport\">-</span></p>");
-  page += F("<p class=\"muted\">Client ID: <code id=\"mt_clientid\">-</code> &nbsp; Test Topic: <code id=\"mt_topic\">-</code></p>");
-  page += F("<div class=\"actions\"><button onclick=\"pushMqttTest()\">Push Test Data</button></div>");
-  page += F("<p id=\"mt_result\" class=\"muted\">Ready.</p></section></main>");
+  page += F("<p class=\"muted\">Client ID: <code id=\"mt_clientid\">-</code></p>");
+  page += F("<div class=\"actions\"><button onclick=\"pushMqttTest()\">Push Data Now</button></div>");
+  page += F("<p id=\"mt_result\" class=\"muted\">Ready.</p>");
+  page += F("<p class=\"muted\">Published topics appear below after a push. A separate loopback message is also sent to <code id=\"mt_topic\">-</code> (not one of your data topics) purely to verify this client can both publish AND receive — if it doesn't echo back within a few seconds, the broker is likely blocking this client's subscriptions even though publishing still works.</p>");
+  page += F("<ul id=\"mt_topics_list\" class=\"muted\"></ul></section></main>");
 
   page += F("<script>async function saveMqttConfig(){const s=document.getElementById('saveState');s.textContent='Saving...';const body=new URLSearchParams({");
   page += F("mqtt_enabled:document.getElementById('mqtt_enabled').checked?'1':'0',");
@@ -2248,13 +2318,16 @@ async function refreshMqttTestStatus() {
   }
 }
 
-// After a push, the echo only arrives if the broker lets this client
-// subscribe to the test topic — poll briefly for it instead of assuming a
-// successful publish means a working round-trip.
+// Pushes the real production topics immediately (server-side), then polls
+// briefly for the separate loopback echo — that echo only arrives if the
+// broker lets this client subscribe too, so it's checked independently of
+// whether the real-topic publish itself succeeded.
 async function pushMqttTest() {
   if (mtPollTimer) { clearInterval(mtPollTimer); mtPollTimer = null; }
   const r0 = document.getElementById('mt_result');
+  const list = document.getElementById('mt_topics_list');
   r0.textContent = 'Publishing...';
+  list.innerHTML = '';
   try {
     const pr = await fetch('/api/mqtt/test_publish', { method: 'POST' });
     const pd = await pr.json();
@@ -2263,7 +2336,8 @@ async function pushMqttTest() {
       refreshMqttTestStatus();
       return;
     }
-    r0.textContent = 'Published to ' + pd.topic + '. Waiting for echo (confirms subscribe works)...';
+    r0.textContent = 'Pushed now — published ' + pd.topics.length + ' topic(s), interval countdown restarted. Checking loopback echo...';
+    list.innerHTML = pd.topics.map(t => '<li><code>' + t + '</code></li>').join('');
   } catch (e) { r0.textContent = 'Publish request failed.'; return; }
 
   let attempts = 0;
@@ -2272,10 +2346,10 @@ async function pushMqttTest() {
     const d = await refreshMqttTestStatus();
     if (d && d.round_trip_ok) {
       clearInterval(mtPollTimer); mtPollTimer = null;
-      r0.textContent = 'Round-trip confirmed — publish and subscribe both work (echo received ' + d.echo_ms_ago + ' ms after push).';
+      r0.textContent = 'Pushed and confirmed — this client can both publish and subscribe (loopback echo received ' + d.echo_ms_ago + ' ms after push).';
     } else if (attempts >= 8) {
       clearInterval(mtPollTimer); mtPollTimer = null;
-      r0.textContent = 'Publish succeeded but no echo came back within ' + (attempts) + 's — this device likely cannot subscribe on this broker (check Client ID collision or broker ACL).';
+      r0.textContent = 'Pushed successfully, but the loopback echo never came back — this client likely cannot subscribe on this broker (check Client ID collision or broker ACL), even though its publishes above did go through.';
     }
   }, 1000);
 }
@@ -3026,10 +3100,25 @@ void handleDeviceConfigSaveApi() {
     cfg.co2_factor_kg_per_kwh = configServer.arg("co2_factor").toInt();
   }
 
+  // device_name feeds getMqttBaseTopic() (see line ~420), so every MQTT
+  // topic — /cmd, /relay/set, /control/switch_N, /test, /state, etc. —
+  // shifts the moment this changes. Force a reconnect so the client
+  // re-subscribes under the new topics instead of sitting connected with
+  // subscriptions still pinned to the old device name (silently breaking
+  // relay/command control and the Push Test round-trip alike).
+  const bool deviceNameChanged = strcmp(currentDeviceConfig.device_name, cfg.device_name) != 0;
+
   bool ok = ConfigManager::saveDeviceConfig(cfg);
   if (ok) {
     currentDeviceConfig = cfg;
     restartNtpSync();
+    if (deviceNameChanged) {
+      mqttClientConfigured = false;
+      if ((*activeMqttClient).connected()) {
+        (*activeMqttClient).disconnect();
+      }
+      mqttConnected = false;
+    }
   }
   sendNoCacheHeader();
   if (ok) {
@@ -3087,12 +3176,17 @@ void handleMqttConfigSaveApi() {
   }
 }
 
-// Publishes a small stamped JSON payload to <base>/test, which the device
-// itself is also subscribed to (see connectMqtt). Publish success only
-// proves the TCP/MQTT session is up; whether the echo actually comes back
-// (checked by the frontend polling /api/mqtt/test_status afterwards) is what
-// proves the broker allows this client to *subscribe* too — the exact gap
-// reported for nocola_2.
+// "Push Data Now" — publishes the actual production payloads (state,
+// elc_data/elc_wh per slave, control-state, switch states) to their real
+// topics immediately, bypassing the publish-interval wait, exactly like the
+// periodic loop in updateMqttRuntime() does. It ALSO republishes the
+// diagnostic <base>/test message the device is subscribed to (see
+// connectMqtt), so /api/mqtt/test_status can still report whether the echo
+// comes back — that round-trip is what tells "connected but broker won't
+// let this client subscribe" apart from "not connected at all", the exact
+// gap reported for nocola_2. The real-topic publishes above don't need that
+// round-trip to be useful on their own — they're what actually shows up for
+// whatever's subscribed to production topics (e.g. nocola_2's dashboard).
 void handleMqttTestPublishApi() {
   sendNoCacheHeader();
   if (!requireConfigMode()) return;
@@ -3101,6 +3195,10 @@ void handleMqttTestPublishApi() {
     configServer.send(400, "application/json", "{\"ok\":false,\"error\":\"not_connected\"}");
     return;
   }
+
+  publishMqttState();
+  publishMqttControlState();
+  mqttLastPublishMs = millis();  // restart the interval countdown from this manual push
 
   mqttTestSeq++;
   String payload;
@@ -3113,8 +3211,8 @@ void handleMqttTestPublishApi() {
   payload += String(millis());
   payload += F("}");
 
-  const String topic = mqttTestTopic();
-  const bool pubOk = (*activeMqttClient).publish(topic.c_str(), payload.c_str());
+  const String testTopic = mqttTestTopic();
+  const bool pubOk = (*activeMqttClient).publish(testTopic.c_str(), payload.c_str());
 
   mqttTestPublishOk = pubOk;
   mqttTestPublishMs = millis();
@@ -3125,14 +3223,27 @@ void handleMqttTestPublishApi() {
   mqttTestEchoMs = 0;
 
   String body;
-  body.reserve(96);
+  body.reserve(512);
   body += F("{\"ok\":");
   body += pubOk ? F("true") : F("false");
-  body += F(",\"topic\":\"");
-  body += jsonEscape(topic);
+  body += F(",\"test_topic\":\"");
+  body += jsonEscape(testTopic);
   body += F("\",\"rc\":");
   body += String((*activeMqttClient).state());
-  body += F("}");
+  body += F(",\"topics\":[\"");
+  body += jsonEscape(mqttStateTopic());
+  body += F("\"");
+  for (size_t m = 0; m < 3; m++) {
+    const uint8_t slaveId = currentModbusConfig.slave_id[m] == 0 ? static_cast<uint8_t>(m + 1) : currentModbusConfig.slave_id[m];
+    body += F(",\"");
+    body += jsonEscape(getMqttBaseTopic() + "/elc_data/slave_" + String(slaveId));
+    body += F("\",\"");
+    body += jsonEscape(getMqttBaseTopic() + "/elc_wh/slave_" + String(slaveId));
+    body += F("\"");
+  }
+  body += F(",\"");
+  body += jsonEscape(getMqttBaseTopic() + "/control-state");
+  body += F("\"]}");
   configServer.send(200, "application/json", body);
 }
 
@@ -3240,9 +3351,34 @@ void handleModMapUartRestoreApi() {
 // read) and returns each register's raw value undecoded — combining two
 // adjacent registers into a 32-bit field is a separate client-side step
 // (see mergeAsRow32 in the page script), not done here.
+// Standard Modbus exception codes (the slave answered — correct ID, valid
+// CRC — but refused the request). This is a *protocol-level* response, not
+// a communication failure, so it must never be reported as timeout/CRC noise.
+String modbusExceptionText(uint16_t code) {
+  switch (code) {
+    case 1: return F("ILLEGAL FUNCTION — this slave doesn't support function code 03/04 as requested");
+    case 2: return F("ILLEGAL DATA ADDRESS — Address (or Address+Quantity range) doesn't exist on this slave; check the meter's register map/datasheet");
+    case 3: return F("ILLEGAL DATA VALUE — Quantity is out of the range this slave accepts");
+    case 4: return F("SLAVE DEVICE FAILURE — an error occurred on the meter itself while processing the request");
+    case 5: return F("ACKNOWLEDGE — slave accepted but needs more time; retry");
+    case 6: return F("SLAVE DEVICE BUSY — slave is processing a long-duration command; retry");
+    case 8: return F("MEMORY PARITY ERROR");
+    case 10: return F("GATEWAY PATH UNAVAILABLE");
+    case 11: return F("GATEWAY TARGET DEVICE FAILED TO RESPOND");
+    default: {
+      String s; s.reserve(32);
+      s += F("Unknown exception code ");
+      s += String(code);
+      return s;
+    }
+  }
+}
+
 // Turns a failed-read ModbusReadDiag into an actionable detail string for the
 // /configmod UI, instead of a bare "timeout_or_crc" that can't tell "nothing
 // answered" apart from "something answered but garbled" or "wrong slave".
+// Only meaningful when exceptionCode == 0 — a nonzero exceptionCode means the
+// slave DID answer validly and modbusExceptionText() should be used instead.
 String modbusReadDiagDetail(const ModbusReadDiag& diag, uint8_t expectedSlaveId) {
   if (!diag.anyBytesReceived) {
     return F("no_response — check RS485 A/B wiring, baudrate/parity, and that Slave ID matches the meter");
@@ -3292,10 +3428,12 @@ void handleModMapReadBlockApi() {
   if (!ok) {
     String body;
     body.reserve(192);
-    body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
+    body += F("{\"ok\":false,\"error\":\"");
+    body += exceptionCode != 0 ? F("modbus_exception") : F("timeout_or_crc");
+    body += F("\",\"exception_code\":");
     body += String(exceptionCode);
     body += F(",\"detail\":\"");
-    body += jsonEscape(modbusReadDiagDetail(diag, slaveId));
+    body += jsonEscape(exceptionCode != 0 ? modbusExceptionText(exceptionCode) : modbusReadDiagDetail(diag, slaveId));
     body += F("\"}");
     configServer.send(200, "application/json", body);
     return;
@@ -3350,10 +3488,12 @@ void handleModMapReadApi() {
   String body;
   body.reserve(192);
   if (!ok) {
-    body += F("{\"ok\":false,\"error\":\"timeout_or_crc\",\"exception_code\":");
+    body += F("{\"ok\":false,\"error\":\"");
+    body += exceptionCode != 0 ? F("modbus_exception") : F("timeout_or_crc");
+    body += F("\",\"exception_code\":");
     body += String(exceptionCode);
     body += F(",\"detail\":\"");
-    body += jsonEscape(modbusReadDiagDetail(diag, slaveId));
+    body += jsonEscape(exceptionCode != 0 ? modbusExceptionText(exceptionCode) : modbusReadDiagDetail(diag, slaveId));
     body += F("\"}");
     configServer.send(200, "application/json", body);
     return;
@@ -3855,9 +3995,14 @@ void handleMeterStatusApi() {
 void handleWifiScanApi() {
   Serial.println("WiFi scan requested from setup UI");
   WiFi.mode(WIFI_AP_STA);
+  // Bug fix: first scan in AP/Config Mode often returns 0 (not -1) because
+  // the STA netif hasn't fully initialised after softAP().  Retry up to 2x
+  // on count <= 0 (covers both error returns AND the "0 networks" false-zero).
   int count = WiFi.scanNetworks(false, false);
-  if (count < 0) {
-    delay(100);
+  for (int _retry = 0; _retry < 2 && count <= 0; _retry++) {
+    Serial.printf("WiFi scan returned %d, retry %d/2...\n", count, _retry + 1);
+    delay(300);
+    WiFi.scanDelete();
     count = WiFi.scanNetworks(false, false);
   }
   String body;
@@ -4087,6 +4232,12 @@ void startConfigAccessPoint(bool disconnectSta) {
     return;
   }
 
+  // Warm-up: kick off an async background scan immediately after softAP so
+  // the STA netif is fully initialised before the user clicks "Scan" in the
+  // web UI.  Results are intentionally discarded — the sole purpose is to
+  // prime the radio so the first real scan returns accurate results.
+  WiFi.scanNetworks(/*async=*/true, /*show_hidden=*/false);
+
   configApStarted = true;
   Serial.println("Config AP started");
   Serial.print("AP SSID: ");
@@ -4111,37 +4262,95 @@ void enterConfigMode() {
   startConfigAccessPoint();
 }
 
-void handleConfigButton(uint32_t nowMs) {
-  if (currentMode == AppMode::Config) {
-    // setBuiltinLed(true);
-    startConfigAccessPoint();
-    return;
-  }
+// GPIO4 (TTP223 touch sensor, active-HIGH) — multi-function navigation button.
+// Short press (<2s) : navigate cursor/pages
+// Hold >=3s (outside menu, not info mode) : enter Setting Menu
+// Hold >=2s (inside menu)                : select menu option
+// Hold >=2s (inside info mode)           : exit info mode -> dashboard
+void handleBtn2(uint32_t nowMs) {
+  const bool pressed = isConfigButtonPressed(); // GPIO4 active-HIGH via PinMap
 
-  if (!isConfigButtonPressed()) {
-    configButtonPressedSinceMs = 0;
-    lastConfigButtonProgressSecond = 0;
-    // setBuiltinLed(false);
-    return;
-  }
+  if (pressed) {
+    if (configButtonPressedSinceMs == 0) {
+      configButtonPressedSinceMs = nowMs;
+    } else {
+      const uint32_t holdTime = nowMs - configButtonPressedSinceMs;
 
-  if (configButtonPressedSinceMs == 0) {
-    configButtonPressedSinceMs = nowMs;
-    lastConfigButtonProgressSecond = 0;
-    Serial.println("Config button pressed");
-  }
+      // --- In Info Mode: hold >=2s to exit back to dashboard ---
+      if (oledInfoModeActive && !oledInMenu) {
+        if (holdTime >= 2000) {
+          configButtonPressedSinceMs = 0;
+          oledInfoModeActive = false;
+          displayPage = 0;
+          displayLastUpdateMs = 0; // force immediate redraw
+          Serial.println("[BTN2] Exit Info Mode -> Dashboard");
+        }
 
-  const uint32_t heldMs = nowMs - configButtonPressedSinceMs;
-  const uint32_t heldSecond = heldMs / 1000;
-  if (heldSecond > lastConfigButtonProgressSecond) {
-    lastConfigButtonProgressSecond = heldSecond;
-    Serial.print("Config button held for ");
-    Serial.print(heldMs);
-    Serial.println(" ms");
-  }
+      // --- Outside menu (dashboard): hold >=3s to enter Setting Menu ---
+      } else if (!oledInMenu) {
+        if (holdTime >= 3000) {
+          configButtonPressedSinceMs = 0;
+          oledInMenu = true;
+          oledMenuCursor = 0;
+          displayLastUpdateMs = 0;
+          Serial.println("[BTN2] Entered Setting Menu");
+        }
 
-  if (heldMs >= kRuntimeConfigHoldMs) {
-    enterConfigMode();
+      // --- Inside Setting Menu: hold >=2s to select current option ---
+      } else {
+        if (holdTime >= 2000) {
+          configButtonPressedSinceMs = 0;
+          oledInMenu = false;
+          displayLastUpdateMs = 0;
+          if (oledMenuCursor == 0) {
+            // Toggle Config/Normal mode (in-place, no reboot)
+            Serial.println("[BTN2] Menu: Boot Mode selected");
+            if (currentMode == AppMode::Config) {
+              // Switch back to Normal mode
+              currentMode = AppMode::Normal;
+              Serial.println("[BTN2] -> Normal Mode");
+            } else {
+              enterConfigMode();
+            }
+          } else if (oledMenuCursor == 1) {
+            // Enter Info Mode: manual paging pages 1+()
+            oledInfoModeActive = true;
+            displayPage = 1;
+            Serial.println("[BTN2] Menu: View Info -> page 1");
+          } else if (oledMenuCursor == 2) {
+            // Exit menu
+            Serial.println("[BTN2] Menu: Exit");
+          }
+        }
+      }
+    }
+  } else {
+    // Button released
+    if (configButtonPressedSinceMs > 0) {
+      const uint32_t pressDuration = nowMs - configButtonPressedSinceMs;
+      configButtonPressedSinceMs = 0;
+
+      if (pressDuration < 2000) {
+        // Short press action
+        if (oledInMenu) {
+          // Advance menu cursor: 0 -> 1 -> 2 -> 0
+          oledMenuCursor = (oledMenuCursor + 1) % 3;
+          displayLastUpdateMs = 0;
+          Serial.printf("[BTN2] Menu cursor -> %d\n", oledMenuCursor);
+        } else if (oledInfoModeActive) {
+          // Next info page, skip page 0 (dashboard)
+          displayPage = (displayPage + 1) % 3;
+          if (displayPage == 0) displayPage = 1;
+          displayLastUpdateMs = 0;
+          Serial.printf("[BTN2] Info page -> %d\n", displayPage);
+        } else {
+          // Dashboard: force immediate redraw
+          displayPage = 0;
+          displayLastUpdateMs = 0;
+          Serial.println("[BTN2] Dashboard redraw");
+        }
+      }
+    }
   }
 }
 void initEthernet() {
@@ -4172,6 +4381,7 @@ void initEthernet() {
     Serial.print("ETH: IP=");
     Serial.println(Ethernet.localIP());
     startConfigWebServer();
+    startNtpSync();
     Serial.print("Open ETH Web UI: http://");
     Serial.println(Ethernet.localIP());
   }
@@ -4198,11 +4408,20 @@ void updateEthernetRuntime(uint32_t nowMs) {
       Serial.print("ETH: IP=");
       Serial.println(Ethernet.localIP());
       startConfigWebServer();
+      startNtpSync();
       Serial.print("Open ETH Web UI: http://");
       Serial.println(Ethernet.localIP());
     }
   } else {
     Ethernet.maintain();
+  }
+
+  if (ethLinkUp && !timeSynced) {
+    if (!ntpSyncStarted) {
+      startNtpSync();
+    } else {
+      checkNtpSync();
+    }
   }
 }
 }  // namespace
@@ -4265,7 +4484,7 @@ void loop() {
   updateStatusLed(nowMs);
   updateEthernetRuntime(nowMs);
   handleWiFiLifecycle(nowMs);
-  handleConfigButton(nowMs);
+  handleBtn2(nowMs);
   if (modbusTestModeActive && nowMs - modbusTestModeLastActivityMs >= kModbusTestModeIdleTimeoutMs) {
     restoreModbusNormalMode();
   }

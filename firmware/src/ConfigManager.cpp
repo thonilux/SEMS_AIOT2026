@@ -67,7 +67,7 @@ MqttConfig ConfigManager::loadMqttConfig() {
   prefs.getString("password", cfg.password, sizeof(cfg.password));
   prefs.getString("client_id", cfg.client_id, sizeof(cfg.client_id));
   prefs.getString("base_topic", cfg.base_topic, sizeof(cfg.base_topic));
-  cfg.publish_interval_sec = prefs.getUShort("pub_interval", 5);
+  cfg.publish_interval_sec = prefs.getUShort("pub_interval", 300);  // default 5 minutes
   cfg.enabled = prefs.getBool("enabled", false);
 
   prefs.end();

@@ -80,6 +80,7 @@ bool mqttConnected = false;
 bool mqttClientConfigured = false;
 uint32_t mqttLastReconnectAttemptMs = 0;
 uint32_t mqttLastPublishMs = 0;
+uint32_t mqttLastAlignedEpochMinute = 0;  // last wall-clock minute the aligned scheduler fired on (guards double-fire)
 // /mqtt "Push Test Data" diagnostic — a manual publish to <base>/test that
 // the device also subscribes to, so a successful round-trip (publish ok +
 // echo received back) proves both directions work, not just that connect()
@@ -1185,9 +1186,37 @@ void updateMqttRuntime(uint32_t nowMs) {
     mqttConnected = true;
   }
 
-  if ((*activeMqttClient).connected() && nowMs - mqttLastPublishMs >= static_cast<uint32_t>(currentMqttConfig.publish_interval_sec) * 1000UL) {
-    mqttLastPublishMs = nowMs;
-    publishMqttState();
+  if ((*activeMqttClient).connected()) {
+    const uint32_t intervalSec = static_cast<uint32_t>(currentMqttConfig.publish_interval_sec);
+    bool dueToPublish = false;
+
+    if (timeSynced && intervalSec >= 60) {
+      // Wall-clock-aligned schedule: fire exactly on the minute marks that
+      // are multiples of the configured interval (e.g. 5 min -> :00, :05,
+      // :10, :15 ...), regardless of when the device booted or last
+      // reconnected. mqttLastAlignedEpochMinute guards against firing more
+      // than once inside the same minute (loop() runs far faster than 1Hz).
+      const uint32_t intervalMin = intervalSec / 60;
+      time_t nowEpoch = time(nullptr);
+      struct tm ti{};
+      if (intervalMin > 0 && localtime_r(&nowEpoch, &ti)) {
+        const uint32_t epochMinute = static_cast<uint32_t>(nowEpoch / 60);
+        if ((static_cast<uint32_t>(ti.tm_min) % intervalMin) == 0 &&
+            epochMinute != mqttLastAlignedEpochMinute) {
+          mqttLastAlignedEpochMinute = epochMinute;
+          dueToPublish = true;
+        }
+      }
+    } else if (intervalSec > 0) {
+      // No time sync yet — fall back to the relative timer so telemetry
+      // still flows; once NTP catches up the schedule snaps to wall-clock.
+      dueToPublish = (nowMs - mqttLastPublishMs >= intervalSec * 1000UL);
+    }
+
+    if (dueToPublish) {
+      mqttLastPublishMs = nowMs;
+      publishMqttState();
+    }
   }
 }
 
@@ -2253,8 +2282,8 @@ String buildMqttConfigPage() {
   }
   page += F("\"><label for=\"mqtt_base_topic\">Base Topic Prefix</label><input id=\"mqtt_base_topic\" maxlength=\"64\" placeholder=\"trofis/enms\" value=\"");
   page += htmlEscape(baseTopicStr);
-  page += F("\"><label for=\"mqtt_publish_interval\">Publish Interval (sec)</label><input id=\"mqtt_publish_interval\" type=\"number\" min=\"1\" max=\"3600\" value=\"");
-  page += String(cfg.publish_interval_sec);
+  page += F("\"><label for=\"mqtt_publish_interval\">Publish Interval (menit)</label><input id=\"mqtt_publish_interval\" type=\"number\" min=\"1\" max=\"60\" value=\"");
+  page += String(cfg.publish_interval_sec / 60);
   page += F("\"><div class=\"actions\"><button onclick=\"saveMqttConfig()\">Save MQTT Config</button></div><p id=\"saveState\" class=\"muted\">Ready.</p></section>");
   
   page += F("<section class=\"panel\"><h2>MQTT Topics Preview & Format Notes</h2><div class=\"muted\">");
@@ -3155,7 +3184,12 @@ void handleMqttConfigSaveApi() {
     strncpy(cfg.base_topic, topic.c_str(), sizeof(cfg.base_topic) - 1);
   }
   if (configServer.hasArg("mqtt_publish_interval")) {
-    cfg.publish_interval_sec = configServer.arg("mqtt_publish_interval").toInt();
+    // Field is entered/displayed in whole minutes now (so the wall-clock
+    // aligned scheduler below always lands on a clean minute mark), stored
+    // internally as seconds. Clamp to at least 1 minute.
+    int minutes = configServer.arg("mqtt_publish_interval").toInt();
+    if (minutes < 1) minutes = 1;
+    cfg.publish_interval_sec = static_cast<uint16_t>(minutes * 60);
   }
   cfg.enabled = configServer.hasArg("mqtt_enabled") && configServer.arg("mqtt_enabled") == "1";
 

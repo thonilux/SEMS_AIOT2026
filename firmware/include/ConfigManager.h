@@ -30,17 +30,44 @@ struct MqttConfig {
 
 struct ModbusConfig {
   uint32_t baudrate;
-  uint8_t slave_id;
+  uint8_t pm_count;         // active PM slots, 1..3
+  uint8_t slave_id[3];      // PM slots on the same strict RS485 bus
+  uint8_t preset[3];        // per-slot register-map preset
   uint8_t parity;           // 0=EVEN, 1=ODD, 2=NONE
   uint8_t stop_bits;
   uint16_t poll_interval_ms;
   uint16_t timeout_ms;
   uint8_t retry_count;
-  uint8_t meter_profile;    // 0=Schneider EM6400 / PM2xxx, 1=Generic float32
+  uint8_t meter_profile;    // legacy/global fallback: 0=Renatta AX9L, 1=Generic float32, 2=Custom Mapping (/configmod)
+};
+
+// ============================================================================
+// MODBUS REGISTER MAPPING (used by the hidden /configmod scan/mapping tool)
+// ============================================================================
+// A user-defined list of {field, slave, function, address, datatype, scale}
+// entries built from the /configmod register scanner. When ModbusConfig's
+// meter_profile == 2, pollOneModbusMeter() uses this list (filtered by
+// slave_id) instead of the hardcoded Renatta AX9L register blocks.
+static constexpr uint8_t kModbusMapMaxEntries = 24;  // ~2KB blob, safe under the ~20KB default NVS partition
+
+struct ModbusMapEntry {
+  char field_key[40];   // dot-path e.g. "voltage.ua", or a free-form custom key
+  uint8_t slave_id;
+  uint8_t function;      // 3 = Holding Register, 4 = Input Register
+  uint16_t address;      // decimal register address (0-based), same convention as pollOneModbusMeter
+  uint8_t datatype;      // 0=UInt16, 1=Int16, 2=UInt32, 3=Int32, 4=Float32
+  float scale;           // multiplier applied after raw decode, default 1.0
+};
+
+struct ModbusMapConfig {
+  char name[40];  // user-given label, e.g. "Panel A Custom" — shown on /configmod and in the Meter Profile dropdown
+  uint8_t count;
+  ModbusMapEntry entries[kModbusMapMaxEntries];
 };
 
 struct ProtectionConfig {
   bool relay_enabled;
+  uint8_t relay_pin[4];         // Pins for Relay 1, 2, 3, 4 (default: {2, 15, 14, 13})
   uint8_t current_limit_a;
   uint32_t trip_delay_ms;
   uint8_t reset_mode;           // 0=MANUAL, 1=AUTO
@@ -80,8 +107,14 @@ class ConfigManager {
   static ModbusConfig loadModbusConfig();
   static bool saveModbusConfig(const ModbusConfig& cfg);
 
+  static ModbusMapConfig loadModbusMapConfig();
+  static bool saveModbusMapConfig(const ModbusMapConfig& cfg);
+
   static ProtectionConfig loadProtectionConfig();
   static bool saveProtectionConfig(const ProtectionConfig& cfg);
+
+  static void loadRelayStates(uint8_t states[4]);
+  static bool saveRelayStates(const uint8_t states[4]);
 
   static DisplayConfig loadDisplayConfig();
   static bool saveDisplayConfig(const DisplayConfig& cfg);
@@ -96,6 +129,7 @@ class ConfigManager {
   static constexpr const char* NS_DEVICE = "device";
   static constexpr const char* NS_MQTT = "mqtt";
   static constexpr const char* NS_MODBUS = "modbus";
+  static constexpr const char* NS_MODMAP = "modmap";
   static constexpr const char* NS_PROTECTION = "protection";
   static constexpr const char* NS_DISPLAY = "display";
   static constexpr const char* NS_HISTORY = "history";

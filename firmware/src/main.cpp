@@ -17,7 +17,7 @@
 #include <PubSubClient.h>
 #include <time.h>
 
-#define FW_VERSION "0.1.0"
+#define FW_VERSION "1.0.0"
 
 // ============================================================
 // Hardware constants
@@ -53,13 +53,16 @@ struct MeterSlotConfig {
   char     label[16] = "";
   uint8_t  meterType = 0;      // 0 = FP32 Schneider-family, 1 = Renata AX9L
   uint8_t  slaveId   = 1;
-  uint32_t baud      = 19200;
-  uint32_t pollMs    = 1000;
+  uint32_t pollMs    = 3000;   // slower default to ease RS485 bus load
   uint8_t  phase     = 3;      // 1 or 3 (Renata is effectively fixed 3-phase)
-  // Custom absolute MQTT base topic for gist-spec publish (elc_data/elc_wh
-  // land under "<mqttTopic>/elc_data" and "<mqttTopic>/elc_wh"). Empty = not
-  // published. User-editable free text, e.g. "trofis/enms/demo-sems/slave_1".
-  char     mqttTopic[48] = "";
+  // MQTT publish target, split in two per the gist spec's fixed topic shape
+  // "<base>/elc_data/<suffix>" and "<base>/elc_wh/<suffix>" — elc_data/elc_wh
+  // is a fixed middle segment, NOT something the user appends themselves.
+  // mqttTopic = base path, e.g. "trofis/enms/demo-sems" (no trailing slash).
+  // mqttSuffix = the per-meter identity segment, e.g. "slave_1". Empty
+  // mqttTopic = not published.
+  char     mqttTopic[40] = "";
+  char     mqttSuffix[16] = "";
   // 1-phase register map (FC03, FP32 big-endian, 0-based, PM2230 defaults)
   uint16_t r1V       = 3027;   // Voltage A-N
   uint16_t r1A       = 2999;   // Current A
@@ -100,6 +103,26 @@ struct MeterSlotConfig {
 };
 static MeterSlotConfig meterSlots[kMaxMeterSlots];
 
+// Single RS485 bus-wide baud + parity — every meter on this bus (Schneider
+// AND Renata alike) must physically share one UART framing, since Serial2
+// only has one active configuration at a time. Per-slot baud/parity override
+// was removed; this is the only knob now. parity: 0=8N1, 1=8E1, 2=8O1, 3=8N2.
+static constexpr char kNvsBus[] = "bus";
+struct BusConfig {
+  uint32_t baud   = 9600;
+  uint8_t  parity = 0;  // default 8N1 — matches this deployment's meters
+};
+static BusConfig busCfg;
+
+static uint32_t busSerialConfig() {
+  switch (busCfg.parity) {
+    case 0: return SERIAL_8N1;
+    case 2: return SERIAL_8O1;
+    case 3: return SERIAL_8N2;
+    default: return SERIAL_8E1;
+  }
+}
+
 // ============================================================
 // Relay control (4 channels) — NVS namespace "relay"
 // ============================================================
@@ -109,7 +132,7 @@ static constexpr uint8_t kRelayDefaultPins[kRelayCount] = {2, 15, 14, 13};
 
 struct RelayConfig {
   uint8_t  pin[kRelayCount] = {2, 15, 14, 13};
-  bool     activeHigh       = true;   // output polarity
+  bool     activeHigh       = false;  // output polarity — this deployment's relay module is active-LOW
   bool     enabled          = true;   // master enable — false forces all relays OFF
   bool     autoRetryEnabled = false;  // auto-retry after trip
   uint16_t autoRetryDelaySec = 30;    // seconds before retry attempt
@@ -939,11 +962,11 @@ static void seedMeterSlotDefaults() {
   snprintf(meterSlots[0].label, sizeof(meterSlots[0].label), "Renata1");
   meterSlots[0].meterType = 2;
   meterSlots[0].slaveId   = 1;
-  meterSlots[0].baud      = 9600;
-  meterSlots[0].pollMs    = 1000;
+  meterSlots[0].pollMs    = 3000;
   // phase=1 controls the MQTT payload SHAPE (B/C fields empty per gist spec).
   meterSlots[0].phase     = 1;
-  snprintf(meterSlots[0].mqttTopic, sizeof(meterSlots[0].mqttTopic), "trofis/enms/demo-sems/slave_2");
+  snprintf(meterSlots[0].mqttTopic, sizeof(meterSlots[0].mqttTopic), "trofis/enms/demo-sems");
+  snprintf(meterSlots[0].mqttSuffix, sizeof(meterSlots[0].mqttSuffix), "slave_2");
 
   // Slot 1: Schneider PM2120 (FP32 register map) — defaults match the
   // register map previously used by the single-meter ModbusConfig.
@@ -952,12 +975,12 @@ static void seedMeterSlotDefaults() {
   snprintf(meterSlots[1].label, sizeof(meterSlots[1].label), "PM2120");
   meterSlots[1].meterType = 0;
   meterSlots[1].slaveId   = 2;
-  meterSlots[1].baud      = 19200;
-  meterSlots[1].pollMs    = 1000;
+  meterSlots[1].pollMs    = 3000;
   meterSlots[1].phase     = 3;
   // Gist spec: slave_1 = 3-phase meter (Floor 1) — Schneider PM2120 is the
   // 3-phase unit in this deployment.
-  snprintf(meterSlots[1].mqttTopic, sizeof(meterSlots[1].mqttTopic), "trofis/enms/demo-sems/slave_1");
+  snprintf(meterSlots[1].mqttTopic, sizeof(meterSlots[1].mqttTopic), "trofis/enms/demo-sems");
+  snprintf(meterSlots[1].mqttSuffix, sizeof(meterSlots[1].mqttSuffix), "slave_1");
   meterSlots[1].r3Va      = 3027;
   meterSlots[1].r3Vb      = 3029;
   meterSlots[1].r3Vc      = 3031;
@@ -1029,12 +1052,15 @@ static void loadModbusConfig() {
       }
       snprintf(key, sizeof(key), "s%uty", i);    c.meterType = (uint8_t)p.getUChar(key, c.meterType);
       snprintf(key, sizeof(key), "s%usl", i);    c.slaveId   = (uint8_t)p.getUChar(key, c.slaveId);
-      snprintf(key, sizeof(key), "s%ubd", i);    c.baud      = p.getUInt(key, c.baud);
       snprintf(key, sizeof(key), "s%upl", i);    c.pollMs    = p.getUInt(key, c.pollMs);
       snprintf(key, sizeof(key), "s%uph", i);    c.phase     = (uint8_t)p.getUChar(key, c.phase);
       snprintf(key, sizeof(key), "s%utp", i);    {
         String tp = p.getString(key, c.mqttTopic);
         snprintf(c.mqttTopic, sizeof(c.mqttTopic), "%s", tp.c_str());
+      }
+      snprintf(key, sizeof(key), "s%uts", i);    {
+        String ts = p.getString(key, c.mqttSuffix);
+        snprintf(c.mqttSuffix, sizeof(c.mqttSuffix), "%s", ts.c_str());
       }
       for (uint8_t f = 0; f < kMbU16Count; f++) {
         snprintf(key, sizeof(key), "s%u%s", i, kMbU16Tags[f]);
@@ -1059,15 +1085,34 @@ static void saveModbusConfig() {
     snprintf(key, sizeof(key), "s%ulbl", i);  p.putString(key, c.label);
     snprintf(key, sizeof(key), "s%uty", i);   p.putUChar(key, c.meterType);
     snprintf(key, sizeof(key), "s%usl", i);   p.putUChar(key, c.slaveId);
-    snprintf(key, sizeof(key), "s%ubd", i);   p.putUInt(key, c.baud);
     snprintf(key, sizeof(key), "s%upl", i);   p.putUInt(key, c.pollMs);
     snprintf(key, sizeof(key), "s%uph", i);   p.putUChar(key, c.phase);
     snprintf(key, sizeof(key), "s%utp", i);   p.putString(key, c.mqttTopic);
+    snprintf(key, sizeof(key), "s%uts", i);   p.putString(key, c.mqttSuffix);
     for (uint8_t f = 0; f < kMbU16Count; f++) {
       snprintf(key, sizeof(key), "s%u%s", i, kMbU16Tags[f]);
       p.putUShort(key, *mbU16Field(c, f));
     }
   }
+  p.end();
+}
+
+// ============================================================
+// NVS — RS485 bus config (namespace "bus") — single baud+parity shared by
+// every meter slot, since Serial2 only has one active UART framing.
+// ============================================================
+static void loadBusConfig() {
+  Preferences p; p.begin(kNvsBus, true);
+  busCfg.baud   = p.getUInt("baud", busCfg.baud);
+  busCfg.parity = (uint8_t)p.getUChar("parity", busCfg.parity);
+  p.end();
+  Serial.printf("[NVS] Bus: baud=%lu parity=%u\n", busCfg.baud, busCfg.parity);
+}
+
+static void saveBusConfig() {
+  Preferences p; p.begin(kNvsBus, false);
+  p.putUInt("baud", busCfg.baud);
+  p.putUChar("parity", busCfg.parity);
   p.end();
 }
 
@@ -1080,7 +1125,7 @@ static void loadRelayConfig() {
     char key[6]; snprintf(key, sizeof(key), "pin%u", i);
     relayCfg.pin[i] = (uint8_t)p.getUChar(key, kRelayDefaultPins[i]);
   }
-  relayCfg.activeHigh       = p.getBool("actHigh", true);
+  relayCfg.activeHigh       = p.getBool("actHigh", false);
   relayCfg.enabled          = p.getBool("en",       true);
   relayCfg.autoRetryEnabled = p.getBool("arEn",     false);
   relayCfg.autoRetryDelaySec = p.getUShort("arSec", 30);
@@ -1290,12 +1335,20 @@ static float decode4QFpPf(float reg) {
 }
 
 // Macro: read 2 holding regs into float; on fail set ok=false and skip rest
+// A short inter-request gap is required before each MB_READ — some meters
+// (observed on this Schneider PM2120 unit) need a silent interval after
+// finishing one FC03 response before they're ready to decode the next
+// request; back-to-back requests with zero gap intermittently fail one of
+// the ~22 sequential reads in a 3-phase poll, which cascades to "ok=false"
+// and discards the entire (otherwise-valid) reading for that cycle.
 #define MB_READ(field, reg) \
+  delay(15); \
   if (ok && modbusRead2Regs(cfg.slaveId, (reg), raw)) \
     (field) = bytesToFloat(raw); \
   else ok = false;
 
 #define MB_READ4Q(field, reg) \
+  delay(15); \
   if (ok && modbusRead2Regs(cfg.slaveId, (reg), raw)) \
     (field) = decode4QFpPf(bytesToFloat(raw)); \
   else ok = false;
@@ -1494,14 +1547,10 @@ static void handleModbus(uint32_t now) {
   if (!meterSlots[modbusCurrentSlot].enabled) return;  // safety guard
 
   const MeterSlotConfig& cfg = meterSlots[modbusCurrentSlot];
-
-  // Reconfigure Serial2 for this slot's baud + framing.
-  // meterType 1 (Renata 3-phase) and 2 (Renata 1-phase) both use 8N2.
   bool isRenata = (cfg.meterType == 1 || cfg.meterType == 2);
-  uint32_t rs485Config = isRenata ? SERIAL_8N2 : SERIAL_8E1;
-  Serial2.end();
-  Serial2.begin(cfg.baud, rs485Config, kRs485Rx, kRs485Tx);
-  delay(5);  // let UART settle after reconfiguration
+  // Serial2 is configured once for the whole bus (single baud+parity shared
+  // by every slot) — see setup() / applyBusSerialConfig(). No per-slot
+  // reconfigure needed here anymore.
 
   if (isRenata) {
     pollRenataSlot(modbusCurrentSlot, now);
@@ -1532,21 +1581,37 @@ static void mqttPublishAbsolute(const String& topic, const String& payload) {
   if (ok) { mqttTxUntilMs = millis() + 1000; mqttPostCount++; }
 }
 
-// Publishes one enabled/valid slot's reading to a user-configured absolute
-// MQTT base topic (cfg.mqttTopic), following the hardware-team gist's payload
-// shape: "<mqttTopic>/elc_data" (nested JSON, string-valued electrical fields)
-// and "<mqttTopic>/elc_wh" (numeric wh). Empty mqttTopic = not published.
-// Payload shape (1-phase vs 3-phase) follows cfg.phase (Mode Fasa), which is
-// independent of how the slot is actually read over Modbus — e.g. a Renata
-// AX9L polled via the 3-phase-shaped block-read register map can still be
-// configured phase=1 to report as a 1-phase meter in this payload.
-static void publishMeterSlot(uint8_t i) {
+// Extracts the trailing integer from mqttSuffix, e.g. "slave_2" -> 2. Per
+// the gist spec, the body's "slave_id" field must match this suffix number
+// (the ingest worker parses the authoritative slave_id from the TOPIC, but
+// the body value must stay consistent with it) — it is NOT the Modbus RTU
+// slave address (cfg.slaveId), which is an unrelated, independently-
+// configured number. Falls back to cfg.slaveId if suffix has no digits.
+static uint32_t gistIdFromSuffix(const MeterSlotConfig& cfg) {
+  String s = cfg.mqttSuffix;
+  int i = s.length() - 1;
+  if (i < 0 || !isDigit(s[i])) return cfg.slaveId;
+  int end = i + 1;
+  while (i >= 0 && isDigit(s[i])) i--;
+  return (uint32_t)s.substring(i + 1, end).toInt();
+}
+
+// Publishes one enabled/valid slot's real-time reading to
+// "<mqttTopic>/elc_data/<mqttSuffix>" (nested JSON, string-valued electrical
+// fields per the gist spec — elc_data is a FIXED middle segment, not
+// appended after the user's topic). Payload shape (1-phase vs 3-phase)
+// follows cfg.phase (Mode Fasa), independent of how the slot is actually
+// read over Modbus — e.g. a Renata AX9L polled via the 3-phase-shaped
+// block-read register map can still be configured phase=1 to report as a
+// 1-phase meter in this payload.
+static void publishElcData(uint8_t i) {
   const MeterSlotConfig& cfg = meterSlots[i];
   const MeterSlotResult& m   = meterResults[i];
   if (!cfg.enabled || !m.valid || cfg.mqttTopic[0] == '\0') return;
 
   char ts[24];
   gistTimestamp(ts, sizeof(ts));
+  uint32_t gistId = gistIdFromSuffix(cfg);
 
   char buf[512];
   if (cfg.phase == 1) {
@@ -1560,7 +1625,7 @@ static void publishMeterSlot(uint8_t i) {
       "\"apparent\":{\"sa\":\"%.1f\",\"sb\":\"\",\"sc\":\"\",\"total\":\"%.1f\"}},"
       "\"power_factor\":{\"pf1\":\"%.3f\",\"pf2\":\"\",\"pf3\":\"\",\"avg\":\"%.3f\"},"
       "\"frequency\":\"%.2f\"}",
-      ts, cfg.slaveId,
+      ts, gistId,
       m.va, m.ia,
       m.ptot * 1000.0f, m.ptot * 1000.0f,   // kW -> W
       m.qtot * 1000.0f, m.qtot * 1000.0f,   // kvar -> var
@@ -1577,7 +1642,7 @@ static void publishMeterSlot(uint8_t i) {
       "\"apparent\":{\"sa\":\"%.1f\",\"sb\":\"%.1f\",\"sc\":\"%.1f\",\"total\":\"%.1f\"}},"
       "\"power_factor\":{\"pf1\":\"%.3f\",\"pf2\":\"%.3f\",\"pf3\":\"%.3f\",\"avg\":\"%.3f\"},"
       "\"frequency\":\"%.2f\"}",
-      ts, cfg.slaveId,
+      ts, gistId,
       m.va, m.vb, m.vc, m.vll,
       m.ia, m.ib, m.ic,
       m.pa * 1000.0f, m.pb * 1000.0f, m.pc * 1000.0f, m.ptot * 1000.0f,
@@ -1586,22 +1651,68 @@ static void publishMeterSlot(uint8_t i) {
       m.pfa, m.pfb, m.pfc, m.pftot,
       m.hz);
   }
-  String dataTopic = String(cfg.mqttTopic) + "/elc_data";
+  String dataTopic = String(cfg.mqttTopic) + "/elc_data/" + String(cfg.mqttSuffix);
   mqttPublishAbsolute(dataTopic, buf);
+}
 
-  // Energy: separate topic, "wh" is a numeric field (not string) per spec.
+// Publishes one enabled/valid slot's accumulated energy to
+// "<mqttTopic>/elc_wh/<mqttSuffix>" — "wh" is numeric (not string) per spec.
+static void publishElcWh(uint8_t i) {
+  const MeterSlotConfig& cfg = meterSlots[i];
+  const MeterSlotResult& m   = meterResults[i];
+  if (!cfg.enabled || !m.valid || cfg.mqttTopic[0] == '\0') return;
+
+  char ts[24];
+  gistTimestamp(ts, sizeof(ts));
+  uint32_t gistId = gistIdFromSuffix(cfg);
+
   char eBuf[80];
   snprintf(eBuf, sizeof(eBuf), "{\"timestamp\":\"%s\",\"slave_id\":%u,\"wh\":%.1f}",
-    ts, cfg.slaveId, m.kwh * 1000.0); // kWh -> Wh
-  String whTopic = String(cfg.mqttTopic) + "/elc_wh";
+    ts, gistId, m.kwh * 1000.0); // kWh -> Wh
+  String whTopic = String(cfg.mqttTopic) + "/elc_wh/" + String(cfg.mqttSuffix);
   mqttPublishAbsolute(whTopic, eBuf);
 }
 
+// RTC-scheduled publish, staggered per slot index to spread bus/broker load:
+//   elc_data (real-time V/I/P): published 3x/minute, at second (i+1),
+//     (i+1)+20, (i+1)+40 — e.g. slot 0 -> :01/:21/:41, slot 1 -> :02/:22/:42.
+//   elc_wh (accumulated energy): published 1x/minute, at second (i+1) only
+//     — e.g. slot 0 -> :01, slot 1 -> :02.
+// Requires NTP sync; falls back to the old fixed-interval scheme (every
+// kMeterPublishMs) if NTP hasn't synced yet, so publishing still works
+// before time sync completes.
+static int8_t lastPublishedDataSec[kMaxMeterSlots] = {-1, -1, -1, -1};
+static int8_t lastPublishedWhSec[kMaxMeterSlots]   = {-1, -1, -1, -1};
+
 static void publishMeter(uint32_t now) {
   if (!mqttConnected) return;
-  if (now - mqttMeterLastMs < kMeterPublishMs) return;
-  mqttMeterLastMs = now;
-  for (uint8_t i = 0; i < kMaxMeterSlots; i++) publishMeterSlot(i);
+
+  struct tm ti;
+  if (!ntpSynced || !getLocalTime(&ti, 0)) {
+    // No RTC yet — fall back to the old simple interval so data still flows.
+    if (now - mqttMeterLastMs < kMeterPublishMs) return;
+    mqttMeterLastMs = now;
+    for (uint8_t i = 0; i < kMaxMeterSlots; i++) { publishElcData(i); publishElcWh(i); }
+    return;
+  }
+
+  int sec = ti.tm_sec;
+  for (uint8_t i = 0; i < kMaxMeterSlots; i++) {
+    int slotSec = (i + 1) % 60;  // slot 0 -> :01, slot 1 -> :02, ...
+
+    // elc_data: fires at slotSec, slotSec+20, slotSec+40.
+    bool dataDue = (sec == slotSec) || (sec == (slotSec + 20) % 60) || (sec == (slotSec + 40) % 60);
+    if (dataDue && lastPublishedDataSec[i] != sec) {
+      lastPublishedDataSec[i] = sec;
+      publishElcData(i);
+    }
+
+    // elc_wh: fires once per minute, at slotSec only.
+    if (sec == slotSec && lastPublishedWhSec[i] != sec) {
+      lastPublishedWhSec[i] = sec;
+      publishElcWh(i);
+    }
+  }
 }
 
 // ============================================================
@@ -2018,19 +2129,31 @@ static String getApSsid() {
 void startAp() {
   const String ssid = getApSsid();
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  WiFi.softAP(ssid.c_str(), kApPass);
-  apStarted = true;
-  Serial.printf("[AP] %s  192.168.4.1\n", ssid.c_str());
-  oledShow("AP Ready", ssid.c_str(), "192.168.4.1", 6000);
+  bool ok = WiFi.softAP(ssid.c_str(), kApPass);
+  if (!ok) {
+    // WiFi radio may not be ready immediately after ETH/SPI init (PLL lock,
+    // mode switch settling) — retry once after a short delay instead of
+    // silently reporting apStarted=true while nothing is actually broadcasting.
+    Serial.println("[AP] softAP() failed on first attempt — retrying...");
+    delay(300);
+    ok = WiFi.softAP(ssid.c_str(), kApPass);
+  }
+  apStarted = ok;
+  if (ok) {
+    Serial.printf("[AP] %s  192.168.4.1\n", ssid.c_str());
+    oledShow("AP Ready", ssid.c_str(), "192.168.4.1", 6000);
+  } else {
+    Serial.println("[AP] softAP() FAILED after retry — AP not broadcasting!");
+    oledShow("AP FAILED", "Check WiFi radio", "", 6000);
+  }
 }
 
 void restoreAp() {
   if (apStarted) return;
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   const String ssid = getApSsid();
-  WiFi.softAP(ssid.c_str(), kApPass);
-  apStarted = true;
-  Serial.println("[AP] Restored");
+  apStarted = WiFi.softAP(ssid.c_str(), kApPass);
+  Serial.println(apStarted ? "[AP] Restored" : "[AP] Restore FAILED — softAP() returned false");
 }
 
 // ============================================================
@@ -2851,6 +2974,31 @@ static void handleModbusPage() {
               "</div>");
   }
 
+  // RS485 bus-wide baud+parity — one shared UART framing for every slot
+  // (Config Mode only; takes effect immediately, no reboot needed).
+  if (configMode) {
+    html += F("<div class=card><div class=card-title>RS485 Bus (semua slot)</div>"
+              "<div style='display:grid;grid-template-columns:1fr 1fr;gap:0 16px'>"
+              "<div><label>Baud Rate</label><select id=busBd>");
+    const uint32_t bauds[] = {1200,2400,4800,9600,19200,38400,115200};
+    for (uint32_t b : bauds) {
+      html += "<option value="; html += b;
+      if (b == busCfg.baud) html += F(" selected");
+      html += ">"; html += b; html += F("</option>");
+    }
+    html += F("</select></div>"
+              "<div><label>Parity</label><select id=busPar>"
+              "<option value=0"); if (busCfg.parity==0) html += F(" selected"); html += F(">8N1 (No Parity)</option>"
+              "<option value=1"); if (busCfg.parity==1) html += F(" selected"); html += F(">8E1 (Even)</option>"
+              "<option value=2"); if (busCfg.parity==2) html += F(" selected"); html += F(">8O1 (Odd)</option>"
+              "<option value=3"); if (busCfg.parity==3) html += F(" selected"); html += F(">8N2 (No Parity, 2 Stop)</option>"
+              "</select></div></div>"
+              "<div style='font-size:11px;color:#64748b;margin-top:8px'>Semua meter di bus RS485 ini (Schneider &amp; Renata) harus pakai baud/parity yang sama secara fisik.</div>"
+              "<button class=\"btn btn-sm\" style=\"margin-top:10px\" onclick=saveBus()>Simpan Bus Config</button>"
+              "<span id=busMsg style=\"margin-left:8px;font-size:12px\"></span>"
+              "</div>");
+  }
+
   // Container populated by JS with one card per slot (status + readings,
   // and — only in Config Mode — an inline edit form per slot).
   html += F("<div id=slots><p style='color:#94a3b8;font-size:13px'>Memuat slot...</p></div>");
@@ -2914,15 +3062,14 @@ static void handleModbusPage() {
         "+'<option value=1'+(mt==1?' selected':'')+'>INT32 (Renata AX9L 3P)</option>'"
         "+'<option value=2'+(mt==2?' selected':'')+'>INT32 (Renata AX9L 1P)</option></select></div>'"
       "+'<div><label>Slave ID (1-247)</label><input type=number id=sl'+i+' min=1 max=247 value='+s.slave+'></div>'"
-      "+'<div><label>Baud Rate</label><select id=bd'+i+'>'"
-        "+[1200,2400,4800,9600,19200,38400,115200].map(b=>'<option value='+b+(b==s.baud?' selected':'')+'>'+b+'</option>').join('')"
-      "+'</select></div>'"
       "+'<div><label>Poll (ms)</label><input type=number id=pl'+i+' min=200 max=60000 value='+s.poll+'></div>'"
       "+'<div><label>Mode Fasa</label><div style=\"display:flex;gap:12px;margin-top:6px\">'"
         "+'<label style=\"display:flex;align-items:center;gap:5px;font-size:13px\"><input type=radio name=ph'+i+' id=ph'+i+'_1 value=1'+(s.phase==1?' checked':'')+'>1-Phase</label>'"
         "+'<label style=\"display:flex;align-items:center;gap:5px;font-size:13px\"><input type=radio name=ph'+i+' id=ph'+i+'_3 value=3'+(s.phase==3?' checked':'')+'>3-Phase</label>'"
       "+'</div></div>'"
-      "+'<div><label>MQTT Topic</label><input type=text id=tp'+i+' maxlength=47 placeholder=\"trofis/enms/demo-sems/slave_1\" value=\"'+eh(s.tp||'')+'\"></div>'"
+      "+'<div><label>MQTT Base Topic</label><input type=text id=tp'+i+' maxlength=39 placeholder=\"trofis/enms/demo-sems\" value=\"'+eh(s.tp||'')+'\"></div>'"
+      "+'<div><label>MQTT Suffix (id meter)</label><input type=text id=tsx'+i+' maxlength=15 placeholder=\"slave_1\" value=\"'+eh(s.tsx||'')+'\"></div>'"
+      "+'<div style=\"grid-column:1/3;font-size:11px;color:#64748b\">Publish ke: <code>&lt;topic&gt;/elc_data/&lt;suffix&gt;</code> dan <code>&lt;topic&gt;/elc_wh/&lt;suffix&gt;</code></div>'"
       "+'</div>'"
       "+h"
       "+'<button class=\"btn btn-sm\" style=\"margin-top:10px\" onclick=saveSlot('+i+')>Simpan Slot '+(i+1)+'</button>'"
@@ -2950,14 +3097,23 @@ static void handleModbusPage() {
     "document.getElementById('mt'+i).value=k==='renata'?1:0;"
     "dirty[i]=true;}"
   "function gv(id,def){const el=document.getElementById(id);return el?(parseInt(el.value)||def):def;}"
+  "async function saveBus(){"
+    "const msg=document.getElementById('busMsg');msg.className='';msg.textContent='Menyimpan...';"
+    "const b={baud:parseInt(document.getElementById('busBd').value),"
+      "parity:parseInt(document.getElementById('busPar').value)};"
+    "const r=await fetch('/api/bus/save',{method:'POST',headers:{'Content-Type':'application/json'},"
+      "body:JSON.stringify(b)}).then(x=>x.json());"
+    "if(r.ok){msg.className='ok';msg.textContent='Tersimpan! Aktif sekarang.';}"
+    "else{msg.className='err';msg.textContent='Error: '+(r.error||'unknown');}}"
   "async function saveSlot(i){"
     "const msg=document.getElementById('msg'+i);msg.className='';msg.textContent='Menyimpan...';"
     "const b={slot:i,en:document.getElementById('en'+i).checked,"
       "lbl:document.getElementById('lbl'+i).value.slice(0,15),"
       "type:parseInt(document.getElementById('mt'+i).value),"
-      "slave:gv('sl'+i,1),baud:parseInt(document.getElementById('bd'+i).value)||19200,"
+      "slave:gv('sl'+i,1),"
       "poll:gv('pl'+i,1000),phase:document.getElementById('ph'+i+'_3').checked?3:1,"
-      "tp:document.getElementById('tp'+i).value.trim().slice(0,47)};"
+      "tp:document.getElementById('tp'+i).value.trim().slice(0,39),"
+      "tsx:document.getElementById('tsx'+i).value.trim().slice(0,15)};"
     "b['1V']=gv('r1V'+i,3027);b['1A']=gv('r1A'+i,2999);b['1Kw']=gv('r1Kw'+i,3053);"
     "b['1Kvar']=gv('r1Kvar'+i,3061);b['1Kva']=gv('r1Kva'+i,3069);b['1Pf']=gv('r1Pf'+i,3077);"
     "b['1Kwh']=gv('r1Kwh'+i,2675);b['1Hz']=gv('r1Hz'+i,3109);"
@@ -3032,7 +3188,8 @@ static void handleModbusPage() {
 static void handleModbusPingApi() {
   uint16_t addr = (uint16_t)server.arg("addr").toInt();
   // Optional "slot" selects which configured slot's slaveId to default to;
-  // "slave" (if given) still overrides it directly.
+  // "slave" (if given) still overrides it directly. Baud/parity are bus-wide
+  // (busCfg) — Serial2 is always already configured to match.
   uint8_t slotIdx = server.hasArg("slot") ? (uint8_t)server.arg("slot").toInt() : 0;
   if (slotIdx >= kMaxMeterSlots) slotIdx = 0;
   uint8_t  slave = server.hasArg("slave") ? (uint8_t)server.arg("slave").toInt() : meterSlots[slotIdx].slaveId;
@@ -3062,26 +3219,29 @@ static void handleModbusPingApi() {
 static void appendSlotSummary(String& body, uint8_t i) {
   const MeterSlotConfig& c = meterSlots[i];
   const MeterSlotResult& r = meterResults[i];
-  // Topic is user-typed free text — escape quotes/backslashes before
+  // Topic/suffix are user-typed free text — escape quotes/backslashes before
   // embedding in the JSON string literal.
   String tpEsc = c.mqttTopic;
   tpEsc.replace("\\", "\\\\");
   tpEsc.replace("\"", "\\\"");
-  char buf[320];
+  String tsEsc = c.mqttSuffix;
+  tsEsc.replace("\\", "\\\\");
+  tsEsc.replace("\"", "\\\"");
+  char buf[360];
   if (c.phase == 1) {
     snprintf(buf, sizeof(buf),
-      "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"baud\":%lu,\"poll\":%lu,\"phase\":1,\"tp\":\"%s\""
+      "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"poll\":%lu,\"phase\":1,\"tp\":\"%s\",\"tsx\":\"%s\""
       ",\"online\":%s,\"valid\":%s"
       ",\"v\":%.1f,\"a\":%.3f,\"ptot\":%.3f,\"pftot\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
-      i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.baud, c.pollMs, tpEsc.c_str(),
+      i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.pollMs, tpEsc.c_str(), tsEsc.c_str(),
       r.online ? "true":"false", r.valid ? "true":"false",
       r.va, r.ia, r.ptot, r.pftot, r.kwh, r.hz);
   } else {
     snprintf(buf, sizeof(buf),
-      "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"baud\":%lu,\"poll\":%lu,\"phase\":3,\"tp\":\"%s\""
+      "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"poll\":%lu,\"phase\":3,\"tp\":\"%s\",\"tsx\":\"%s\""
       ",\"online\":%s,\"valid\":%s"
       ",\"va\":%.1f,\"vb\":%.1f,\"vc\":%.1f,\"iavg\":%.3f,\"ptot\":%.3f,\"pftot\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
-      i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.baud, c.pollMs, tpEsc.c_str(),
+      i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.pollMs, tpEsc.c_str(), tsEsc.c_str(),
       r.online ? "true":"false", r.valid ? "true":"false",
       r.va, r.vb, r.vc, r.iavg, r.ptot, r.pftot, r.kwh, r.hz);
   }
@@ -3098,7 +3258,8 @@ static void handleModbusApi() {
   const MeterSlotResult& res0 = meterResults[0];
   body  = "{\"ok\":true";
   body += ",\"slave\":";  body += cfg0.slaveId;
-  body += ",\"baud\":";   body += cfg0.baud;
+  body += ",\"baud\":";   body += busCfg.baud;    // bus-wide, not per-slot
+  body += ",\"parity\":"; body += busCfg.parity;
   body += ",\"poll\":";   body += cfg0.pollMs;
   body += ",\"phase\":";  body += cfg0.phase;
   body += ",\"type\":";   body += cfg0.meterType;
@@ -3188,30 +3349,26 @@ static void handleModbusSave() {
   uint8_t slotIdx = (uint8_t)jsonInt(body, "slot", 0);
   if (slotIdx >= kMaxMeterSlots) slotIdx = 0;
   uint8_t  slave = (uint8_t)jsonInt(body, "slave", 1);
-  uint32_t baud  = (uint32_t)jsonInt(body, "baud",  19200);
   uint32_t poll  = (uint32_t)jsonInt(body, "poll",  1000);
   uint8_t  phase = (uint8_t)jsonInt(body, "phase", 1);
   uint8_t  mtype = (uint8_t)jsonInt(body, "type",  0);
   if (slave < 1 || slave > 247) slave = 1;
   if (phase != 1 && phase != 3) phase = 1;
   if (mtype > 2) mtype = 0;  // 0=Schneider FP32, 1=Renata 3P, 2=Renata 1P
-  const uint32_t validBauds[] = {1200,2400,4800,9600,19200,38400,115200};
-  bool baudOk = false;
-  for (uint32_t vb : validBauds) if (baud == vb) { baudOk = true; break; }
-  if (!baudOk) baud = 19200;
   if (poll < 200) poll = 200;
 
   // Writes into the slot selected by the optional "slot" field (defaults
   // to slot 0 for the current single-slot HTML page).
   MeterSlotConfig& cfg0 = meterSlots[slotIdx];
   cfg0.slaveId   = slave;
-  cfg0.baud      = baud;
   cfg0.pollMs    = poll;
   cfg0.phase     = phase;
   cfg0.meterType = mtype;
-  // User-editable absolute MQTT base topic — empty means "don't publish".
+  // User-editable MQTT base topic + suffix — empty topic means "don't publish".
   String tp = jsonExtract(body, "tp");
   snprintf(cfg0.mqttTopic, sizeof(cfg0.mqttTopic), "%s", tp.c_str());
+  String tsx = jsonExtract(body, "tsx");
+  snprintf(cfg0.mqttSuffix, sizeof(cfg0.mqttSuffix), "%s", tsx.c_str());
   // 1-phase
   cfg0.r1V     = (uint16_t)jsonInt(body, "1V",    3027);
   cfg0.r1A     = (uint16_t)jsonInt(body, "1A",    2999);
@@ -3257,8 +3414,30 @@ static void handleModbusSave() {
     lbl.toCharArray(cfg0.label, sizeof(cfg0.label));
   }
   saveModbusConfig();
-  Serial.printf("[Modbus] Saved: slave=%d baud=%lu poll=%lums phase=%d\n",
-    cfg0.slaveId, cfg0.baud, cfg0.pollMs, cfg0.phase);
+  Serial.printf("[Modbus] Saved: slave=%d poll=%lums phase=%d\n",
+    cfg0.slaveId, cfg0.pollMs, cfg0.phase);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Bus-wide baud+parity save — applies to Serial2 immediately (all slots
+// share one UART framing, so this takes effect on the very next poll rather
+// than requiring a reboot).
+static void handleBusSave() {
+  String body = server.arg("plain");
+  uint32_t baud   = (uint32_t)jsonInt(body, "baud", busCfg.baud);
+  uint8_t  parity = (uint8_t)jsonInt(body, "parity", busCfg.parity);
+  const uint32_t validBauds[] = {1200,2400,4800,9600,19200,38400,115200};
+  bool baudOk = false;
+  for (uint32_t vb : validBauds) if (baud == vb) { baudOk = true; break; }
+  if (!baudOk) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_baud\"}"); return; }
+  if (parity > 3) parity = 1;
+
+  busCfg.baud   = baud;
+  busCfg.parity = parity;
+  saveBusConfig();
+  Serial2.end();
+  Serial2.begin(busCfg.baud, busSerialConfig(), kRs485Rx, kRs485Tx);
+  Serial.printf("[Bus] Saved: baud=%lu parity=%u\n", busCfg.baud, busCfg.parity);
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -3651,6 +3830,7 @@ static void startWebServer() {
   server.on("/api/modbus",      HTTP_GET,  handleModbusApi);
   server.on("/api/modbus/save", HTTP_POST, handleModbusSave);
   server.on("/api/modbus/ping", HTTP_GET,  handleModbusPingApi);
+  server.on("/api/bus/save",    HTTP_POST, handleBusSave);
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);
   server.on("/api/wifi/save",   HTTP_POST, handleWifiSave);
@@ -3713,12 +3893,10 @@ static void handleEthSync(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   loadModbusConfig();
-  // PM2xxx/EM6400 pakai framing 8E1 (parity Even). Renata AX9L pakai 8N2
-  // (no parity, 2 stop bit) — dikonfirmasi dari ax9l.py yang sudah terbukti jalan.
-  // Initial begin uses slot 0's settings; handleModbus() reconfigures
-  // Serial2 per-slot on each round-robin poll.
-  uint32_t rs485Config = (meterSlots[0].meterType == 1 || meterSlots[0].meterType == 2) ? SERIAL_8N2 : SERIAL_8E1;
-  Serial2.begin(meterSlots[0].baud, rs485Config, kRs485Rx, kRs485Tx);
+  loadBusConfig();
+  // Single bus-wide baud+parity shared by every meter slot (Schneider AND
+  // Renata alike) — see BusConfig / busSerialConfig().
+  Serial2.begin(busCfg.baud, busSerialConfig(), kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
   pinMode(kBtnPin,  INPUT_PULLUP);
   pinMode(kBtn2Pin, INPUT);        // Touch TTP223 has external active-high output; no pullup needed

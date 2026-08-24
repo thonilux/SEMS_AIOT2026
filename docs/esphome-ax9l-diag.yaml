@@ -1,0 +1,140 @@
+
+# ESPHome diagnostic config — Renata AX9L isolation test.
+#
+# Purpose: independent, battle-tested Modbus implementation (ESPHome's
+# `modbus`/`modbus_controller` components) to cross-check whether the Renata
+# AX9L communication failure seen in the custom main.cpp firmware is a bug in
+# that custom code, or genuinely a hardware/wiring issue on the meter side.
+#
+# If THIS config also fails to read the meter -> confirms hardware problem.
+# If THIS config succeeds -> bug is in the custom firmware's Modbus code,
+# worth revisiting (though the custom code was already cross-verified against
+# a live-working Schneider meter on the same bus/wiring, which points away
+# from a firmware bug — this is the tie-breaker test).
+#
+# Board: same ESP32 as main firmware (RS485 on UART2, RX=16 TX=17).
+# Renata AX9L wiring last known to WORK once: baud 9600, 8N1 framing (no
+# parity, 1 stop bit — ESPHome uart uses stop_bits: 1 as default, parity NONE),
+# slave/device address 1.
+#
+# Flash this standalone via ESPHome (not PlatformIO) — separate binary, does
+# NOT touch the custom firmware. Reflash the working firmware.bin afterward
+# to restore normal operation.
+
+esphome:
+  name: test-ax9l-diag
+  friendly_name: "AX9L Diagnostic"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# WiFi only for this diagnostic build — simplest path to reach the web UI /
+# logs without needing the W5500 Ethernet init that the main firmware uses.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "AX9L-Diag-Fallback"
+    password: "diagnose123"
+
+captive_portal:
+
+logger:
+  level: DEBUG
+  # Modbus/UART traffic dump — this is the key diagnostic signal: even a
+  # timeout is visible here as "no response", but a garbled/partial response
+  # (vs. total silence) tells a very different story than the custom
+  # firmware's timeout-only error message could.
+  logs:
+    modbus: VERBOSE
+    modbus_controller: VERBOSE
+    uart: VERBOSE
+
+web_server:
+  port: 80
+
+# Same physical UART pins as main.cpp's Serial2 (RS485 TX=17, RX=16).
+uart:
+  id: modbus_uart
+  tx_pin: 17
+  rx_pin: 16
+  baud_rate: 9600
+  stop_bits: 1
+  parity: NONE
+
+modbus:
+  id: modbus_bus
+  uart_id: modbus_uart
+
+modbus_controller:
+  - id: ax9l
+    address: 0x1          # slave ID 1 — last known address that responded once
+    modbus_id: modbus_bus
+    setup_priority: -10
+    update_interval: 5s
+    command_throttle: 200ms  # gap between requests — same spirit as the custom
+                              # firmware's 100ms inter-block delay, slightly
+                              # more conservative in case AX9L needs more room
+
+sensor:
+  # Block-read equivalent of the custom firmware's pollRenataSlot(): reads
+  # phase-A voltage/current/power directly (register 0x4000, 0x400C, 0x4012 —
+  # same addresses as main.cpp, INT32 big-endian, same x0.1 / x0.001 scale).
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Voltage A"
+    register_type: read
+    address: 0x4000
+    value_type: S32
+    register_count: 2
+    unit_of_measurement: "V"
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Current A"
+    register_type: read
+    address: 0x400C
+    value_type: S32
+    register_count: 2
+    unit_of_measurement: "A"
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Active Power Total"
+    register_type: read
+    address: 0x4018
+    value_type: S32
+    register_count: 2
+    unit_of_measurement: "W"
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ax9l
+    name: "AX9L Frequency"
+    register_type: read
+    address: 0x4032
+    value_type: S32
+    register_count: 2
+    unit_of_measurement: "Hz"
+    filters:
+      - multiply: 0.01
+
+  # Uptime / WiFi signal — just so the web UI shows the device is alive even
+  # if every Modbus sensor above stays "unavailable".
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 30s
+
+ota:
+  - platform: esphome
+
+# --- secrets.yaml needed alongside this file (not committed) ---
+# wifi_ssid: "your-ssid"
+# wifi_password: "your-password"

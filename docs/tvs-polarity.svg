@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 460" width="680" height="460" font-family="Segoe UI, Arial, sans-serif">
+  <rect x="0" y="0" width="680" height="460" fill="#ffffff"/>
+  <text x="20" y="30" font-size="18" font-weight="700" fill="#0f172a">TVS Polarity — D2 / D3 / D8</text>
+  <text x="20" y="50" font-size="12" fill="#475569">SMAJ6.5A (unidirectional) — garis merah = pita katoda pada fisik komponen</text>
+
+  <!-- GND rail bottom -->
+  <line x1="60" y1="400" x2="620" y2="400" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="30" y="405" font-size="13" font-weight="700" fill="#0f172a">GND</text>
+  <rect x="80" y="406" width="2" height="10" fill="#0f172a"/>
+  <rect x="88" y="406" width="2" height="10" fill="#0f172a"/>
+  <rect x="96" y="406" width="2" height="10" fill="#0f172a"/>
+
+  <!-- A rail top -->
+  <line x1="60" y1="90" x2="620" y2="90" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="20" y="85" font-size="13" font-weight="700" fill="#0f172a">A</text>
+
+  <!-- B rail mid -->
+  <line x1="60" y1="190" x2="620" y2="190" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="20" y="185" font-size="13" font-weight="700" fill="#0f172a">B</text>
+
+  <!-- ===== D2 : A -> GND ===== -->
+  <text x="140" y="130" font-size="11" fill="#475569">D2</text>
+  <line x1="150" y1="90" x2="150" y2="150" stroke="#1e3a8a" stroke-width="1.6"/>
+  <polygon points="130,150 170,150 150,190" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.8"/>
+  <line x1="130" y1="190" x2="170" y2="190" stroke="#dc2626" stroke-width="4"/>
+  <line x1="150" y1="190" x2="150" y2="400" stroke="#1e3a8a" stroke-width="1.6"/>
+  <text x="178" y="145" font-size="12" fill="#0f172a">katoda → A</text>
+  <rect x="176" y="160" width="86" height="20" rx="4" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="184" y="174" font-size="10.5" font-weight="600" fill="#dc2626">anoda → GND</text>
+
+  <!-- ===== D3 : B -> GND ===== -->
+  <text x="340" y="230" font-size="11" fill="#475569">D3</text>
+  <line x1="350" y1="190" x2="350" y2="250" stroke="#1e3a8a" stroke-width="1.6"/>
+  <polygon points="330,250 370,250 350,290" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.8"/>
+  <line x1="330" y1="290" x2="370" y2="290" stroke="#dc2626" stroke-width="4"/>
+  <line x1="350" y1="290" x2="350" y2="400" stroke="#1e3a8a" stroke-width="1.6"/>
+  <text x="378" y="245" font-size="12" fill="#0f172a">katoda → B</text>
+  <rect x="376" y="260" width="86" height="20" rx="4" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="384" y="274" font-size="10.5" font-weight="600" fill="#dc2626">anoda → GND</text>
+
+  <!-- ===== D8 : A <-> B (line to line) ===== -->
+  <text x="470" y="130" font-size="11" fill="#475569">D8</text>
+  <line x1="480" y1="90" x2="480" y2="130" stroke="#1e3a8a" stroke-width="1.6"/>
+  <polygon points="460,130 500,130 480,170" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.8"/>
+  <line x1="460" y1="170" x2="500" y2="170" stroke="#dc2626" stroke-width="4"/>
+  <line x1="480" y1="170" x2="480" y2="190" stroke="#1e3a8a" stroke-width="1.6"/>
+  <text x="508" y="125" font-size="12" fill="#0f172a">katoda → A</text>
+  <rect x="506" y="140" width="150" height="20" rx="4" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="514" y="154" font-size="10.5" font-weight="600" fill="#dc2626">anoda → B (VERIFIKASI!)</text>
+
+  <!-- Legend -->
+  <line x1="20" y1="425" x2="40" y2="425" stroke="#dc2626" stroke-width="4"/>
+  <text x="46" y="429" font-size="11.5" fill="#475569">pita katoda (garis di body diode)</text>
+  <line x1="300" y1="425" x2="320" y2="425" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="326" y="429" font-size="11.5" fill="#475569">jalur A / B / GND</text>
+
+  <text x="20" y="450" font-size="11" fill="#dc2626" font-weight="600">D8: unidirectional, arah katoda di sini asumsi — cocokkan ke simbol schematic asli sebelum pasang!</text>
+</svg>

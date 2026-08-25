@@ -2437,7 +2437,9 @@ static String getNav() {
   nav += "<a href=/mqtt>&#128236; MQTT</a>";
   nav += "<a href=/modbus>&#128268; Modbus</a>";
   nav += "<a href=/relay>&#128268; Relay</a>";
-  nav += "<a href=/system>&#9881; System</a>";
+  if (configMode) {
+    nav += "<a href=/system>&#9881; System</a>";
+  }
   nav += "<a href=/update>&#128229; OTA</a>";
   if (configMode) {
     nav += "<a href='#' onclick='if(confirm(\"Reboot device ke Normal Mode?\"))fetch(\"/api/reboot\",{method:\"POST\"})' style='background:#fee2e2;color:#b91c1c;margin-left:auto'>&#8635; Reboot (Normal Mode)</a>";
@@ -2571,6 +2573,16 @@ static void handleSystemPage() {
   html += F("<title>SEMS System</title></head><body><div class=wrap>"
             "<h1>SEMS AIoT &mdash; System</h1>");
   html += getNav();
+
+  if (!configMode) {
+    html += F("<div class='card' style='background:#fee2e2;border:1px solid #fca5a5;padding:12px;margin-bottom:12px;'>"
+              "<div style='font-weight:600;color:#991b1b;font-size:14px;margin-bottom:4px;'>Normal Mode Aktif</div>"
+              "<div style='font-size:12px;color:#7f1d1d;margin-bottom:8px;'>Halaman System hanya dapat diakses di Config Mode.</div>"
+              "<a class='btn btn-sm btn-danger' href=/network style='text-decoration:none'>&#127760; Ke Halaman Network</a>"
+              "</div></div></body></html>");
+    server.send(200, "text/html", html);
+    return;
+  }
 
   // Hardware card
   html += F("<div class=card><div class=card-title>Hardware</div>");

@@ -167,7 +167,7 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 *   **Mengatur MQTT (Pengiriman Data):**
     Pilih menu **MQTT** di web browser untuk memasukkan alamat server broker database pusat data Anda agar alat dapat mulai memposting pembacaan energi.
 
-    ![Menu Pengaturan Server MQTT](./webui/mqtt-config.png)
+    ![Menu Pengaturan Server MQTT](./webui/mqtt-config-new.png)
 
 *   **Mengatur Modbus — Multi Power Meter (hingga 4 unit):**
     Pilih menu **Modbus** untuk menambah/mengatur meteran listrik yang tersambung ke terminal RS485. Alat mendukung **hingga 4 meteran sekaligus** dalam satu jalur kabel (bergantian dibaca otomatis, sistem "round-robin").

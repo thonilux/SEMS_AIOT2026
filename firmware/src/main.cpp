@@ -23,9 +23,7 @@
 // Hardware constants
 // ============================================================
 static constexpr uint8_t  kLedPin      = 2;
-static constexpr uint8_t  kBtnPin      = 0;   // BOOT button, active LOW
-static constexpr uint32_t kBtnHoldMs   = 3000;
-static constexpr uint8_t  kBtn2Pin     = 4;   // multifungsi: short=next page, long=toggle autoscroll
+static constexpr uint8_t  kBtn2Pin     = 4;   // satu-satunya tombol fisik: short=next page, hold=masuk menu/select
 
 
 static constexpr int kEthCs  = 5;
@@ -352,7 +350,6 @@ static constexpr uint32_t kPageIntervalMs = 3000;
 // ============================================================
 // Button
 // ============================================================
-static uint32_t btnPressedMs  = 0;
 static uint32_t btn2PressedMs = 0;
 
 // ============================================================
@@ -2228,16 +2225,6 @@ void enterConfigMode() {
   Serial.println("[Boot] Config mode — restarting");
   delay(500);
   ESP.restart();
-}
-
-static void handleConfigButton(uint32_t now) {
-  const bool pressed = (digitalRead(kBtnPin) == LOW);
-  if (pressed) {
-    if (btnPressedMs == 0) btnPressedMs = now;
-    else if (now - btnPressedMs >= kBtnHoldMs) { btnPressedMs = 0; enterConfigMode(); }
-  } else {
-    btnPressedMs = 0;
-  }
 }
 
 // GPIO4 — short press: next OLED page / move menu cursor; long press: enter menu / select option / exit info mode
@@ -4188,7 +4175,6 @@ void setup() {
   // Renata alike) — see BusConfig / busSerialConfig().
   Serial2.begin(busCfg.baud, busSerialConfig(), kRs485Rx, kRs485Tx);
   pinMode(kLedPin, OUTPUT);
-  pinMode(kBtnPin,  INPUT_PULLUP);
   pinMode(kBtn2Pin, INPUT);        // Touch TTP223 has external active-high output; no pullup needed
 
   Wire.begin(22, 21);
@@ -4322,7 +4308,6 @@ void loop() {
   handleMqttLifecycle(now);
   processScanResult();
   handleStaTimeout(now);
-  handleConfigButton(now);
   handleBtn2(now);
   handleNtp(now);
   handleEthSync(now);

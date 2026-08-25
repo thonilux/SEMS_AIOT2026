@@ -358,6 +358,9 @@ static uint32_t btn2PressedMs = 0;
 static bool oledInfoModeActive = false; // true when manually viewing detail pages
 static uint32_t oledInfoIdleMs = 0;      // last activity in Info Mode, for auto-timeout back to dashboard
 static constexpr uint32_t kOledInfoTimeoutMs = 15000; // Info Mode auto-exit after 15s idle
+static uint32_t oledLastActivityMs = 0;  // last button press, for auto-blank (backlight/panel saver)
+static bool     oledBlanked        = false;
+static constexpr uint32_t kOledBlankTimeoutMs = 60000; // panel blank after 60s idle
 
 // ============================================================
 // NTP / RTC
@@ -490,7 +493,9 @@ static void oledDrawRight(const char* s, uint8_t y) {
 
 void oledShow(const char* l1, const char* l2, const char* l3, uint32_t ms) {
   oledUntilMs = millis() + ms;
+  oledLastActivityMs = millis();
   if (!oledReady) return;
+  if (oledBlanked) { oledBlanked = false; oled.setPowerSave(0); }
   oled.clearBuffer();
   
   // Header / Title in Yellow Zone
@@ -809,6 +814,20 @@ static void oledDrawPage(uint8_t page) {
 
 static void updateOled(uint32_t now) {
   if (!oledReady) return;
+
+  // Panel blank (backlight saver) — independent of page/menu/info-mode state.
+  bool idleForBlank = (now - oledLastActivityMs >= kOledBlankTimeoutMs) && (now >= oledUntilMs);
+  if (idleForBlank && !oledBlanked) {
+    oledBlanked = true;
+    oled.setPowerSave(1);
+    return;
+  }
+  if (!idleForBlank && oledBlanked) {
+    oledBlanked = false;
+    oled.setPowerSave(0);
+    // fall through to redraw immediately
+  }
+  if (oledBlanked) return;
 
   bool hbTick = (now - oledHbMs >= 500);
   if (hbTick) { oledHbMs = now; oledHbTick++; }
@@ -2231,6 +2250,7 @@ void enterConfigMode() {
 static void handleBtn2(uint32_t now) {
   const bool pressed = (digitalRead(kBtn2Pin) == HIGH);
   if (pressed) {
+    oledLastActivityMs = now; // any press wakes panel + resets blank timer
     if (btn2PressedMs == 0) btn2PressedMs = now;
     else {
       uint32_t holdTime = now - btn2PressedMs;
@@ -4180,6 +4200,7 @@ void setup() {
   Wire.begin(22, 21);
   if (oled.begin()) {
     oledReady = true;
+    oledLastActivityMs = millis();
   } else {
     Serial.println("[OLED] Init failed");
   }

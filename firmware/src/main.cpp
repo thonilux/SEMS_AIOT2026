@@ -359,6 +359,8 @@ static uint32_t btn2PressedMs = 0;
 // OLED state
 // ============================================================
 static bool oledInfoModeActive = false; // true when manually viewing detail pages
+static uint32_t oledInfoIdleMs = 0;      // last activity in Info Mode, for auto-timeout back to dashboard
+static constexpr uint32_t kOledInfoTimeoutMs = 15000; // Info Mode auto-exit after 15s idle
 
 // ============================================================
 // NTP / RTC
@@ -830,8 +832,15 @@ static void updateOled(uint32_t now) {
     }
     needRedraw = hbTick;
   } else {
-    // Info Mode (Manual paging)
-    needRedraw = hbTick;
+    // Info Mode (Manual paging) — auto-exit ke dashboard kalo idle lewat timeout
+    if (now - oledInfoIdleMs >= kOledInfoTimeoutMs) {
+      oledInfoModeActive = false;
+      oledPage = 0;
+      oledPageMs = now;
+      needRedraw = true;
+    } else {
+      needRedraw = hbTick;
+    }
   }
 
   if (needRedraw) {
@@ -2275,6 +2284,7 @@ static void handleBtn2(uint32_t now) {
             oledInMenu = false;
             oledPage = 1; // start from page 1 (Device Info)
             oledPageMs = now;
+            oledInfoIdleMs = now;
             oledShow("Info Mode", "Manual Paging...", "Hold 2s to exit", 3000);
           } else if (oledMenuCursor == 2) {
             oledInMenu = false;
@@ -2297,6 +2307,7 @@ static void handleBtn2(uint32_t now) {
           oledPage = (oledPage + 1) % 5;
           if (oledPage == 0) oledPage = 1; // skip kembali ke dashboard saat manual paging
           oledPageMs = now;
+          oledInfoIdleMs = now; // reset idle timeout tiap tombol ditekan
           oledDrawPage(oledPage);
         } else {
           // Di luar info mode/dalam mode dashboard: tap sekali paksa redraw dashboard

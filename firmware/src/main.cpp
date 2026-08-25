@@ -4235,6 +4235,13 @@ void setup() {
     sysTzHour = pSys.getChar("sys_tz", 7); // Default to UTC+7
     pSys.end();
   }
+  // Apply TZ offset immediately, unconditionally — a soft-reboot (ESP.restart())
+  // can leave the internal RTC/system clock holding a stale value from before
+  // this boot, which makes handleNtp()'s "tm_year>120 => already synced"
+  // heuristic skip calling configTime() entirely, leaving the old (possibly
+  // UTC+0) offset in effect forever. Call it here so the correct offset is
+  // always in effect from the very first getLocalTime() call.
+  configTime(sysTzHour * 3600, 0, kNtpServer);
 
   Preferences p;
   p.begin(kNvsWifi, false);

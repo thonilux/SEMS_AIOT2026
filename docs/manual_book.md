@@ -1,7 +1,7 @@
 # Buku Panduan — Alat Perekam Data Energi (Energy Data Gateway)
 *Panduan mudah untuk memahami cara kerja dan pengoperasian alat perekam data energi SEMS-AIOT v1.0.0 "Koper Demo v1" — mendukung multi power meter (hingga 4 unit sekaligus) dan kontrol 4-channel relay.*
 
-> **Catatan versi:** dokumen ini sudah diperbarui mengikuti firmware v1.0.0. Screenshot layar OLED dan halaman web di bawah masih diambil dari versi lama (single-meter) — tampilan sebenarnya di firmware terbaru sedikit berbeda (ada menu Relay baru, halaman Modbus sekarang menampilkan hingga 4 kartu meter). Screenshot akan diperbarui pada revisi berikutnya.
+> **Catatan versi:** dokumen ini sudah diperbarui mengikuti firmware terbaru (pasca v1.0.0, sesi Agustus 2026): satu tombol fisik (bukan dua), layar OLED auto-blank untuk hemat panel, halaman web System baru (khusus Config Mode), pengaturan CT/PT Ratio & saklar Digital Output (DO) untuk meteran yang mendukung, dan interval pengiriman MQTT yang bisa diatur per meter. Screenshot halaman web (Home, Network, System, Modbus) sudah diambil langsung dari alat dengan firmware terbaru. Screenshot layar OLED fisik di bawah masih dari versi lama dan akan diperbarui pada revisi berikutnya.
 
 ---
 
@@ -57,23 +57,24 @@ Alat ini punya mekanisme otomatis untuk menangani WiFi yang gagal atau terputus,
 
 ---
 
-## 3. Dua Tombol Fisik Alat
+## 3. Satu Tombol Fisik Alat
 
-Alat ini punya **dua tombol fisik terpisah**, masing-masing fungsinya berbeda:
+Alat ini hanya punya **satu tombol fisik**: tombol sentuh (touch sensor) di sisi kanan layar kecil. Tombol ini menangani semua navigasi — dari geser halaman info sampai masuk Menu Pengaturan — jadi tidak ada tombol BOOT terpisah lagi di bagian luar kotak.
 
-### A. Tombol Sentuh (Touch Sensor) — Navigasi Layar & Menu
-Untuk menjaga kerapatan kotak agar debu tidak masuk, alat ini menggunakan satu **tombol sentuh tersembunyi** di sisi kanan layar kecil untuk navigasi menu di layar. Tombol ini tidak terlihat menonjol dari luar kotak — cukup sentuh permukaan di sebelah kanan layar OLED. Setiap kali disentuh, akan menyala **lampu indikator kecil berwarna merah** sebagai tanda sentuhan terdeteksi oleh alat.
+### Tombol Sentuh (Touch Sensor) — Navigasi Layar & Menu
+Untuk menjaga kerapatan kotak agar debu tidak masuk, alat ini menggunakan satu **tombol sentuh tersembunyi** di sisi kanan layar kecil. Tombol ini tidak terlihat menonjol dari luar kotak — cukup sentuh permukaan di sebelah kanan layar OLED. Setiap kali disentuh, akan menyala **lampu indikator kecil berwarna merah** sebagai tanda sentuhan terdeteksi oleh alat.
 
 *   **Sentuh Sekali (Ketuk/Tap):** Untuk menggeser pilihan menu ke bawah / pindah halaman info.
 *   **Sentuh dan Tahan 3 Detik (Hold):** Untuk masuk ke **Menu Pengaturan** di layar.
 *   **Sentuh dan Tahan 2 Detik (Hold):** Untuk memilih menu yang ditunjuk / kembali ke layar utama.
 
-### B. Tombol BOOT — Jalan Pintas Langsung ke Config Mode
-Selain tombol sentuh, alat ini juga punya **tombol tekan fisik** (BOOT button) yang berfungsi sebagai jalan pintas cepat untuk masuk ke Config Mode tanpa perlu masuk menu layar terlebih dahulu.
+### Layar Otomatis Kembali & Mati Sendiri (Hemat Panel)
+Untuk menjaga umur panel OLED dan menghindari layar "nyangkut" di halaman info, alat punya dua mekanisme otomatis:
 
-*   **Tekan dan Tahan 3 Detik:** Alat langsung masuk Config Mode dan restart otomatis — setara dengan langkah di Bagian 4 (Boot Mode → CFG) tapi lebih cepat, tidak perlu navigasi menu sama sekali.
+*   **Auto-kembali ke Dashboard (15 detik):** Jika sedang membuka halaman **View Info** (manual paging) dan tidak disentuh selama **15 detik**, layar otomatis kembali ke halaman Dashboard utama — tidak perlu menahan sentuh 2 detik secara manual untuk keluar.
+*   **Auto-blank Panel (60 detik):** Jika tidak ada sentuhan sama sekali selama **60 detik**, layar OLED otomatis padam (power save) untuk menghemat panel. Sentuh sekali kapan saja untuk membangunkan layar kembali — layar langsung menyala dan menampilkan info terkini.
 
-> Gunakan tombol sentuh untuk melihat info status sehari-hari, dan tombol BOOT sebagai cara tercepat masuk Config Mode saat perlu ubah pengaturan.
+> Kedua timer di atas selalu ter-reset setiap kali tombol disentuh, jadi layar tidak akan mati mendadak saat sedang dipakai.
 
 ---
 
@@ -113,11 +114,11 @@ Jika alat baru pertama kali dipasang, atau Anda ingin mengganti password WiFi, m
 
 Ada dua cara — pilih salah satu:
 
-*   **Cara cepat:** Tekan dan tahan **tombol BOOT fisik** selama 3 detik. Alat langsung restart ke Config Mode.
-*   **Cara lewat menu layar:**
+*   **Lewat menu layar:**
     1. Sentuh dan tahan tombol sensor selama **3 detik** hingga layar masuk ke **Menu Pengaturan**.
     2. Ketuk sekali untuk menggeser tanda panah `>` ke opsi **`1. Boot Mode`**.
     3. Tahan sentuhan selama **2 detik** sampai tulisan berubah menjadi `[CFG]`.
+*   **Lewat halaman web:** Buka halaman web alat (lihat Langkah 3), lalu tekan tombol **"Masuk Config Mode (AP)"** di halaman Home atau Network.
 
 Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan tulisan **Config Mode**.
 
@@ -131,16 +132,16 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 2. Ketik alamat berikut di kotak pencarian atas: **`192.168.4.1`** (atau ketik **`sems.local`**), lalu tekan Enter.
 3. Halaman menu utama pengaturan akan terbuka di layar HP Anda seperti ini:
 
-   ![Halaman Utama Web](./webui/root.png)
+   ![Halaman Utama Web (Config Mode)](./webui/root-config.png)
 
-4. Menu navigasi di bagian atas halaman: **Home · Network · MQTT · Modbus · Relay · OTA**.
+4. Menu navigasi di bagian atas halaman: **Home · Network · MQTT · Modbus · Relay**, ditambah **System · OTA** yang hanya muncul saat alat sedang **Config Mode**.
 
 ### Langkah 4: Isi Konfigurasi Alat
 
-*   **Mengatur Internet WiFi & Timezone (Waktu):**
+*   **Mengatur Internet WiFi:**
     Pilih menu **Network** di web browser.
 
-    ![Menu Pengaturan Jaringan & Timezone](./webui/network-config.png)
+    ![Menu Pengaturan Jaringan](./webui/network-normal-new.png)
 
     **Langkah mengatur WiFi:**
     1. Tekan tombol **Scan Sekarang** — alat akan mencari semua jaringan WiFi di sekitarnya (proses berjalan otomatis begitu halaman dibuka).
@@ -150,9 +151,18 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
     5. Alat akan **mencoba menyambung dulu** (proses tes koneksi memakan waktu beberapa detik). Jika berhasil, muncul konfirmasi **"Koneksi sukses!"** beserta alamat IP yang didapat, dan jaringan otomatis tersimpan permanen. Jika gagal (password salah/sinyal lemah), muncul pesan error dan jaringan **tidak disimpan** — Anda bisa coba ulangi.
     6. Alat bisa **menyimpan hingga 5 jaringan WiFi sekaligus** (misalnya WiFi kantor + WiFi HP hotspot cadangan). Saat reconnect, alat otomatis mencoba satu per satu dari daftar simpanan sampai salah satu berhasil tersambung.
     7. Jaringan yang sedang aktif tersambung ditandai dengan centang hijau (&#10003;) beserta alamat IP-nya di daftar **Saved WiFi Networks**. Untuk menghapus jaringan tersimpan, tekan tombol **&#10005;** merah di sampingnya (hanya bisa dilakukan saat Config Mode).
-    8. Untuk zona waktu, pilih angka **UTC Offset** yang sesuai (misalnya **UTC+7** untuk WIB / Jakarta-Surabaya, **UTC+8** untuk WITA, **UTC+9** untuk WIT), lalu tekan **Simpan**. Jam alat akan otomatis sinkron ulang lewat internet (NTP) begitu tersambung.
 
     *Catatan: alat menyimpan sambungan terakhir yang berhasil (BSSID & channel) agar proses reconnect di kemudian hari lebih cepat (FastConnect) — tidak perlu scan ulang dari nol setiap kali alat menyala.*
+
+*   **Halaman System — Status Alat, Timezone, dan OTA:**
+    Menu **System** (hanya muncul saat Config Mode) berisi:
+
+    ![Halaman System](./webui/system-config.png)
+
+    1. **Status Perangkat** — model chip ESP32, pemakaian Flash & memori (Heap), alamat MAC, versi firmware, dan lama alat menyala (uptime).
+    2. **Waktu & Timezone** — pilih angka **UTC Offset** yang sesuai (misalnya **UTC+7** untuk WIB / Jakarta-Surabaya, **UTC+8** untuk WITA, **UTC+9** untuk WIT), lalu tekan **Simpan**. Jam alat akan otomatis sinkron ulang lewat internet (NTP) begitu tersimpan — pengaturan ini bisa diubah baik saat Normal Mode maupun Config Mode.
+    3. **OTA Firmware Update** — tombol pintas ke halaman **OTA** untuk update firmware alat (lihat menu OTA terpisah di navigasi).
+    4. **Reboot & Mode** — tombol untuk restart alat, atau (jika sedang Normal Mode) tombol untuk masuk Config Mode.
 
 *   **Mengatur MQTT (Pengiriman Data):**
     Pilih menu **MQTT** di web browser untuk memasukkan alamat server broker database pusat data Anda agar alat dapat mulai memposting pembacaan energi.
@@ -162,7 +172,7 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 *   **Mengatur Modbus — Multi Power Meter (hingga 4 unit):**
     Pilih menu **Modbus** untuk menambah/mengatur meteran listrik yang tersambung ke terminal RS485. Alat mendukung **hingga 4 meteran sekaligus** dalam satu jalur kabel (bergantian dibaca otomatis, sistem "round-robin").
 
-    ![Menu Pengaturan Meteran Modbus](./webui/modbus-config.png)
+    ![Menu Pengaturan Meteran Modbus](./webui/modbus-config-new.png)
 
     Untuk tiap slot meteran, isi:
     1. **Aktifkan Slot** — centang untuk mengaktifkan meter di slot ini.
@@ -175,7 +185,16 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
     5. **Poll (ms)** — jeda waktu antar-pembacaan meter ini, dalam milidetik (default 3000 = tiap 3 detik).
     6. **Mode Fasa** — 1-Phase atau 3-Phase, sesuai instalasi fisik dan menentukan bentuk data yang dikirim ke server.
     7. **MQTT Base Topic & Suffix** — alamat topik pengiriman data untuk meter ini (biasanya sudah diisi otomatis oleh tim teknis, tidak perlu diubah kecuali diminta).
-    8. **Register Map Lanjutan** (bagian yang bisa dibuka/tutup) — pengaturan lanjutan alamat register Modbus, hanya perlu diubah jika memakai tipe meteran yang tidak standar. Tersedia tombol Preset untuk mengisi otomatis sesuai tipe meter umum.
+    8. **Interval Pengiriman MQTT** — atur seberapa sering data dikirim untuk meter ini, terpisah menjadi dua:
+       - **Interval elc_data (real-time)** — seberapa sering data tegangan/arus/daya terkini dikirim (default 20 detik).
+       - **Interval elc_wh (energi)** — seberapa sering data akumulasi energi (kWh) dikirim (default 60 detik).
+
+       Kedua interval bisa diisi dalam satuan **Jam / Menit / Detik** sekaligus (form terpisah untuk tiap satuan, otomatis dijumlahkan). Jadwal tetap berpatokan pada jam alat (RTC/NTP) yang presisi, jadi tiap meter tetap terjadwal rapi walau intervalnya berbeda-beda — berguna untuk demo yang butuh fleksibilitas kecepatan update per meteran.
+    9. **Register Map Lanjutan** (bagian yang bisa dibuka/tutup) — pengaturan lanjutan alamat register Modbus, hanya perlu diubah jika memakai tipe meteran yang tidak standar. Tersedia tombol Preset untuk mengisi otomatis sesuai tipe meter umum.
+    10. **CT/PT Ratio & Digital Output (khusus meter yang mendukung)** — panel terpisah yang bisa dibuka/tutup untuk membaca dan menulis parameter konfigurasi langsung ke meteran lewat Modbus (fungsi tulis FC06), dengan verifikasi baca-ulang setelah menulis:
+        - **Renata AX9L:** CT Ratio, PT Ratio, dan dua saklar **Digital Output (DO1/DO2)** berbentuk tombol **ON/OFF** (bukan centang) — tekan salah satu untuk langsung mengaktifkan/mematikan output digital meter tersebut.
+        - **Schneider PM2120:** CT Ratio (Primary/Secondary).
+        - Tekan **Baca** untuk melihat nilai tersimpan saat ini di meteran, atau **Tulis** untuk mengubahnya. Fitur ini **tidak mengubah pengaturan komunikasi Modbus** (baud rate, parity, slave ID meter tetap aman) — hanya parameter rasio CT/PT dan saklar DO yang bisa diubah lewat sini.
 
     > **Penting:** Semua meteran dalam satu jalur RS485 (kabel A/B yang sama) harus memakai **kecepatan komunikasi (Baud Rate) dan Parity yang sama** — pengaturan ini bersifat satu untuk seluruh jalur (bukan per-meteran), diatur di panel **"RS485 Bus"** pada halaman Modbus yang sama.
 
@@ -205,10 +224,12 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 
 Alat mengirim dua jenis data secara berkala ke server pusat, dengan jadwal yang diatur otomatis mengikuti jam alat (RTC):
 
-*   **Data Real-time (Tegangan, Arus, Daya):** dikirim **3 kali per menit** untuk tiap meteran, dijadwalkan bergiliran per detik supaya tidak menumpuk (misalnya meter pertama di detik `:01/:21/:41`, meter kedua di detik `:02/:22/:42`, dan seterusnya).
-*   **Data Energi Akumulasi (kWh):** dikirim **1 kali per menit** untuk tiap meteran, juga dijadwalkan bergiliran per detik (meter pertama di detik `:01`, meter kedua di detik `:02`, dst).
+*   **Data Real-time (Tegangan, Arus, Daya) — `elc_data`:** dikirim tiap meteran sesuai **Interval elc_data** yang diatur per-slot di halaman Modbus (default 20 detik). Waktu kirim tiap meter digeser sedetik dari meter lainnya supaya tidak menumpuk di detik yang sama.
+*   **Data Energi Akumulasi (kWh) — `elc_wh`:** dikirim tiap meteran sesuai **Interval elc_wh** yang diatur per-slot (default 60 detik), juga digeser per-detik antar meter.
 
-Jika jam alat belum tersinkron dengan internet (NTP), alat sementara mengirim data dengan jeda waktu tetap sampai jam berhasil disinkronkan, lalu otomatis berpindah ke jadwal presisi-detik di atas.
+Karena interval bisa diatur berbeda-beda untuk tiap slot meter (lihat Bagian 5 — Langkah 4, poin Modbus), alat demo bisa dikonfigurasi fleksibel: meter yang perlu dipantau lebih ketat diberi interval pendek, meter lain cukup interval lebih panjang untuk mengurangi beban jaringan/server.
+
+Jadwal tetap berpatokan pada jam alat (RTC/NTP) yang presisi — bukan sekadar hitung mundur sejak boot — sehingga waktu kirim tetap konsisten dan bisa diprediksi meski alat sempat restart. Jika jam alat belum tersinkron dengan internet (NTP), alat sementara mengirim data dengan jeda waktu tetap sampai jam berhasil disinkronkan, lalu otomatis berpindah ke jadwal presisi-detik di atas.
 
 ---
 
@@ -221,6 +242,8 @@ Jika jam alat belum tersinkron dengan internet (NTP), alat sementara mengirim da
 | **Komunikasi Data Meteran** | Protokol RS485 Modbus RTU (Terminal Blok 3-pin), mendukung **hingga 4 meteran sekaligus** dalam satu jalur |
 | **Tipe Meteran Didukung** | Schneider PM2xxx/EM6400 (FP32), Renata AX9L 1-Fasa & 3-Fasa (INT32) |
 | **Kontrol Relay** | 4 channel keluaran, dengan proteksi arus lebih (trip otomatis) dan auto-retry opsional |
-| **Tombol Kontrol** | Dua tombol fisik — sentuh (navigasi menu layar) dan BOOT (jalan pintas Config Mode) |
-| **Layar Informasi** | Layar kecil 2 warna (Kuning di atas, Biru di bawah), 5 halaman info berputar otomatis |
-| **Pengiriman Data** | MQTT, terjadwal otomatis mengikuti jam alat (RTC) untuk mengurangi beban jaringan |
+| **Tombol Kontrol** | Satu tombol sentuh — navigasi menu layar, hold 3 detik masuk Menu Pengaturan |
+| **Layar Informasi** | Layar kecil 2 warna (Kuning di atas, Biru di bawah), 5 halaman info berputar otomatis; auto-kembali ke Dashboard setelah 15 detik idle, auto-blank panel setelah 60 detik idle |
+| **Pengiriman Data** | MQTT, terjadwal otomatis mengikuti jam alat (RTC), interval elc_data & elc_wh bisa diatur terpisah per-slot meter |
+| **Konfigurasi Meter Lanjutan** | CT/PT Ratio (Renata AX9L & Schneider PM2120) dan saklar Digital Output (Renata AX9L DO1/DO2) via Modbus write-register, dengan verifikasi baca-ulang |
+| **Halaman Web** | Home · Network (WiFi/LAN) · MQTT · Modbus · Relay, ditambah System & OTA (khusus Config Mode) |

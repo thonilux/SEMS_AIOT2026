@@ -2437,6 +2437,7 @@ static String getNav() {
   nav += "<a href=/mqtt>&#128236; MQTT</a>";
   nav += "<a href=/modbus>&#128268; Modbus</a>";
   nav += "<a href=/relay>&#128268; Relay</a>";
+  nav += "<a href=/system>&#9881; System</a>";
   nav += "<a href=/update>&#128229; OTA</a>";
   if (configMode) {
     nav += "<a href='#' onclick='if(confirm(\"Reboot device ke Normal Mode?\"))fetch(\"/api/reboot\",{method:\"POST\"})' style='background:#fee2e2;color:#b91c1c;margin-left:auto'>&#8635; Reboot (Normal Mode)</a>";
@@ -2529,6 +2530,35 @@ static void handleRoot() {
   Serial.printf("[Web] Request on / from %s\n", server.client().remoteIP().toString().c_str());
   oledShow("Web UI", "Setup dibuka", server.client().remoteIP().toString().c_str(), 3000);
 
+  String html;
+  html.reserve(2200);
+  html += FPSTR(kStyle);
+  html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
+            "<h1>SEMS AIoT &mdash; Setup</h1>");
+  html += getNav();
+
+  // Config links
+  html += F("<div class=card><div class=card-title>Konfigurasi</div>"
+            "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
+            "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a> "
+            "<a class='btn btn-sm' href=/modbus style='text-decoration:none'>&#128268; Modbus</a> "
+            "<a class='btn btn-sm' href=/relay style='text-decoration:none'>&#9889; Relay</a></div>");
+
+  html += F("<div class=card><div class=card-title>Sistem</div>"
+            "<p style='font-size:13px;color:#64748b;margin-bottom:8px'>Status perangkat, timezone, dan OTA update dipindah ke halaman System.</p>"
+            "<a class='btn btn-sm' href=/system style='text-decoration:none'>&#9881; Buka Halaman System</a></div>");
+
+  html += F("</div></body></html>");
+
+  server.send(200, "text/html", html);
+}
+
+// GET /system — Device status (hardware/flash/heap/uptime), Timezone config,
+// Reboot / Config Mode buttons, and a link to OTA (/update). Split out of
+// handleRoot() + handleNetworkPage() so Network stays WiFi/LAN-only.
+static void handleSystemPage() {
+  oledShow("Web UI", "System dibuka", server.client().remoteIP().toString().c_str(), 3000);
+
   char uptime[18], mac[18];
   { uint32_t s=millis()/1000, m=s/60; s%=60; uint32_t h=m/60; m%=60;
     snprintf(uptime, sizeof(uptime), "%02luh%02lum%02lus", h, m, s); }
@@ -2536,10 +2566,10 @@ static void handleRoot() {
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", b[0],b[1],b[2],b[3],b[4],b[5]); }
 
   String html;
-  html.reserve(4500);
+  html.reserve(4800);
   html += FPSTR(kStyle);
-  html += F("<title>SEMS Setup</title></head><body><div class=wrap>"
-            "<h1>SEMS AIoT &mdash; Setup</h1>");
+  html += F("<title>SEMS System</title></head><body><div class=wrap>"
+            "<h1>SEMS AIoT &mdash; System</h1>");
   html += getNav();
 
   // Hardware card
@@ -2582,21 +2612,27 @@ static void handleRoot() {
   html += "<div class=row><span class=label>Uptime</span><span class=val>"; html += uptime;
   html += F("</span></div></div>");
 
-  // Config links
-  html += F("<div class=card><div class=card-title>Konfigurasi</div>"
-            "<a class='btn btn-sm' href=/network style='text-decoration:none'>&#127760; Network &amp; WiFi</a> "
-            "<a class='btn btn-sm' href=/mqtt style='text-decoration:none'>&#128236; MQTT</a></div>");
+  // Timezone form — editable in both Normal and Config Mode.
+  html += F("<div class=card><div class=card-title>Waktu & Timezone</div>"
+            "<form id=tzForm style='display:flex;gap:8px;align-items:center'>"
+            "<label style='margin:0'>UTC Offset:</label>"
+            "<select id='tzSelect' name='tz' style='padding:8px;border-radius:8px;border:1px solid #ccc;flex:1'>");
+  for (int i = -12; i <= 14; i++) {
+    char opt[64];
+    snprintf(opt, sizeof(opt), "<option value='%d' %s>UTC %s%d</option>",
+             i, (i == sysTzHour) ? "selected" : "", (i >= 0) ? "+" : "", i);
+    html += opt;
+  }
+  html += F("</select>"
+            "<button class='btn btn-sm' type=submit>Simpan</button>"
+            "</form></div>");
 
-  // Timezone Status Card (Read-only)
-  char tzBuf[32];
-  snprintf(tzBuf, sizeof(tzBuf), "UTC %s%d", (sysTzHour >= 0) ? "+" : "", sysTzHour);
-  html += F("<div class=card><div class=card-title>Waktu & Timezone</div>");
-  html += "<div class=row><span class=label>Timezone</span><span class=val>";
-  html += tzBuf;
-  html += F("</span></div></div>");
+  // OTA link
+  html += F("<div class=card><div class=card-title>OTA Firmware Update</div>"
+            "<a class='btn btn-sm' href=/update style='text-decoration:none'>&#128229; Buka Halaman OTA</a></div>");
 
   // System buttons
-  html += F("<div class=card><div class=card-title>Sistem</div>");
+  html += F("<div class=card><div class=card-title>Reboot &amp; Mode</div>");
   if (!configMode) {
     html += F("<button class='btn btn-sm btn-danger' id=btnCfg type=button>&#128268; Masuk Config Mode (AP)</button> ");
   } else {
@@ -2605,6 +2641,13 @@ static void handleRoot() {
   html += F("<button class='btn btn-sm btn-danger' id=btnRbt type=button>&#8635; Reboot</button></div>");
 
   html += F("<script>"
+    "document.getElementById('tzForm').onsubmit=async(e)=>{"
+      "e.preventDefault();"
+      "const tz=document.getElementById('tzSelect').value;"
+      "let r=await fetch('/api/timezone/save?tz='+tz,{method:'POST'});"
+      "if(r.ok)alert('Timezone disimpan & disinkronkan!');"
+      "else alert('Gagal menyimpan timezone.');"
+    "};"
     "const btnCfg=document.getElementById('btnCfg');"
     "if(btnCfg)btnCfg.onclick=async()=>{"
       "if(!confirm('Masuk Config Mode? Device akan restart dan broadcast AP.'))return;"
@@ -2691,21 +2734,6 @@ static void handleNetworkPage() {
               "<label>Password</label><input type=password id=pass placeholder='Password'>"
               "<button class=btn style='width:100%;margin-top:10px' onclick=saveWifi()>Connect &amp; Simpan</button>"
               "</div></div>");
-
-    // Timezone form inside network page (only during AP config mode)
-    html += F("<div class=card style='margin-top:12px'><div class=card-title>Waktu & Timezone</div>"
-              "<form id=tzForm style='display:flex;gap:8px;align-items:center'>"
-              "<label style='margin:0'>UTC Offset:</label>"
-              "<select id='tzSelect' name='tz' style='padding:8px;border-radius:8px;border:1px solid #ccc;flex:1'>");
-    for (int i = -12; i <= 14; i++) {
-      char opt[64];
-      snprintf(opt, sizeof(opt), "<option value='%d' %s>UTC %s%d</option>",
-               i, (i == sysTzHour) ? "selected" : "", (i >= 0) ? "+" : "", i);
-      html += opt;
-    }
-    html += F("</select>"
-              "<button class='btn btn-sm' type=submit>Simpan</button>"
-              "</form></div>");
   }
   html += F("<script>"
             "function badge(ok,yes,no,mid){"
@@ -2780,15 +2808,6 @@ static void handleNetworkPage() {
                  "msg.className='err';msg.textContent='Error saat menguji koneksi: '+e;"
                "}"
              "}");
-  if (configMode) {
-    html += F("document.getElementById('tzForm').onsubmit=async(e)=>{"
-              "e.preventDefault();"
-              "const tz=document.getElementById('tzSelect').value;"
-              "let r=await fetch('/api/timezone/save?tz='+tz,{method:'POST'});"
-              "if(r.ok)alert('Timezone disimpan & disinkronkan!');"
-              "else alert('Gagal menyimpan timezone.');"
-              "};");
-  }
   html += FPSTR(kScanScript);
   html += F("</script></div></body></html>");
   server.send(200, "text/html", html);
@@ -4118,6 +4137,7 @@ static void handleSerialApi() {
 static void startWebServer() {
   server.on("/",                HTTP_GET,  handleRoot);
   server.on("/network",         HTTP_GET,  handleNetworkPage);
+  server.on("/system",          HTTP_GET,  handleSystemPage);
   server.on("/mqtt",            HTTP_GET,  handleMqttPage);
   server.on("/modbus",          HTTP_GET,  handleModbusPage);
   server.on("/api/network",     HTTP_GET,  handleNetworkApi);

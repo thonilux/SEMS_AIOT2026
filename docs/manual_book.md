@@ -141,7 +141,7 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 *   **Mengatur Internet WiFi:**
     Pilih menu **Network** di web browser.
 
-    ![Menu Pengaturan Jaringan](./webui/network-normal-new.png)
+    ![Menu Pengaturan Jaringan](./webui/network-config-new.png)
 
     **Langkah mengatur WiFi:**
     1. Tekan tombol **Scan Sekarang** — alat akan mencari semua jaringan WiFi di sekitarnya (proses berjalan otomatis begitu halaman dibuka).
@@ -201,6 +201,8 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
 *   **Mengatur Relay — Kontrol 4-Channel:**
     Pilih menu **Relay** untuk menyalakan/mematikan 4 keluaran relay dari jarak jauh, baik lewat halaman web ini maupun otomatis lewat MQTT.
 
+    ![Menu Kontrol Relay](./webui/relay-config.png)
+
     Pada halaman ini Anda bisa:
     1. **Menyalakan/mematikan tiap relay satu-satu** — tekan saklar (toggle) di samping nama Relay 1/2/3/4.
     2. **Semua ON / Semua OFF** — tombol untuk mengendalikan keempat relay sekaligus.
@@ -211,6 +213,16 @@ Alat akan mati sejenak dan menyala ulang (restart). Layar depan akan menampilkan
        - **Auto-Retry setelah Trip** — jika diaktifkan, relay yang mati otomatis (TRIP) karena kelebihan arus akan dicoba nyalakan ulang otomatis setelah jeda waktu tertentu.
        - **Batas Arus (A)** — ambang arus listrik maksimum sebelum relay otomatis TRIP (mati sendiri untuk proteksi). Isi 0 untuk menonaktifkan proteksi ini.
        - **GPIO Pin R1-R4** — nomor pin fisik di board untuk tiap relay (sudah diatur pabrik, jangan diubah kecuali oleh teknisi).
+
+*   **Update Firmware (OTA) — khusus Config Mode:**
+    Pilih menu **OTA** (atau tombol **"Buka Halaman OTA"** di halaman System) untuk memperbarui firmware alat tanpa membongkar kotak atau memakai kabel USB.
+
+    ![Menu OTA Firmware Update](./webui/update-config.png)
+
+    1. Tekan **Choose File**, pilih file firmware `.bin` yang diberikan tim teknis.
+    2. Tekan **Update Firmware** — alat akan mengunggah dan memasang firmware baru, lalu **restart otomatis**.
+    3. Selama proses berlangsung, **jangan cabut daya alat**. Layar OLED akan menampilkan status "OTA Uploading... Do not power off" sampai selesai.
+    4. Menu ini hanya muncul di navigasi saat Config Mode — jika halaman `/update` dibuka langsung saat Normal Mode, alat menampilkan pesan bahwa OTA hanya tersedia di Config Mode.
 
 ### Langkah 5: Kembali ke Mode Kerja Normal
 1. Jika semua pengaturan sudah disimpan, kembali ke alat fisik.

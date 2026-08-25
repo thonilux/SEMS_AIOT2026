@@ -63,6 +63,14 @@ struct MeterSlotConfig {
   // mqttTopic = not published.
   char     mqttTopic[40] = "";
   char     mqttSuffix[16] = "";
+  // Publish schedule, user-configurable in H/M/S from the web UI (stored
+  // here as total seconds). Anchored to NTP epoch time (not millis()) so the
+  // schedule stays aligned to wall-clock time even across reboots, and
+  // multiple slots publishing at the same interval don't collide — each
+  // slot is offset by (slotIndex+1) seconds. 0 = use the built-in defaults
+  // (kDefaultDataIntervalSec/kDefaultWhIntervalSec).
+  uint32_t dataIntervalSec = 0;
+  uint32_t whIntervalSec   = 0;
   // 1-phase register map (FC03, FP32 big-endian, 0-based, PM2230 defaults)
   uint16_t r1V       = 3027;   // Voltage A-N
   uint16_t r1A       = 2999;   // Current A
@@ -1062,6 +1070,8 @@ static void loadModbusConfig() {
         String ts = p.getString(key, c.mqttSuffix);
         snprintf(c.mqttSuffix, sizeof(c.mqttSuffix), "%s", ts.c_str());
       }
+      snprintf(key, sizeof(key), "s%udi", i);    c.dataIntervalSec = p.getUInt(key, c.dataIntervalSec);
+      snprintf(key, sizeof(key), "s%uwi", i);    c.whIntervalSec   = p.getUInt(key, c.whIntervalSec);
       for (uint8_t f = 0; f < kMbU16Count; f++) {
         snprintf(key, sizeof(key), "s%u%s", i, kMbU16Tags[f]);
         uint16_t* fp = mbU16Field(c, f);
@@ -1089,6 +1099,8 @@ static void saveModbusConfig() {
     snprintf(key, sizeof(key), "s%uph", i);   p.putUChar(key, c.phase);
     snprintf(key, sizeof(key), "s%utp", i);   p.putString(key, c.mqttTopic);
     snprintf(key, sizeof(key), "s%uts", i);   p.putString(key, c.mqttSuffix);
+    snprintf(key, sizeof(key), "s%udi", i);   p.putUInt(key, c.dataIntervalSec);
+    snprintf(key, sizeof(key), "s%uwi", i);   p.putUInt(key, c.whIntervalSec);
     for (uint8_t f = 0; f < kMbU16Count; f++) {
       snprintf(key, sizeof(key), "s%u%s", i, kMbU16Tags[f]);
       p.putUShort(key, *mbU16Field(c, f));
@@ -1266,6 +1278,40 @@ static bool modbusReadRegsBlock(uint8_t slaveId, uint16_t regAddr, uint16_t coun
   if (resp[0] != slaveId || resp[1] != 0x03 || resp[2] != byteCount) return false;
 
   memcpy(out, &resp[3], byteCount);
+  return true;
+}
+
+// FC06 "Write Single Register" — used ONLY for parameters explicitly marked
+// safe to write in the Renata AX9L manual's "System setting parameter list"
+// (CT/PT ratio 0x4801-0x4804, DO switch control 0x480d). Communication
+// registers (address/baud/parity, 0x4805-0x480a) are intentionally never
+// written by this firmware — a mistake there can silently drop the meter
+// off the bus with no way to recover except physical access to the meter's
+// own front-panel menu.
+static bool modbusWriteSingleReg(uint8_t slaveId, uint16_t regAddr, uint16_t value) {
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x06;
+  req[2] = regAddr >> 8;
+  req[3] = regAddr & 0xFF;
+  req[4] = value >> 8;
+  req[5] = value & 0xFF;
+  uint16_t crc = modbusCrc(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  while (Serial2.available()) Serial2.read();  // flush
+  Serial2.write(req, 8);
+  Serial2.flush();
+
+  // Correct FC06 response echoes the request verbatim (8 bytes).
+  uint32_t t = millis();
+  while (Serial2.available() < 8 && millis() - t < 300);
+  if (Serial2.available() < 8) return false;
+
+  uint8_t resp[8];
+  Serial2.readBytes(resp, 8);
+  for (uint8_t i = 0; i < 8; i++) if (resp[i] != req[i]) return false;
   return true;
 }
 
@@ -1673,16 +1719,22 @@ static void publishElcWh(uint8_t i) {
   mqttPublishAbsolute(whTopic, eBuf);
 }
 
-// RTC-scheduled publish, staggered per slot index to spread bus/broker load:
-//   elc_data (real-time V/I/P): published 3x/minute, at second (i+1),
-//     (i+1)+20, (i+1)+40 — e.g. slot 0 -> :01/:21/:41, slot 1 -> :02/:22/:42.
-//   elc_wh (accumulated energy): published 1x/minute, at second (i+1) only
-//     — e.g. slot 0 -> :01, slot 1 -> :02.
+// RTC-scheduled publish, anchored to NTP epoch time (not millis()) so the
+// schedule survives reboots and stays aligned to wall-clock time. Interval
+// is user-configurable per slot (H/M/S from the web UI, stored as total
+// seconds in dataIntervalSec/whIntervalSec) — this is the flexibility this
+// scheme exists for: a demo unit wants fast updates (e.g. every few
+// seconds) while a production install wants infrequent ones (e.g. every 15
+// minutes) to save bandwidth, and that choice shouldn't require a firmware
+// change. Each slot is offset by (slotIndex+1) seconds so multiple slots on
+// the same interval don't publish in the same tick and collide.
 // Requires NTP sync; falls back to the old fixed-interval scheme (every
 // kMeterPublishMs) if NTP hasn't synced yet, so publishing still works
 // before time sync completes.
-static int8_t lastPublishedDataSec[kMaxMeterSlots] = {-1, -1, -1, -1};
-static int8_t lastPublishedWhSec[kMaxMeterSlots]   = {-1, -1, -1, -1};
+static constexpr uint32_t kDefaultDataIntervalSec = 20;  // matches the old 3x/minute cadence
+static constexpr uint32_t kDefaultWhIntervalSec    = 60;  // matches the old 1x/minute cadence
+static time_t lastPublishedDataEpoch[kMaxMeterSlots] = {0, 0, 0, 0};
+static time_t lastPublishedWhEpoch[kMaxMeterSlots]   = {0, 0, 0, 0};
 
 static void publishMeter(uint32_t now) {
   if (!mqttConnected) return;
@@ -1696,20 +1748,19 @@ static void publishMeter(uint32_t now) {
     return;
   }
 
-  int sec = ti.tm_sec;
+  time_t epoch = time(nullptr);
   for (uint8_t i = 0; i < kMaxMeterSlots; i++) {
-    int slotSec = (i + 1) % 60;  // slot 0 -> :01, slot 1 -> :02, ...
+    const MeterSlotConfig& cfg = meterSlots[i];
+    uint32_t dataIv = cfg.dataIntervalSec > 0 ? cfg.dataIntervalSec : kDefaultDataIntervalSec;
+    uint32_t whIv   = cfg.whIntervalSec   > 0 ? cfg.whIntervalSec   : kDefaultWhIntervalSec;
+    time_t offset = i + 1;  // stagger slots so same-interval publishes don't collide
 
-    // elc_data: fires at slotSec, slotSec+20, slotSec+40.
-    bool dataDue = (sec == slotSec) || (sec == (slotSec + 20) % 60) || (sec == (slotSec + 40) % 60);
-    if (dataDue && lastPublishedDataSec[i] != sec) {
-      lastPublishedDataSec[i] = sec;
+    if ((epoch - offset) % dataIv == 0 && lastPublishedDataEpoch[i] != epoch) {
+      lastPublishedDataEpoch[i] = epoch;
       publishElcData(i);
     }
-
-    // elc_wh: fires once per minute, at slotSec only.
-    if (sec == slotSec && lastPublishedWhSec[i] != sec) {
-      lastPublishedWhSec[i] = sec;
+    if ((epoch - offset) % whIv == 0 && lastPublishedWhEpoch[i] != epoch) {
+      lastPublishedWhEpoch[i] = epoch;
       publishElcWh(i);
     }
   }
@@ -3031,6 +3082,22 @@ static void handleModbusPage() {
     "r3Sa:16418,r3Sb:16420,r3Sc:16422,r3St:16424,r3Pfa:16426,r3Pfb:16428,r3Pfc:16430,r3Pft:16432,r3Kwh:16436,r3Hz:16434};"
   "let dirty={};"
   "function eh(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+  // Renders a Jam/Menit/Detik triplet for one publish-interval setting.
+  // totalSec (0 = use built-in default) is decomposed into H/M/S for
+  // display; hmsToSec(id) recombines them back into seconds before saving.
+  "function hmsField(id,label,totalSec,defSec){"
+    "const t=(totalSec&&totalSec>0)?totalSec:defSec;"
+    "const h=Math.floor(t/3600),m=Math.floor((t%3600)/60),s=t%60;"
+    "return '<label>'+label+'</label><div style=\"display:flex;gap:6px;align-items:center\">'"
+      "+'<input type=number id='+id+'_h min=0 max=23 value='+h+' style=\"width:60px\"><span style=\"font-size:12px\">jam</span>'"
+      "+'<input type=number id='+id+'_m min=0 max=59 value='+m+' style=\"width:60px\"><span style=\"font-size:12px\">menit</span>'"
+      "+'<input type=number id='+id+'_s min=0 max=59 value='+s+' style=\"width:60px\"><span style=\"font-size:12px\">detik</span>'"
+      "+'</div>';"
+  "}"
+  "function hmsToSec(id){"
+    "const h=gv(id+'_h',0),m=gv(id+'_m',0),s=gv(id+'_s',0);"
+    "return h*3600+m*60+s;"
+  "}"
   "function row(label,val,unit,na){"
     "return '<div class=mv><div class=ml>'+label+'</div>'"
     "+'<div class=\"mn'+(na?' na':'')+'\">'+val+'</div>'"
@@ -3054,6 +3121,29 @@ static void handleModbusPage() {
       "+'</div>'"
       "+'<div style=\"font-size:11px;color:#64748b\">Preset mengisi alamat register standar (FC03, FP32/INT32, 0-based). Cek dulu dengan Ping sebelum simpan.</div>'"
       "+regGridHtml(i)+'</details>';"
+    "let rh='';"
+    "const paramFieldsHtml=(fields,note)=>'<div style=\"font-size:11px;color:#64748b;margin:6px 0\">'+note+'</div>'"
+      "+'<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:6px 12px\">'"
+      "+fields.reduce((acc,v,idx,arr)=>{"
+        "if(idx%2)return acc;"
+        "return acc+'<div><label>'+arr[idx+1]+'</label><div style=\"display:flex;gap:6px\">'"
+          "+'<input type=number id=par'+v+i+' min=0 max=65535 style=\"flex:1\">'"
+          "+'<button class=\"btn btn-sm\" type=button onclick=\"paramRead('+i+',\\''+v+'\\')\">Baca</button>'"
+          "+'<button class=\"btn btn-sm\" type=button onclick=\"paramWrite('+i+',\\''+v+'\\')\">Tulis</button>'"
+          "+'</div></div>';"
+      "},'')"
+      "+'</div><div id=parMsg'+i+' style=\"margin-top:8px;font-size:12px\"></div>';"
+    "if(mt==1||mt==2){"
+      "rh='<details class=adv id=advPar'+i+'><summary>Renata AX9L &mdash; CT/PT Ratio</summary>'"
+        "+paramFieldsHtml(['pt1','PT1 (0.1kV)','pt2','PT2 (0.1V)','ct1','CT1 (1A)','ct2','CT2 (0.1A)'],"
+          "'Baca/tulis langsung ke meter (bukan disimpan di device ini). Slave ID komunikasi TIDAK diubah di sini &mdash; hanya rasio trafo.')"
+        "+'</details>';"
+    "}else{"
+      "rh='<details class=adv id=advPar'+i+'><summary>Schneider PM2xxx &mdash; CT Ratio</summary>'"
+        "+paramFieldsHtml(['ctp','CT Primary (A)','cts','CT Secondary (A)'],"
+          "'Baca/tulis langsung ke meter (bukan disimpan di device ini). Slave ID/baud/parity komunikasi TIDAK diubah di sini &mdash; hanya rasio trafo arus.')"
+        "+'</details>';"
+    "}"
     "return '<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:0 16px;margin-top:8px\">'"
       "+'<div class=toggle><input type=checkbox id=en'+i+(en?' checked':'')+'><span>Aktifkan Slot</span></div>'"
       "+'<div><label>Label</label><input type=text id=lbl'+i+' maxlength=15 value=\"'+lbl+'\"></div>'"
@@ -3070,10 +3160,32 @@ static void handleModbusPage() {
       "+'<div><label>MQTT Base Topic</label><input type=text id=tp'+i+' maxlength=39 placeholder=\"trofis/enms/demo-sems\" value=\"'+eh(s.tp||'')+'\"></div>'"
       "+'<div><label>MQTT Suffix (id meter)</label><input type=text id=tsx'+i+' maxlength=15 placeholder=\"slave_1\" value=\"'+eh(s.tsx||'')+'\"></div>'"
       "+'<div style=\"grid-column:1/3;font-size:11px;color:#64748b\">Publish ke: <code>&lt;topic&gt;/elc_data/&lt;suffix&gt;</code> dan <code>&lt;topic&gt;/elc_wh/&lt;suffix&gt;</code></div>'"
+      "+'<div style=\"grid-column:1/3\">'+hmsField('di'+i,'Interval elc_data (real-time)',s.di,20)+'</div>'"
+      "+'<div style=\"grid-column:1/3\">'+hmsField('wi'+i,'Interval elc_wh (energi)',s.wi,60)+'</div>'"
       "+'</div>'"
-      "+h"
+      "+h+rh"
       "+'<button class=\"btn btn-sm\" style=\"margin-top:10px\" onclick=saveSlot('+i+')>Simpan Slot '+(i+1)+'</button>'"
       "+'<span id=msg'+i+' style=\"margin-left:8px;font-size:12px\"></span>';}"
+  "async function paramRead(i,key){"
+    "const msg=document.getElementById('parMsg'+i);msg.className='';msg.textContent='Membaca...';"
+    "try{"
+      "const r=await fetch('/api/modbus/param?slot='+i+'&key='+key).then(x=>x.json());"
+      "if(r.ok){document.getElementById('par'+key+i).value=r.value;msg.className='ok';msg.textContent=key+' = '+r.value+' ('+r.addr+')';}"
+      "else{msg.className='err';msg.textContent='Gagal baca: '+(r.error||'unknown');}"
+    "}catch(e){msg.className='err';msg.textContent='Error: '+e;}}"
+  "async function paramWrite(i,key){"
+    "const msg=document.getElementById('parMsg'+i);"
+    "const val=parseInt(document.getElementById('par'+key+i).value);"
+    "if(isNaN(val)){msg.className='err';msg.textContent='Isi nilai dulu sebelum menulis.';return;}"
+    "if(!confirm('Tulis '+key+' = '+val+' ke meter slot '+(i+1)+'?'))return;"
+    "msg.className='';msg.textContent='Menulis...';"
+    "try{"
+      "const r=await fetch('/api/modbus/param',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({slot:i,key:key,value:val})}).then(x=>x.json());"
+      "if(r.ok&&r.matches){msg.className='ok';msg.textContent='Tersimpan di meter: '+key+' = '+r.confirmed;}"
+      "else if(r.ok){msg.className='err';msg.textContent='Ditulis tapi nilai konfirmasi beda: tertulis '+r.written+', terbaca '+r.confirmed;}"
+      "else{msg.className='err';msg.textContent='Gagal tulis: '+(r.error||'unknown');}"
+    "}catch(e){msg.className='err';msg.textContent='Error: '+e;}}"
   "const regFields1=[['r1V','V A-N'],['r1A','I A'],['r1Kw','P (kW)'],['r1Kvar','Q (kVAR)'],"
     "['r1Kva','S (kVA)'],['r1Pf','PF'],['r1Kwh','kWh'],['r1Hz','Hz']];"
   "const regFields3=[['r3Va','Va'],['r3Vb','Vb'],['r3Vc','Vc'],['r3Vll','Vll'],['r3Vln','Vln'],"
@@ -3113,7 +3225,8 @@ static void handleModbusPage() {
       "slave:gv('sl'+i,1),"
       "poll:gv('pl'+i,1000),phase:document.getElementById('ph'+i+'_3').checked?3:1,"
       "tp:document.getElementById('tp'+i).value.trim().slice(0,39),"
-      "tsx:document.getElementById('tsx'+i).value.trim().slice(0,15)};"
+      "tsx:document.getElementById('tsx'+i).value.trim().slice(0,15),"
+      "di:hmsToSec('di'+i),wi:hmsToSec('wi'+i)};"
     "b['1V']=gv('r1V'+i,3027);b['1A']=gv('r1A'+i,2999);b['1Kw']=gv('r1Kw'+i,3053);"
     "b['1Kvar']=gv('r1Kvar'+i,3061);b['1Kva']=gv('r1Kva'+i,3069);b['1Pf']=gv('r1Pf'+i,3077);"
     "b['1Kwh']=gv('r1Kwh'+i,2675);b['1Hz']=gv('r1Hz'+i,3109);"
@@ -3138,15 +3251,67 @@ static void handleModbusPage() {
       "+'<div class=row><span class=label>Tipe</span><span class=val>'+typeName+'</span></div>'"
       "+'<div class=row><span class=label>Slave ID</span><span class=val>'+s.slave+'</span></div>'"
       "+(s.en?readingsHtml(s):'<p style=\"color:#94a3b8;font-size:12px;margin-top:6px\">Slot nonaktif</p>');"
+    "if(s.en&&(s.type==1||s.type==2)){h+=renataDoHtml(i);}"
     "if(CFG){h+=editFormHtml(i,s);}"
     "h+='</div>';return h;}"
+  // DO switch control — usable in both Normal and Config Mode (unlike the
+  // CT/PT ratio panel, which is Config-Mode-only via editFormHtml).
+  // State lives in renDoState{} (not read back from checkboxes) because the
+  // slot card's innerHTML gets replaced wholesale every 3s poll — a
+  // checkbox's checked attribute would silently reset to unchecked on every
+  // re-render before the async read-back finished, which is the bug this
+  // replaced. Buttons render from renDoState so the displayed ON/OFF badge
+  // survives re-renders once loaded, and only re-fetches from the meter
+  // once per slot (not every poll — avoids extra RS485 traffic).
+  "let renDoState={};"
+  "function renDoBtn(i,bit,label){"
+    "const st=renDoState[i];"
+    "const known=st!==undefined;"
+    "const on=known&&!!(st&(1<<bit));"
+    "return '<span style=\"display:flex;align-items:center;gap:6px\">'"
+      "+'<span class=\"badge '+(known?(on?'up':'down'):'')+'\">'+label+': '+(known?(on?'ON':'OFF'):'...')+'</span>'"
+      "+'<button class=\"btn btn-sm\" type=button onclick=\"renataDoSet('+i+','+bit+',true)\">ON</button>'"
+      "+'<button class=\"btn btn-sm btn-ghost\" type=button onclick=\"renataDoSet('+i+','+bit+',false)\">OFF</button>'"
+      "+'</span>';"
+  "}"
+  "function renataDoHtml(i){"
+    "return '<div class=row style=\"margin-top:6px;flex-wrap:wrap;gap:10px\"><span class=label>DO Switch</span>'"
+      "+'<span style=\"display:flex;gap:16px;flex-wrap:wrap\">'+renDoBtn(i,0,'DO1')+renDoBtn(i,1,'DO2')+'</span></div>'"
+      "+'<div id=renDoMsg'+i+' style=\"font-size:11px;color:#94a3b8\"></div>';}"
+  "async function renataDoLoad(i){"
+    "try{"
+      "const r=await fetch('/api/modbus/param?slot='+i+'&key=do').then(x=>x.json());"
+      "if(r.ok){renDoState[i]=r.value;const card=document.getElementById('slotCard'+i);if(card)card.outerHTML=slotCardHtml(lastSlots[i]);}"
+    "}catch(e){}}"
+  "async function renataDoSet(i,bit,on){"
+    "const msg=document.getElementById('renDoMsg'+i);"
+    "try{"
+      "let val=renDoState[i]||0;"
+      "val=on?(val|(1<<bit)):(val&~(1<<bit));"
+      "if(msg)msg.textContent='Menulis...';"
+      "const r=await fetch('/api/modbus/param',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({slot:i,key:'do',value:val})}).then(x=>x.json());"
+      "if(r.ok&&r.matches){"
+        "renDoState[i]=r.confirmed;"
+        "const card=document.getElementById('slotCard'+i);if(card)card.outerHTML=slotCardHtml(lastSlots[i]);"
+        "const m2=document.getElementById('renDoMsg'+i);if(m2)m2.textContent='Tersimpan di meter.';"
+      "}else if(msg){"
+        "msg.textContent='Gagal: '+(r.error||'nilai tidak sesuai konfirmasi');"
+      "}"
+    "}catch(e){if(msg)msg.textContent='Error: '+e;}}"
+  "let doLoaded={};let lastSlots={};"
   "async function load(force){"
     "const d=await fetch('/api/modbus').then(r=>r.json());"
+    "d.slots.forEach(s=>{lastSlots[s.i]=s;});"
     "const cont=document.getElementById('slots');"
     "let anyDirty=false;for(const k in dirty)if(dirty[k])anyDirty=true;"
     "if(!anyDirty||force){"
       "cont.innerHTML=d.slots.map(slotCardHtml).join('');"
       "if(CFG)d.slots.forEach(s=>fillRegs(s.i,s));"
+      // Read the DO switch state from the meter once per slot (not on every
+      // 3s poll — that would add extra RS485 traffic contending with the
+      // regular round-robin read) so the checkboxes reflect reality on load.
+      "d.slots.forEach(s=>{if(s.en&&(s.type==1||s.type==2)&&!doLoaded[s.i]){doLoaded[s.i]=true;renataDoLoad(s.i);}});"
     "}else{"
       // only refresh live readings, leave open edit forms untouched
       "d.slots.forEach(s=>{"
@@ -3155,10 +3320,12 @@ static void handleModbusPage() {
       "});"
     "}}"
   "if(CFG)document.addEventListener('input',e=>{"
-    // Match ANY per-slot field id (config fields en/lbl/mt/sl/bd/pl/ph, plus every
-    // register-map field like r1V0/r3Va1/etc.) so editing a register box also marks
-    // that slot dirty and stops the 3s poll from overwriting it mid-edit.
-    "const m=(e.target.id||'').match(/(\\d)$/)||(e.target.name||'').match(/^ph(\\d)/);"
+    // Match ANY per-slot field id (config fields en/lbl/mt/sl/bd/pl/ph, every
+    // register-map field like r1V0/r3Va1/etc., and HMS interval sub-fields
+    // like di0_h/wi1_s where the slot digit is NOT at the very end) so
+    // editing any of these also marks that slot dirty and stops the 3s poll
+    // from overwriting it mid-edit.
+    "const m=(e.target.id||'').match(/(\\d)(?:_[hms])?$/)||(e.target.name||'').match(/^ph(\\d)/);"
     "if(m)dirty[m[1]]=true;"
   "});"
   // <details> open/close fires 'toggle', not 'input' — without this, just
@@ -3166,7 +3333,7 @@ static void handleModbusPage() {
   // gets clobbered by the next 3s poll's innerHTML rebuild, which snaps the
   // <details> back to its default closed state.
   "if(CFG)document.addEventListener('toggle',e=>{"
-    "const m=(e.target.id||'').match(/^advReg(\\d)/);"
+    "const m=(e.target.id||'').match(/^adv(?:Reg|Par)(\\d)/);"
     "if(m)dirty[m[1]]=true;"
   "},true);"
   "async function doPing(){"
@@ -3214,6 +3381,108 @@ static void handleModbusPingApi() {
   server.send(200, "application/json", body);
 }
 
+// Per-meter-type config parameters this firmware is willing to read/write —
+// CT/PT ratio and (Renata only) DO switch control. Every entry here is
+// explicitly listed as R/W in the respective meter's official register
+// documentation, and none of them affect communication (Modbus
+// address/baud/parity are never touched by this firmware).
+//
+// Renata AX9L (meterType 1/2): manual section IX "System setting parameter
+// list" — single "short" registers, FC06.
+// Schneider PM2xxx family (meterType 0): "Public_EM6400_PM2xxx PMC Register
+// List" — CT Primary/Secondary at human registers 2030/2031 (Power System
+// Configuration 2016 also RWC but not exposed here — changing wiring config
+// is not a "safe" write, it can invalidate the whole register map). Register
+// numbers in that list are 1-based; this firmware's convention throughout is
+// zero-based addressing (register_number - 1), matching r3Va=3027 for human
+// register 3028 elsewhere in this file — so 2030/2031 become 2029/2030 here.
+// Both are INT16U, unit Ampere, FC06.
+struct MeterParam { const char* key; uint16_t addr; };
+static const MeterParam kRenataParams[] = {
+  {"pt1", 0x4801},  // Voltage ratio PT1, unit 0.1kV
+  {"pt2", 0x4802},  // Voltage ratio PT2, unit 0.1V
+  {"ct1", 0x4803},  // Current ratio CT1, unit 1A
+  {"ct2", 0x4804},  // Current ratio CT2, unit 0.1A
+  {"do",  0x480d},  // Remote/DO switch control (Table 6: bit0=DO1, bit1=DO2)
+};
+static constexpr uint8_t kRenataParamCount = sizeof(kRenataParams) / sizeof(kRenataParams[0]);
+
+static const MeterParam kSchneiderParams[] = {
+  {"ctp", 2029},  // CT Primary (human reg 2030), unit A
+  {"cts", 2030},  // CT Secondary (human reg 2031), unit A
+};
+static constexpr uint8_t kSchneiderParamCount = sizeof(kSchneiderParams) / sizeof(kSchneiderParams[0]);
+
+// Resolves a param key to a register address for the given slot's
+// meterType. Returns -1 if the key doesn't exist for that meter type.
+static int32_t resolveParamAddr(uint8_t meterType, const String& key) {
+  if (meterType == 1 || meterType == 2) {
+    for (uint8_t i = 0; i < kRenataParamCount; i++)
+      if (key == kRenataParams[i].key) return kRenataParams[i].addr;
+  } else {
+    for (uint8_t i = 0; i < kSchneiderParamCount; i++)
+      if (key == kSchneiderParams[i].key) return kSchneiderParams[i].addr;
+  }
+  return -1;
+}
+
+// GET /api/modbus/param?slot=N&key=ct1 — read one parameter's current
+// value straight from the meter (not cached; always a live Modbus read).
+static void handleMeterParamGet() {
+  uint8_t slotIdx = server.hasArg("slot") ? (uint8_t)server.arg("slot").toInt() : 0;
+  if (slotIdx >= kMaxMeterSlots) slotIdx = 0;
+  String key = server.arg("key");
+
+  int32_t addr = resolveParamAddr(meterSlots[slotIdx].meterType, key);
+  if (addr < 0) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"unknown_key\"}"); return; }
+
+  uint8_t slave = meterSlots[slotIdx].slaveId;
+  uint8_t raw[2];
+  if (!modbusReadRegsBlock(slave, (uint16_t)addr, 1, raw, sizeof(raw))) {
+    server.send(200, "application/json", "{\"ok\":false,\"error\":\"Timeout atau CRC gagal saat membaca dari meter\"}");
+    return;
+  }
+  uint16_t value = ((uint16_t)raw[0] << 8) | raw[1];
+  String body = "{\"ok\":true,\"key\":\""; body += key;
+  body += "\",\"addr\":\"0x"; body += String(addr, HEX);
+  body += "\",\"value\":"; body += value; body += "}";
+  server.send(200, "application/json", body);
+}
+
+// POST /api/modbus/param — body {"slot":N,"key":"ct1","value":100}
+// Writes one parameter via FC06, then reads it back to confirm the meter
+// actually accepted the value before reporting success.
+static void handleMeterParamSet() {
+  String body = server.arg("plain");
+  uint8_t slotIdx = (uint8_t)jsonInt(body, "slot", 0);
+  if (slotIdx >= kMaxMeterSlots) slotIdx = 0;
+  String key = jsonExtract(body, "key");
+  uint16_t value = (uint16_t)jsonInt(body, "value", 0);
+
+  int32_t addr = resolveParamAddr(meterSlots[slotIdx].meterType, key);
+  if (addr < 0) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"unknown_key\"}"); return; }
+
+  uint8_t slave = meterSlots[slotIdx].slaveId;
+  if (!modbusWriteSingleReg(slave, (uint16_t)addr, value)) {
+    server.send(200, "application/json", "{\"ok\":false,\"error\":\"Timeout atau tidak ada respons saat menulis ke meter\"}");
+    return;
+  }
+
+  // Read back to confirm — a meter can ACK the frame but reject an
+  // out-of-range value internally without raising a Modbus exception.
+  delay(15);
+  uint8_t raw[2];
+  bool readOk = modbusReadRegsBlock(slave, (uint16_t)addr, 1, raw, sizeof(raw));
+  uint16_t confirmed = readOk ? (((uint16_t)raw[0] << 8) | raw[1]) : 0;
+
+  String resp = "{\"ok\":true,\"key\":\""; resp += key;
+  resp += "\",\"written\":"; resp += value;
+  resp += ",\"confirmed\":"; resp += readOk ? String(confirmed) : String("null");
+  resp += ",\"matches\":"; resp += (readOk && confirmed == value) ? "true" : "false";
+  resp += "}";
+  server.send(200, "application/json", resp);
+}
+
 // Appends one slot's summary object to body: enabled/type/label/online/key
 // readings. Used by handleModbusApi() to cover all 4 slots.
 static void appendSlotSummary(String& body, uint8_t i) {
@@ -3227,21 +3496,25 @@ static void appendSlotSummary(String& body, uint8_t i) {
   String tsEsc = c.mqttSuffix;
   tsEsc.replace("\\", "\\\\");
   tsEsc.replace("\"", "\\\"");
-  char buf[360];
+  char buf[420];
   if (c.phase == 1) {
     snprintf(buf, sizeof(buf),
       "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"poll\":%lu,\"phase\":1,\"tp\":\"%s\",\"tsx\":\"%s\""
+      ",\"di\":%lu,\"wi\":%lu"
       ",\"online\":%s,\"valid\":%s"
       ",\"v\":%.1f,\"a\":%.3f,\"ptot\":%.3f,\"pftot\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
       i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.pollMs, tpEsc.c_str(), tsEsc.c_str(),
+      c.dataIntervalSec, c.whIntervalSec,
       r.online ? "true":"false", r.valid ? "true":"false",
       r.va, r.ia, r.ptot, r.pftot, r.kwh, r.hz);
   } else {
     snprintf(buf, sizeof(buf),
       "{\"i\":%u,\"en\":%s,\"type\":%u,\"label\":\"%s\",\"slave\":%u,\"poll\":%lu,\"phase\":3,\"tp\":\"%s\",\"tsx\":\"%s\""
+      ",\"di\":%lu,\"wi\":%lu"
       ",\"online\":%s,\"valid\":%s"
       ",\"va\":%.1f,\"vb\":%.1f,\"vc\":%.1f,\"iavg\":%.3f,\"ptot\":%.3f,\"pftot\":%.3f,\"kwh\":%.3f,\"hz\":%.2f}",
       i, c.enabled ? "true":"false", c.meterType, c.label, c.slaveId, c.pollMs, tpEsc.c_str(), tsEsc.c_str(),
+      c.dataIntervalSec, c.whIntervalSec,
       r.online ? "true":"false", r.valid ? "true":"false",
       r.va, r.vb, r.vc, r.iavg, r.ptot, r.pftot, r.kwh, r.hz);
   }
@@ -3369,6 +3642,10 @@ static void handleModbusSave() {
   snprintf(cfg0.mqttTopic, sizeof(cfg0.mqttTopic), "%s", tp.c_str());
   String tsx = jsonExtract(body, "tsx");
   snprintf(cfg0.mqttSuffix, sizeof(cfg0.mqttSuffix), "%s", tsx.c_str());
+  // MQTT publish interval, in total seconds (combined from the web UI's H/M/S
+  // fields before sending). 0 = use built-in default (see publishMeter()).
+  cfg0.dataIntervalSec = (uint32_t)jsonInt(body, "di", 0);
+  cfg0.whIntervalSec   = (uint32_t)jsonInt(body, "wi", 0);
   // 1-phase
   cfg0.r1V     = (uint16_t)jsonInt(body, "1V",    3027);
   cfg0.r1A     = (uint16_t)jsonInt(body, "1A",    2999);
@@ -3830,6 +4107,8 @@ static void startWebServer() {
   server.on("/api/modbus",      HTTP_GET,  handleModbusApi);
   server.on("/api/modbus/save", HTTP_POST, handleModbusSave);
   server.on("/api/modbus/ping", HTTP_GET,  handleModbusPingApi);
+  server.on("/api/modbus/param", HTTP_GET,  handleMeterParamGet);
+  server.on("/api/modbus/param", HTTP_POST, handleMeterParamSet);
   server.on("/api/bus/save",    HTTP_POST, handleBusSave);
   server.on("/api/scan",        HTTP_POST, handleScanStart);
   server.on("/api/scan/result", HTTP_GET,  handleScanResult);

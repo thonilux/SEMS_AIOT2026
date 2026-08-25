@@ -2439,8 +2439,8 @@ static String getNav() {
   nav += "<a href=/relay>&#128268; Relay</a>";
   if (configMode) {
     nav += "<a href=/system>&#9881; System</a>";
+    nav += "<a href=/update>&#128229; OTA</a>";
   }
-  nav += "<a href=/update>&#128229; OTA</a>";
   if (configMode) {
     nav += "<a href='#' onclick='if(confirm(\"Reboot device ke Normal Mode?\"))fetch(\"/api/reboot\",{method:\"POST\"})' style='background:#fee2e2;color:#b91c1c;margin-left:auto'>&#8635; Reboot (Normal Mode)</a>";
   }
@@ -2546,11 +2546,26 @@ static void handleRoot() {
             "<a class='btn btn-sm' href=/modbus style='text-decoration:none'>&#128268; Modbus</a> "
             "<a class='btn btn-sm' href=/relay style='text-decoration:none'>&#9889; Relay</a></div>");
 
-  html += F("<div class=card><div class=card-title>Sistem</div>"
-            "<p style='font-size:13px;color:#64748b;margin-bottom:8px'>Status perangkat, timezone, dan OTA update dipindah ke halaman System.</p>"
-            "<a class='btn btn-sm' href=/system style='text-decoration:none'>&#9881; Buka Halaman System</a></div>");
+  html += F("<div class=card><div class=card-title>Sistem</div>");
+  if (!configMode) {
+    html += F("<button class='btn btn-sm btn-danger' id=btnCfg type=button>&#128268; Masuk Config Mode (AP)</button>");
+  } else {
+    html += F("<a class='btn btn-sm' href=/system style='text-decoration:none'>&#9881; Buka Halaman System</a>");
+  }
+  html += F("</div>");
 
-  html += F("</div></body></html>");
+  html += F("<script>"
+    "const btnCfg=document.getElementById('btnCfg');"
+    "if(btnCfg)btnCfg.onclick=async()=>{"
+      "if(!confirm('Masuk Config Mode? Device akan restart dan broadcast AP.'))return;"
+      "await fetch('/api/config-mode',{method:'POST'});"
+      "document.body.innerHTML='<div class=wrap><div class=card><h3>Restarting...</h3><p style=\"font-size:13px;color:#64748b;margin-top:8px\">Device sedang memuat ulang ke Config Mode. Hubungkan ke AP SEMS-SETUP-xx jika menggunakan WiFi.</p></div></div>';"
+      "setTimeout(async function poll(){"
+        "try{let r=await fetch('/api/network');if(r.ok){location.href='/network';return;}}catch(e){}"
+        "setTimeout(poll,1500);"
+      "},4000);"
+    "};"
+    "</script></div></body></html>");
 
   server.send(200, "text/html", html);
 }
@@ -2839,8 +2854,8 @@ static void handleMqttPage() {
     // Normal Mode: tampilkan banner info bahwa config hanya bisa di config mode
     html += F("<div class='card' style='background:#fee2e2;border:1px solid #fca5a5;padding:12px;margin-bottom:12px;'>"
               "<div style='font-weight:600;color:#991b1b;font-size:14px;margin-bottom:4px;'>Normal Mode Aktif</div>"
-              "<div style='font-size:12px;color:#7f1d1d;margin-bottom:8px;'>Konfigurasi MQTT hanya dapat diubah di Config Mode.</div>"
-              "<button class='btn btn-sm btn-danger' type=button onclick='goToConfigMode()'>&#128268; Masuk Config Mode</button>"
+              "<div style='font-size:12px;color:#7f1d1d;margin-bottom:8px;'>Konfigurasi MQTT hanya dapat diubah di Config Mode. Buka tab Network untuk masuk Config Mode.</div>"
+              "<button class='btn btn-sm btn-ghost' style='cursor:not-allowed;opacity:0.6' disabled type=button>&#128268; Masuk Config Mode</button>"
               "</div>"
               "<div class=card><div class=card-title>Status MQTT</div><div id=status>Loading...</div></div>"
               "<script>"
@@ -3063,9 +3078,9 @@ static void handleModbusPage() {
               "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px'>"
               "<div>"
                 "<div style='font-weight:600;color:#991b1b;font-size:13px'>Normal Mode — Konfigurasi terkunci</div>"
-                "<div style='font-size:11px;color:#7f1d1d'>Masuk Config Mode untuk ubah konfigurasi slot meter</div>"
+                "<div style='font-size:11px;color:#7f1d1d'>Masuk Config Mode untuk ubah konfigurasi slot meter (buka tab Network)</div>"
               "</div>"
-              "<button class='btn btn-sm btn-danger' type=button onclick='goToConfigMode()'>Config Mode</button>"
+              "<button class='btn btn-sm btn-ghost' style='cursor:not-allowed;opacity:0.6' disabled type=button>Config Mode</button>"
               "</div>");
   } else {
     html += F("<div class='card' style='background:#fef9c3;border:1px solid #fde047;padding:12px;margin-bottom:12px;'>"
@@ -3869,6 +3884,14 @@ static const char kUpdateHtml[] PROGMEM =
   "</div></body></html>";
 
 static void handleUpdateGet() {
+  if (!configMode) {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html",
+      "<!doctype html><html><body style='font-family:system-ui,sans-serif;padding:24px'>"
+      "<p>OTA Update hanya tersedia di Config Mode.</p>"
+      "<p><a href=/network>&larr; Ke Halaman Network</a></p></body></html>");
+    return;
+  }
   oledShow("OTA Mode", "Awaiting file...", "http://sems.local/update", 30000);
   server.sendHeader("Connection", "close");
   server.send(200, "text/html", FPSTR(kUpdateHtml));

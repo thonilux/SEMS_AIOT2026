@@ -24,3 +24,4 @@ __pycache__/
 *.bak
 firmware/src/main copy*.cpp
 firmware/src/old.bak
+docs/*.docx

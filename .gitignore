@@ -12,5 +12,15 @@ firmware/pio-core/
 
 # Editor and OS noise
 .vscode/
+.claude/
 Thumbs.db
 Desktop.ini
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local scratch / backups
+*.bak
+firmware/src/main copy*.cpp
+firmware/src/old.bak
